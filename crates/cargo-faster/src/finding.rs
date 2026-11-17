@@ -114,6 +114,11 @@ pub struct Section {
     pub details: Vec<String>,
     /// What to do about it.
     pub findings: Vec<Finding>,
+    /// The state of the moment that colors the numbers (a busy machine),
+    /// rather than something to fix in the project: shown above the
+    /// summary, and never counted by the summary, `== next` or `--fail-on`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<Finding>,
     /// Data specific to the check, for `--json` consumers.
     #[serde(skip_serializing_if = "serde_json::Value::is_null")]
     pub data: serde_json::Value,
@@ -180,7 +185,15 @@ impl Report {
         serde_json::to_string_pretty(&doc).unwrap_or_default() + "\n"
     }
 
-    /// Every finding across sections, most severe first.
+    /// Every condition across sections, most severe first.
+    #[must_use]
+    pub fn conditions(&self) -> Vec<&Finding> {
+        let mut all: Vec<&Finding> = self.sections.iter().flat_map(|s| &s.conditions).collect();
+        all.sort_by_key(|f| core::cmp::Reverse(f.severity));
+        all
+    }
+
+    /// Every finding across sections, most severe first (not conditions).
     #[must_use]
     pub fn findings(&self) -> Vec<&Finding> {
         let mut all: Vec<&Finding> = self.sections.iter().flat_map(|s| &s.findings).collect();
@@ -214,6 +227,10 @@ impl Report {
                     let _ = writeln!(out, "  {line}");
                 }
             }
+            for f in &section.conditions {
+                let label = paint("35", "condition");
+                render_finding(&mut out, &label, &paint("1", &f.title), f);
+            }
             if section.findings.is_empty() {
                 let _ = writeln!(out, "\n  {}", paint("32", "nothing to fix here"));
             }
@@ -224,15 +241,7 @@ impl Report {
                     Severity::Low => paint("36", "low"),
                     Severity::Info => paint("2", "info"),
                 };
-                let _ = writeln!(out, "\n  [{sev}] {}", paint("1", &f.title));
-                for (label, text) in [("saw", &f.saw), ("why", &f.why), ("fix", &f.fix)] {
-                    if text.is_empty() {
-                        continue;
-                    }
-                    let body = crate::fmt::wrap(text, 92, "         ");
-                    let _ = write!(out, "    {label}: {}", body.trim_start());
-                }
-                let _ = writeln!(out, "    more: {}", f.guide);
+                render_finding(&mut out, &sev, &paint("1", &f.title), f);
             }
         }
         if !self.skipped.is_empty() {
@@ -243,6 +252,17 @@ impl Report {
         }
         let all = self.findings();
         let actionable = all.iter().filter(|f| f.severity > Severity::Info).count();
+        let conditions = self.conditions();
+        if self.sections.len() > 1 && !conditions.is_empty() {
+            let _ = writeln!(
+                out,
+                "\n{}",
+                paint("1", "== conditions (results may be noisy)")
+            );
+            for f in conditions {
+                let _ = writeln!(out, "  {}", f.title);
+            }
+        }
         if self.sections.len() > 1 {
             let _ = writeln!(out, "\n{}", paint("1", "== summary"));
             if actionable == 0 {
@@ -274,6 +294,19 @@ impl Report {
                 .then(|| "cargo faster timings --run".to_owned())
         })
     }
+}
+
+/// One finding or condition: `[label] title`, then saw, why, fix, more.
+fn render_finding(out: &mut String, label: &str, title: &str, f: &Finding) {
+    let _ = writeln!(out, "\n  [{label}] {title}");
+    for (name, text) in [("saw", &f.saw), ("why", &f.why), ("fix", &f.fix)] {
+        if text.is_empty() {
+            continue;
+        }
+        let body = crate::fmt::wrap(text, 92, "         ");
+        let _ = write!(out, "    {name}: {}", body.trim_start());
+    }
+    let _ = writeln!(out, "    more: {}", f.guide);
 }
 
 /// The first backticked `cargo ...` command in `text` that is concrete
@@ -366,6 +399,48 @@ mod tests {
                 env!("CARGO_PKG_VERSION")
             )
         );
+    }
+
+    #[test]
+    fn conditions_stay_out_of_the_summary() {
+        let mut m = Section::new("machine");
+        m.conditions.push(
+            Finding::new(
+                "busy-machine",
+                Severity::High,
+                "The machine is busy",
+                "the-machine",
+            )
+            .fix("Run `cargo faster machine` later."),
+        );
+        let mut d = Section::new("deps");
+        d.extend([Finding::new("x", Severity::Low, "Low thing", "linking")]);
+        let r = Report {
+            workspace: None,
+            sections: vec![m, d],
+            skipped: vec![],
+        };
+        assert_eq!(r.findings().len(), 1);
+        assert_eq!(r.conditions().len(), 1);
+        // Not the next command either: it comes from findings only.
+        assert_eq!(
+            r.next_command().as_deref(),
+            Some("cargo faster timings --run")
+        );
+        let text = r.render_text(false);
+        assert!(
+            text.contains("\n  [condition] The machine is busy\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "== conditions (results may be noisy)\n  The machine is busy\n\n== summary\n  [low] Low thing\n"
+            ),
+            "{text}"
+        );
+        let json = serde_json::to_value(&r).unwrap();
+        assert_eq!(json["sections"][0]["conditions"][0]["id"], "busy-machine");
+        assert!(json["sections"][1].get("conditions").is_none());
     }
 
     #[test]
