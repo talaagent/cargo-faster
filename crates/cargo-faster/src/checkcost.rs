@@ -70,12 +70,34 @@ pub fn find_invocation(stderr: &str, crate_name: &str, src: &str) -> Option<Invo
     let needle = format!("--crate-name {crate_name} ");
     stderr
         .lines()
+        .map(strip_ansi)
         .filter(|l| l.contains(&needle) && l.contains(src))
         .find_map(|line| {
             let start = line.find("Running `")? + "Running `".len();
             let end = line.rfind('`')?;
             (end > start).then(|| parse_invocation(&line[start..end]))?
         })
+}
+
+/// Drop terminal colour escapes (`ESC [ ... letter`), in case the user's
+/// config forces colour on.
+fn strip_ansi(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            if chars.next() == Some('[') {
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Parse a command line as cargo prints it: `K=V ... [wrapper] rustc args`.
@@ -213,7 +235,9 @@ pub fn run(ctx: &Context, opts: &Options) -> Result<Run, String> {
         "cargo faster: running `cargo check --workspace -vv` to capture the rustc command for {} ({crate_name})",
         pkg.name
     );
-    let mut args: Vec<String> = ["check", "--workspace", "-vv"].map(String::from).to_vec();
+    let mut args: Vec<String> = ["check", "--workspace", "-vv", "--color", "never"]
+        .map(String::from)
+        .to_vec();
     args.extend(opts.cargo_args.iter().cloned());
     let out = nice_capture(ctx, opts.nice, &cargo_bin(&ctx.env), &args, &root, &[])?;
     let stderr = out.stderr_lossy();
@@ -359,6 +383,12 @@ mod tests {
         );
         assert_eq!(inv.args[..2], ["--crate-name", "app"]);
         assert!(find_invocation(&stderr, "other", "crates/app/src/lib.rs").is_none());
+        // CARGO_TERM_COLOR=always wraps the status word in escapes.
+        let coloured = LINE.replacen("Running", "\u{1b}[1m\u{1b}[92mRunning\u{1b}[0m", 1);
+        assert_eq!(
+            find_invocation(&coloured, "app", "crates/app/src/lib.rs"),
+            Some(inv.clone())
+        );
 
         let args = replay_args(&inv.args, Path::new("/tmp/p"));
         let joined = args.join(" ");

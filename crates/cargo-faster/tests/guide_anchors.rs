@@ -1,6 +1,8 @@
 //! Every finding links to a section of docs/guide.md; check the anchors exist.
 
-use std::collections::BTreeSet;
+extern crate alloc;
+
+use alloc::collections::BTreeSet;
 use std::path::Path;
 
 /// GitHub's heading slug: lowercase, punctuation dropped, spaces to dashes.
