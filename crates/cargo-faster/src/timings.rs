@@ -639,6 +639,24 @@ fn critical_path(t: &Timings) -> Vec<(usize, PathStep)> {
     path
 }
 
+/// The workspace edges on the critical path: `(dependent, dependency,
+/// seconds the dependency took on the path)`, for each step that waited
+/// for a workspace crate it depends on directly.
+#[must_use]
+pub fn path_edges(a: &Analysis, ws: &Workspace) -> Vec<(String, String, Option<f64>)> {
+    let mut seen = alloc::collections::BTreeSet::new();
+    a.critical_path
+        .windows(2)
+        .filter_map(|w| {
+            let (dep, user) = (&w[0].of.krate, &w[1].of.krate);
+            (dep != user
+                && ws.deps.get(user).is_some_and(|d| d.contains(dep))
+                && seen.insert((user.clone(), dep.clone())))
+            .then(|| (user.clone(), dep.clone(), Some(w[0].duration)))
+        })
+        .collect()
+}
+
 /// A section for a report.
 #[must_use]
 pub fn section(a: &Analysis, source: &str) -> Section {
@@ -1038,6 +1056,15 @@ mod tests {
                 .all(|p| p.cache == Some(Outcome::Incr))
         );
         assert!(a.critical_path.last().unwrap().unit.ends_with("\"bin\""));
+        // The fixture's graph has every crate on tala-core only, so the one
+        // workspace edge on the path is the first step.
+        let edges = path_edges(&a, &ws);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(
+            (edges[0].0.as_str(), edges[0].1.as_str()),
+            ("tala-config", "tala-core")
+        );
+        assert!((edges[0].2.unwrap() - a.critical_path[0].duration).abs() < 1e-9);
         let r = a.rebuilt.as_ref().unwrap();
         assert_eq!(r.roots, ["tala-core"]);
         assert!(r.crates >= 80);

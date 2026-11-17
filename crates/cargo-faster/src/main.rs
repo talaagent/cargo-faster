@@ -346,7 +346,9 @@ fn rdeps_section(
         )
         .into());
     }
-    Ok(graph::section(&crates, krate))
+    let mut s = graph::section(&crates, krate);
+    graph::add_edges(m, &crates, krate, &mut s);
+    Ok(s)
 }
 
 fn check_cost_section(ctx: &Context, o: &checkcost::Options) -> Result<Section, Error> {
@@ -395,9 +397,10 @@ fn full_report(ctx: &Context, m: &cargo_faster::context::Metadata, report: &mut 
     report
         .sections
         .push(tests::check(ctx, &tests::Inputs::gather(ctx)));
-    report
-        .sections
-        .push(graph::section(&graph::gather(m), None));
+    let crates = graph::gather(m);
+    let mut rdeps = graph::section(&crates, None);
+    graph::add_edges(m, &crates, None, &mut rdeps);
+    report.sections.push(rdeps);
     match timings_section(ctx, None, None, None) {
         Ok(s) => report.sections.push(s),
         Err(e) => report.skipped.push(Fact {
@@ -702,6 +705,13 @@ fn timings_file_section(
             "cache",
             "kache has records for this period but none matched the report's units",
         );
+    }
+    if let (Some(m), Some(ws)) = (ctx.and_then(|c| c.metadata.as_ref()), &ws) {
+        let found = graph::edges::gather(m, &timings::path_edges(&a, ws));
+        if let Some(d) = graph::edges::detail(&found, false) {
+            s.details.push(d);
+        }
+        s.extend(graph::edges::findings(&found, 3));
     }
     Ok(s)
 }
