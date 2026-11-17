@@ -14,7 +14,6 @@ $ cargo faster
   [high] The machine is busy: timings will be noisy and slower
   [medium] The target dir filesystem is 94% full
   [medium] 6 heavy crates are built in more than one version
-  [medium] NEXTEST_TEST_THREADS overrides your nextest profile
   [medium] tala-agent has 108449 lines of Rust
   [low] cargo is limited to 16 jobs on 32 CPUs
   [low] Editing tala-spool rebuilds 98 of 183 workspace crates

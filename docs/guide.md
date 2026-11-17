@@ -715,7 +715,7 @@ fail-fast = false
 
 `cargo nextest run --profile ci` picks a profile. Individual tests can declare that they need more than one slot, with `threads-required` in a per-test override, which is useful for tests that themselves use many threads.
 
-One trap: **the `NEXTEST_TEST_THREADS` environment variable takes precedence over the profile's `test-threads`.** If it's set in your shell profile, your CI environment, or a wrapper script, your config file's setting is silently ignored. If your test parallelism doesn't seem to match your configuration, check your environment.
+One trap: **the `NEXTEST_TEST_THREADS` environment variable takes precedence over the profile's `test-threads`.** If it's set in your shell profile, your CI environment, or a wrapper script, your config file's setting is silently ignored. If your test parallelism doesn't seem to match your configuration, check your environment. An explicit `--test-threads` on the command line beats both, so a script that runs a profile can pass it (`cargo nextest run --profile ci --test-threads 8`) to be immune to whatever the environment says; `cargo faster tests` looks for that in `scripts/`, Makefiles, justfiles and CI workflows and grades the variable `info` when every profile that sets `test-threads` is run that way.
 
 ### Test runners that wrap every test
 
@@ -763,6 +763,8 @@ Tests that talk to a real database are often slow for reasons that have nothing 
   ```
 
   Copying a template is a file-level copy, and is usually much faster than replaying migrations. (Postgres requires that nobody else is connected to the template while it's being copied.)
+
+`cargo faster tests` looks for these in your crates' sources, scripts and compose files (`CREATE DATABASE .. TEMPLATE` from a template of your own, `fsync=off` or `synchronous_commit=off`, `/dev/shm` or `tmpfs` next to Postgres) and only suggests the ones it can't find.
 
 ### Fewer test binaries
 

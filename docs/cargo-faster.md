@@ -54,7 +54,6 @@ With no subcommand, `cargo faster` runs every check that's quick and doesn't bui
   [high] The machine is busy: timings will be noisy and slower
   [medium] The target dir filesystem is 94% full
   [medium] 6 heavy crates are built in more than one version
-  [medium] NEXTEST_TEST_THREADS overrides your nextest profile
   [medium] tala-agent has 108449 lines of Rust
   [low] cargo is limited to 16 jobs on 32 CPUs
   [low] Editing tala-spool rebuilds 98 of 183 workspace crates
@@ -343,10 +342,12 @@ Slow tests are often not slow to compile at all. `tests` checks how they're run:
   runner override       scripts/gate:180 ("cargo nextest|$runner_var=$PWD/scripts/test-runner $cargo nextest run ...")
   NEXTEST_TEST_THREADS  4
   database crates       sqlx
+  db tests: template databases  crates/tala-core/src/pg_testing.rs:602
+  db tests: fsync off           crates/tala-core/src/pg_testing.rs:231
+  db tests: tmpfs               crates/tala-core/src/pg_testing.rs:4
 
-  [medium] NEXTEST_TEST_THREADS overrides your nextest profile
   [low] `scripts/kache-test-runner` steps aside under nextest
-  [info] Database-backed tests: make each database cheap
+  [info] NEXTEST_TEST_THREADS=4 sets the threads for plain nextest runs
 ```
 
 A *target runner* wraps every execution of a test binary, and nextest runs every test in its own process, so a runner starts once per test. In the case study, tests that took 0.00 seconds waited 3 to 8 seconds each in the runner, and the runner took about 44% of all test-seconds. `tests` reads the runner: if it's a script that checks `NEXTEST_EXECUTION_MODE` and execs the test directly, it costs a millisecond per test and the finding is `info`; if it doesn't, it's `high` under nextest. It also finds scripts that set `CARGO_TARGET_<TRIPLE>_RUNNER` themselves, like the `scripts/gate` above, whose runner beats the configured one for those runs (here `low`: the gate's runner doesn't step aside).
@@ -354,8 +355,8 @@ A *target runner* wraps every execution of a test binary, and nextest runs every
 Beyond runners, it checks:
 
 - whether you use nextest at all;
-- `NEXTEST_TEST_THREADS` in the environment, which silently beats `test-threads` in your profile;
-- database-backed tests, and how to make each test database cheap: Postgres on tmpfs, and cloning a template database instead of running migrations for every test;
+- `NEXTEST_TEST_THREADS` in the environment, which silently beats `test-threads` in your profile, unless the scripts that run that profile pass `--test-threads` themselves (as `scripts/gate` does here, so it's only `info`);
+- database-backed tests, and how to make each test database cheap: Postgres on tmpfs, and cloning a template database instead of running migrations for every test. It looks for what the workspace already does first (here all three, so there's no finding);
 - many integration test files, each of which is its own binary to link.
 
 See [Test suites](guide.md#test-suites).
