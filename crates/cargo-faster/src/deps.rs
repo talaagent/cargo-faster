@@ -519,7 +519,7 @@ fn test_features_finding(a: &Analysis) -> Option<Finding> {
     Some(
         Finding::new("test-features-in-dependencies", sev, title, "keep-test-features-out-of-normal-builds")
             .saw(format!("{}{more}.", shown.join(", ")))
-            .why("Features are unified across the build, so a test feature enabled from [dependencies] compiles the test helpers (mocks, fakes, fixtures, tokio's test-util) into every normal build of that crate and everything above it, and an edit to a test helper rebuilds libraries instead of only test targets.")
+            .why("Features are unified across the build, so a test feature enabled from [dependencies] compiles the test helpers (mocks, fakes, fixtures, tokio's test-util) into every normal build of that crate and everything above it, and an edit to a test helper rebuilds libraries instead of only test targets. Only builds without tests gain from moving it: release and production builds (`cargo build --release`, `cargo build -p bin`). A `--workspace --all-targets` clippy or build, or `nextest run --workspace`, turns the [dev-dependencies] features on anyway, so the move saves nothing there.")
             .fix(format!("If only tests need it, move the feature to [dev-dependencies] (`dep = {{ workspace = true, features = [\"testing\"] }}` there, plain in [dependencies]); cargo turns it on for test builds only.{ws_fix} If another crate's tests need this crate's helpers, give this crate its own `testing = [\"dep/testing\"]` feature and enable it from that crate's [dev-dependencies]. Tradeoff: `cargo test` and `cargo build` then resolve different feature sets, so switching between them rebuilds the affected crates once each. If the feature is needed at runtime (a mock backend you ship, a `fake` data generator), it isn't test-only: leave it.")),
     )
 }
@@ -793,6 +793,7 @@ mod tests {
             "bridges -> gen [fake], bridges -> provision [testing], core -> config [testing], core -> tokio [test-util]."
         );
         assert!(f.fix.contains("[dev-dependencies]"));
+        assert!(f.why.contains("Only builds without tests gain"));
 
         // Many entries: medium, with the rest counted.
         let many: Vec<TestFeature> = (0..10)
