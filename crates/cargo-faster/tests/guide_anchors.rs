@@ -103,3 +103,64 @@ fn every_finding_links_to_a_guide_section() {
         missing.join("\n")
     );
 }
+
+/// `guide.md#anchor` links (and bare `#anchor` links inside the guide).
+fn doc_links(doc: &str, in_guide: bool) -> Vec<String> {
+    let mut out = Vec::new();
+    for (i, _) in doc.match_indices("](") {
+        let rest = &doc[i + 2..];
+        let Some(end) = rest.find(')') else { continue };
+        let target = &rest[..end];
+        if let Some(a) = target.strip_prefix("guide.md#") {
+            out.push(a.to_owned());
+        } else if let Some(a) = target.strip_prefix('#')
+            && in_guide
+        {
+            out.push(a.to_owned());
+        }
+    }
+    out
+}
+
+#[test]
+fn doc_links_point_at_guide_sections() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let guide = std::fs::read_to_string(root.join("docs/guide.md")).unwrap();
+    let anchors = guide_anchors(&guide);
+    let mut missing = Vec::new();
+    for (file, in_guide) in [
+        ("docs/guide.md", true),
+        ("docs/cargo-faster.md", false),
+        ("README.md", false),
+    ] {
+        let doc = std::fs::read_to_string(root.join(file)).unwrap();
+        for a in doc_links(&doc, in_guide) {
+            if !anchors.contains(&a) {
+                missing.push(format!("{file}: #{a}"));
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "broken guide links:\n{}",
+        missing.join("\n")
+    );
+}
+
+#[test]
+fn skill_has_frontmatter() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let skill =
+        std::fs::read_to_string(root.join("skills/debug-slow-rust-builds/SKILL.md")).unwrap();
+    let front = skill
+        .strip_prefix("---\n")
+        .and_then(|s| s.split_once("\n---\n"))
+        .map(|(f, _)| f)
+        .expect("YAML frontmatter");
+    assert!(front.lines().any(|l| l == "name: debug-slow-rust-builds"));
+    assert!(
+        front
+            .lines()
+            .any(|l| l.starts_with("description: ") && l.contains("Use when"))
+    );
+}
