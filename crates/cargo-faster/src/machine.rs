@@ -152,8 +152,9 @@ const TOP_CPU: usize = 5;
 /// The process names that used the most CPU between two samples of
 /// pid -> (name, ticks), as CPUs (1.0 = one core busy), most first, at
 /// least a tenth of a CPU each. Processes are grouped by name, so 30
-/// `rustc`s show up as one line; a process that started in between counts
-/// from zero.
+/// `rustc`s show up as one line, and kernel threads by their kind
+/// (`kworker/u130:20-events_unbound` is a `kworker`, and renames itself as
+/// it picks up work); a process that started in between counts from zero.
 #[must_use]
 pub fn top_cpu(
     before: &BTreeMap<u32, (String, u64)>,
@@ -162,7 +163,8 @@ pub fn top_cpu(
 ) -> Vec<(String, f64)> {
     let mut by_name: BTreeMap<&str, u64> = BTreeMap::new();
     for (pid, (name, t)) in after {
-        let t0 = before.get(pid).filter(|b| b.0 == *name).map_or(0, |b| b.1);
+        let t0 = before.get(pid).map_or(0, |b| b.1);
+        let name = name.split('/').next().unwrap_or(name);
         *by_name.entry(name).or_default() += t.saturating_sub(t0);
     }
     #[allow(clippy::cast_precision_loss)]
@@ -758,16 +760,21 @@ mod tests {
             (2, "rustc", 10),
             (3, "rustc", 20),
             (4, "bash", 5),
+            (6, "kworker/u130:20-events_unbound", 9000),
+            (7, "kworker/1:0", 9000),
         ]);
         // 50 ticks = half a second: nix-daemon used 8 CPUs, the two rustcs
-        // 1 together, a new cc1plus 2, bash nothing, and pid 2 is now a
-        // different process.
+        // 1 together, a new cc1plus 2, bash nothing, and two kworkers that
+        // renamed themselves 0.5 together.
         let after = snap(&[
             (1, "nix-daemon", 1400),
-            (2, "cc1plus", 100),
+            (2, "rustc", 10),
+            (8, "cc1plus", 100),
             (3, "rustc", 70),
             (4, "bash", 5),
             (5, "rustc", 0),
+            (6, "kworker/u130:20-btrfs-delayed-meta", 9020),
+            (7, "kworker/1:0-mm_percpu_wq", 9005),
         ]);
         let top = top_cpu(&before, &after, 50.0);
         assert_eq!(
@@ -775,7 +782,8 @@ mod tests {
             [
                 ("nix-daemon".into(), 8.0),
                 ("cc1plus".into(), 2.0),
-                ("rustc".into(), 1.0)
+                ("rustc".into(), 1.0),
+                ("kworker".into(), 0.5)
             ]
         );
         let m = Inputs {
@@ -786,7 +794,7 @@ mod tests {
         };
         let s = check(&m);
         assert!(s.conditions[0].saw.ends_with(
-            "Using the most CPU: nix-daemon 8.0 CPUs, cc1plus 2.0 CPUs, rustc 1.0 CPUs."
+            "Using the most CPU: nix-daemon 8.0 CPUs, cc1plus 2.0 CPUs, rustc 1.0 CPUs, kworker 0.5 CPUs."
         ));
         assert!(s.facts.iter().any(|f| f.key == "top cpu"));
     }
