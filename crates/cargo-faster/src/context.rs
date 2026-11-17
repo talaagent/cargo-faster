@@ -103,6 +103,10 @@ pub struct Node {
 /// An edge in the resolved graph.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct NodeDep {
+    /// The name the dependent's code uses for it (its lib name, or the
+    /// rename in `Cargo.toml`).
+    #[serde(default)]
+    pub name: String,
     /// The dependency's package id.
     pub pkg: String,
     /// The edge kinds.

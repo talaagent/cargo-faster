@@ -52,14 +52,14 @@ $ cargo faster check-cost -p tala-agent-bin
 | Command | What it checks |
 |---|---|
 | `cargo faster` | Everything below that doesn't build: a quick overall report |
-| `timings` | A `--timings` report: critical path, crates that serialize the build, long codegen |
+| `timings` | A `--timings` report: critical path, crates that serialize the build, long codegen, edges on the path that are cheap to cut |
 | `check-cost` | Self-profiles one crate: top queries, trait solving by type and by function body, time by module, proc macros |
 | `setup` | Linker, debug info, codegen units, opt-levels, jobs, rustflags |
 | `cache` | sccache or kache hit rates, incremental, cold worktrees |
 | `machine` | Load, other builds, memory, disk, filesystems |
 | `deps` | Heavy features, test features in normal builds, duplicate versions, proc macros, async-trait |
 | `tests` | nextest, target runners, thread limits, database-backed tests |
-| `rdeps` | What rebuilds when a crate changes, and which crates are worth splitting |
+| `rdeps` | What rebuilds when a crate changes, which crates are worth splitting, and dependency edges that use only a few items from a big crate |
 
 Every command takes `--json`. See [Using cargo faster](docs/cargo-faster.md) for details and real output.
 

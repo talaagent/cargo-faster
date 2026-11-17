@@ -8,6 +8,8 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+pub mod edges;
+
 /// A workspace crate and what depends on it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CrateInfo {
@@ -108,7 +110,7 @@ pub fn count_lines(dir: &Path) -> (usize, Vec<(String, usize)>) {
     (modules.iter().map(|m| m.1).sum(), modules)
 }
 
-fn src_dir(p: &Package) -> PathBuf {
+pub(crate) fn src_dir(p: &Package) -> PathBuf {
     let root = p.manifest_path.parent().unwrap_or(Path::new("."));
     let src = root.join("src");
     if src.is_dir() {
@@ -268,6 +270,30 @@ pub fn section(crates: &[CrateInfo], only: Option<&str>) -> Section {
     s.extend(f);
     s.data = serde_json::to_value(&shown).unwrap_or_default();
     s
+}
+
+/// Add the edges into the crates shown that are cheap to cut: every direct
+/// dependent of `only`, or of the big crates whose edits rebuild the most.
+/// Reads the dependents' sources.
+pub fn add_edges(m: &Metadata, crates: &[CrateInfo], only: Option<&str>, s: &mut Section) {
+    let targets: Vec<&str> = match only {
+        Some(o) => crates
+            .iter()
+            .filter(|c| is_named(c, o))
+            .map(|c| c.name.as_str())
+            .collect(),
+        None => crates
+            .iter()
+            .take(15)
+            .filter(|c| c.lines >= edges::CUT_LINES)
+            .map(|c| c.name.as_str())
+            .collect(),
+    };
+    let found = edges::gather(m, &edges::into_crates(m, &targets));
+    if let Some(d) = edges::detail(&found, only.is_some()) {
+        s.details.push(d);
+    }
+    s.extend(edges::findings(&found, if only.is_some() { 5 } else { 3 }));
 }
 
 #[cfg(test)]

@@ -59,6 +59,10 @@ With no subcommand, `cargo faster` runs every check that's quick and doesn't bui
   [low] Editing tala-spool rebuilds 98 of 183 workspace crates
   [low] tala-admin-proto-orgs is 43509 lines, mostly generated code
   [low] tala-admin-proto-personas is 50889 lines, mostly generated code
+  [low] tala-room-ops uses 2 items from tala-config (31k lines)
+    saw: tala-room-ops depends on tala-config (31107 lines) but uses only
+         `tala_config::config::Project`, `tala_config::state::Room`. An edit to tala-config
+         rebuilds 74 workspace crates; without this edge it would rebuild 69.
 ```
 
 It took about three seconds on that workspace. Start here. Then use the subcommands for the parts you care about.
@@ -156,6 +160,7 @@ The timings check also finds:
 - `critical-path-waiting`: steps on the critical path that sat idle after they were ready, or waited for the cache's scheduler;
 - `wrapper-wait`: a lot of time spent waiting for the rustc wrapper's scheduler or for another build compiling the same thing;
 - `edit-rebuilt-many`: an edit that recompiled many workspace crates, and which crates it started from;
+- `cheap-to-cut-edge`: a step on the critical path that waited for a big workspace crate it uses only a few items from (the same check as `rdeps`, with the seconds that crate took on the path);
 - `slow-build`: a slow build that none of the above explains, with what was measured and what to try next.
 
 ### Where a build's time went
@@ -501,14 +506,24 @@ $ cargo faster rdeps tala-core  # one crate
         87  11878  tala-core
         ...
 
+  dependency edges that are cheap to cut
+  items  rebuilds without it  edge
+      2             74 -> 69  tala-room-ops -> tala-config
+
   [medium] tala-agent has 108449 lines of Rust
     saw: tala-agent is 108449 lines; its biggest modules are delegates (14378 lines), agent
          (11366 lines), personas (9094 lines), guests.rs (3243 lines).
   [low] Editing tala-spool rebuilds 98 of 183 workspace crates
   [low] tala-admin-proto-personas is 50889 lines, mostly generated code
+  [low] tala-room-ops uses 2 items from tala-config (31k lines)
+    saw: tala-room-ops depends on tala-config (31107 lines) but uses only
+         `tala_config::config::Project`, `tala_config::state::Room`. An edit to tala-config
+         rebuilds 74 workspace crates; without this edge it would rebuild 69.
 ```
 
 A crate near the bottom of the graph decides the cost of most edits, because every edit to it rebuilds everything above it. A big crate costs you on every edit to it, and can't use more than a few cores. `rdeps` names the biggest modules, which are the candidates to move into crates of their own.
+
+For the crates that rebuild the most, `rdeps` also reads each direct dependent's source and counts the distinct items it uses from the crate (`tala_config::config::Project` and `tala_config::state::Room` are two). When a dependent uses at most 5 items from a crate of 5,000 lines or more, and dropping the edge would spare at least 3 crates on an edit (or the edge holds up the critical path for 2 s or more), it reports a `cheap-to-cut-edge` finding with what an edit rebuilds now and without the edge. Move those items into a small crate lower down and the dependent stops waiting for, and rebuilding with, the big one. `cargo faster rdeps CRATE` lists every dependent of that crate with its item count; `?` means a glob or alias hid what's used. See [Cutting a dependency edge](guide.md#cutting-a-dependency-edge).
 
 Before you split a crate, though, run `check-cost` on it. The crate in the case study looked too big, and splitting it would not have fixed anything. See [The shape of your workspace](guide.md#the-shape-of-your-workspace).
 
