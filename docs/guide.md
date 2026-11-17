@@ -535,7 +535,7 @@ You can't always fix duplicates, since you don't control your dependencies' requ
 
 **Count the proc macros.** Every proc macro crate is compiled for the host and blocks pipelining for its dependents. Several crates with small optional `derive` features each pulling in `syn` can add up.
 
-`cargo faster deps` reports heavy features, duplicate versions, and proc macros in your graph.
+`cargo faster deps` reports heavy features, duplicate versions, and proc macros in your graph. Duplicate versions are listed in semver order, oldest first, since the oldest copy is usually the one to chase.
 
 ### Keep test features out of normal builds
 
