@@ -52,7 +52,6 @@ With no subcommand, `cargo faster` runs every check that's quick and doesn't bui
 ```text
 == summary
   [high] The machine is busy: timings will be noisy and slower
-  [high] Every test process runs under `scripts/kache-test-runner`
   [medium] The target dir filesystem is 94% full
   [medium] 6 heavy crates are built in more than one version
   [medium] NEXTEST_TEST_THREADS overrides your nextest profile
@@ -312,7 +311,12 @@ A load average of 74 on 32 cores means every number on this page could be twice 
     saw: base64 0.21.7 + 0.22.1 + 0.23.1, itertools 0.14.0 + 0.15.0, rand 0.8.8 + 0.9.5 +
          0.10.3, syn 2.0.119 + 3.0.7, thiserror-impl 1.0.69 + 2.0.21, windows-sys 0.52.0 +
          0.61.2. 32 crates are duplicated in total.
-  [info] 50 workspace crates use async-trait
+  [medium] #[async_trait] is used 62 times in 9 workspace crates
+    saw: 62 #[async_trait] attributes: tala-agent 29, tala-session-engine 9, tala-github-api
+         8, tala-delegate-runtime 5, tala-session-worker 4 and 4 more. They define 7 traits,
+         7 held as `dyn` (`CodexApi`, `GithubHttp`, `Hooks`, `ImageApi`, `OwnerGh`). 23 are
+         impls of traits defined outside the workspace, which stay until upstream drops the
+         macro.
 ```
 
 It finds:
@@ -320,7 +324,8 @@ It finds:
 - `tokio` with the `full` feature asked for by a workspace crate;
 - `syn` with `full`, and more than one major version of `syn`;
 - duplicate versions of heavy crates;
-- proc macros, and how many crates use `async-trait`.
+- proc macros;
+- `#[async_trait]` attributes counted in the workspace's sources (not its manifests), the traits they define, and how many of those are held as `dyn`. Ten or more uses is `[medium]`; `check-cost` then tells you what they actually cost.
 
 Features are unified across the whole graph. In this workspace, `full` shows up in tokio's features even though no workspace crate asks for it: a dependency does. `cargo tree -e features -i tokio` tells you which one.
 
@@ -335,17 +340,18 @@ Slow tests are often not slow to compile at all. `tests` checks how they're run:
   nextest               installed, .config/nextest.toml present
   test binaries         198 (6 integration test files)
   target runner         scripts/kache-test-runner (target.x86_64-unknown-linux-gnu.runner in .cargo/config.toml)
+  runner override       scripts/gate:180 ("cargo nextest|$runner_var=$PWD/scripts/test-runner $cargo nextest run ...")
   NEXTEST_TEST_THREADS  4
   database crates       sqlx
 
-  [high] Every test process runs under `scripts/kache-test-runner`
   [medium] NEXTEST_TEST_THREADS overrides your nextest profile
+  [low] `scripts/kache-test-runner` steps aside under nextest
   [info] Database-backed tests: make each database cheap
 ```
 
-The first finding is the expensive one. A *target runner* wraps every execution of a test binary, and nextest runs every test in its own process. So the runner starts once per test. In this workspace, tests that took 0.00 seconds waited 3 to 8 seconds each in the runner, and the runner took about 44% of all test-seconds.
+A *target runner* wraps every execution of a test binary, and nextest runs every test in its own process, so a runner starts once per test. In the case study, tests that took 0.00 seconds waited 3 to 8 seconds each in the runner, and the runner took about 44% of all test-seconds. `tests` reads the runner: if it's a script that checks `NEXTEST_EXECUTION_MODE` and execs the test directly, it costs a millisecond per test and the finding is `info`; if it doesn't, it's `high` under nextest. It also finds scripts that set `CARGO_TARGET_<TRIPLE>_RUNNER` themselves, like the `scripts/gate` above, whose runner beats the configured one for those runs (here `low`: the gate's runner doesn't step aside).
 
-It also checks:
+Beyond runners, it checks:
 
 - whether you use nextest at all;
 - `NEXTEST_TEST_THREADS` in the environment, which silently beats `test-threads` in your profile;

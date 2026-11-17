@@ -12,7 +12,6 @@ $ cargo faster
 ```text
 == summary
   [high] The machine is busy: timings will be noisy and slower
-  [high] Every test process runs under `scripts/kache-test-runner`
   [medium] The target dir filesystem is 94% full
   [medium] 6 heavy crates are built in more than one version
   [medium] NEXTEST_TEST_THREADS overrides your nextest profile
