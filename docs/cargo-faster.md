@@ -82,7 +82,7 @@ Or, to run the build and read the report in one step:
 $ cargo faster timings --run
 ```
 
-That runs `cargo check --workspace --timings` under `nice -n 10`. Use `--nice 0` to run it at normal priority. You can also pass a report file to read, including one from another machine.
+That runs `cargo check --workspace --timings` under `nice -n 10`. Use `--nice 0` to run it at normal priority. You can also pass a report file to read, including one from another machine. `--baseline FILE` names an earlier report to compare with (see below).
 
 Here's a report from an edit to the application crate:
 
@@ -125,6 +125,51 @@ The timings check also finds:
 - `low-parallelism`: a build that keeps few cores busy overall;
 - `critical-path-dominated`: one unit that is most of the critical path;
 - `slow-build-script`: a build script that holds up the crates waiting for it.
+- `post-metadata-analysis`: check units that spend a long time after writing their metadata, which is analysis such as lints and borrow checking, not codegen (a check has none);
+- `slow-links`: a build that spends a lot of its time linking binaries and tests, or ends with a long stretch of nothing but links;
+- `contention`: units that took far longer than the same crates did in an earlier check, so the machine was busy, not the code slow;
+- `critical-path-waiting`: steps on the critical path that sat idle after they were ready, or waited for the cache's scheduler;
+- `wrapper-wait`: a lot of time spent waiting for the rustc wrapper's scheduler or for another build compiling the same thing;
+- `edit-rebuilt-many`: an edit that recompiled many workspace crates, and which crates it started from;
+- `slow-build`: a slow build that none of the above explains, with what was measured and what to try next.
+
+### Where a build's time went
+
+After an edit to a crate near the root of a workspace, `cargo build --timings` and `cargo faster timings` say more than the critical path:
+
+```text
+== timings
+  wall           152s
+  units          94 compiled, 0 fresh
+  parallelism    2.7 units at a time, CPU 74% on average, jobs=16 on 32 CPUs
+  cache          94 compiled incrementally (passthrough, no cache lookup) (414s); 0.00s waiting for the wrapper
+  compared with  an earlier check (67.9s wall): 60 units, 1.2x their time there (median)
+  rebuilt        88 workspace crates, from tala-core
+  baseline       target/cargo-timings/cargo-timing-20261117T092210.551Z.html
+
+  critical path (each step waited for the one above it; gap: idle after it was ready)
+  start  took   gap     cache  wait    waited  unit
+  0.66s  7.40s  -       incr   -       full    tala-core
+  8.06s  24.1s  -       incr   -       meta    tala-config
+  ...
+  74.7s  51.2s  -       incr   -       meta    tala-admin
+   126s  17.5s  0.010s  incr   -       meta    tala-agent-bin
+   143s  8.16s  -       incr   -       full    tala-agent-bin tala-agent "bin"
+
+  where the time went
+  busy   % busy  on path  units  kind
+   389s     94%     138s     88  libraries (built)
+  24.7s      6%    8.16s      6  binaries and tests (codegen + link)
+```
+
+- **cache**: when `RUSTC_WRAPPER` is kache, `cargo faster timings` asks `kache stats --since … --root <workspace> --format json` for the build's time window and matches its records to the report's units by crate and start time. Each unit is a `hit` (restored from the cache), a `miss` (compiled), `incr` (an incremental compile kache passed to rustc) or `pass` (passed through for another reason), with the time it waited for kache's scheduler. Records older than a week are gone, so reports from long ago or another machine show no cache column.
+- **compared with**: a build is compared with a `cargo check` report written just before it in the same directory, or with the report you pass with `--baseline FILE`. A library's time up to its metadata is compared with its check. When units take several times longer than they did there, the `contention` finding says the machine, not the code, was the problem.
+- **rebuilt**: how many workspace crates compiled, and which of them had no rebuilt workspace dependency: where the edit was.
+- **gap**: how long a step on the critical path sat idle after the unit it waited for had finished.
+- **where the time went**: busy seconds and seconds on the critical path, split into checks, library builds, binaries and tests, and build scripts.
+
+So a slow build after an edit to `tala-core` is explained as: 88 crates rebuilt, all incrementally (not cacheable), on a path through a few big crates; not waits, and not a busy machine.
+
 
 ## `cargo faster check-cost`
 
