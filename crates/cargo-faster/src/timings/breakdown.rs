@@ -16,8 +16,10 @@ pub struct KindTime {
     /// Units of this kind that compiled.
     pub units: usize,
     /// Their summed durations, seconds.
+    #[serde(rename = "busy_s")]
     pub busy: f64,
     /// Seconds of the critical path spent on them.
+    #[serde(rename = "on_path_s")]
     pub on_path: f64,
 }
 
@@ -50,11 +52,14 @@ pub struct Linked {
     /// How many compiled and linked.
     pub units: usize,
     /// Their summed durations, seconds.
+    #[serde(rename = "busy_s")]
     pub busy: f64,
     /// Seconds between the last other unit finishing and the build ending:
     /// time spent only on linking units.
+    #[serde(rename = "tail_s")]
     pub tail: f64,
     /// The slowest of them, seconds.
+    #[serde(serialize_with = "took_json")]
     pub slowest: Vec<(String, f64)>,
 }
 
@@ -89,14 +94,19 @@ pub struct WrapperSummary {
     /// Compiled units it has none for (build script runs aside).
     pub unmatched: usize,
     /// Restored from the cache: count and seconds.
+    #[serde(serialize_with = "count_json")]
     pub hits: (usize, f64),
     /// Cache misses rustc compiled: count and seconds.
+    #[serde(serialize_with = "count_json")]
     pub misses: (usize, f64),
     /// Incremental passthroughs: count and seconds.
+    #[serde(serialize_with = "count_json")]
     pub incremental: (usize, f64),
     /// Other passthroughs: count and seconds.
+    #[serde(serialize_with = "count_json")]
     pub other: (usize, f64),
     /// Seconds spent waiting for the wrapper's scheduler.
+    #[serde(rename = "wait_s")]
     pub wait: f64,
 }
 
@@ -125,6 +135,7 @@ pub(super) fn wrapper_summary(ran: &[&Unit]) -> Option<WrapperSummary> {
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Slowdown {
     /// The earlier report's wall time, seconds.
+    #[serde(rename = "baseline_wall_s")]
     pub baseline_wall: f64,
     /// Whether the earlier report is a `cargo check`.
     pub baseline_check: bool,
@@ -133,8 +144,10 @@ pub struct Slowdown {
     /// Median of now / before.
     pub median: f64,
     /// Summed seconds over the earlier times.
+    #[serde(rename = "excess_s")]
     pub excess: f64,
     /// The biggest slowdowns: unit, seconds now, seconds before.
+    #[serde(serialize_with = "before_json")]
     pub top: Vec<(String, f64, f64)>,
 }
 
@@ -213,7 +226,45 @@ pub struct Rebuilt {
     /// Those with no recompiled workspace dependency: where the edit was.
     pub roots: Vec<String>,
     /// Summed seconds of the members' units.
+    #[serde(rename = "busy_s")]
     pub busy: f64,
+}
+
+#[derive(Serialize)]
+struct UnitSecs<'a> {
+    unit: &'a str,
+    took_s: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    before_s: Option<f64>,
+}
+
+fn took_json<S: serde::Serializer>(v: &[(String, f64)], s: S) -> Result<S::Ok, S::Error> {
+    s.collect_seq(v.iter().map(|(unit, took_s)| UnitSecs {
+        unit,
+        took_s: *took_s,
+        before_s: None,
+    }))
+}
+
+fn before_json<S: serde::Serializer>(v: &[(String, f64, f64)], s: S) -> Result<S::Ok, S::Error> {
+    s.collect_seq(v.iter().map(|(unit, took_s, before)| UnitSecs {
+        unit,
+        took_s: *took_s,
+        before_s: Some(*before),
+    }))
+}
+
+fn count_json<S: serde::Serializer>(v: &(usize, f64), s: S) -> Result<S::Ok, S::Error> {
+    #[derive(Serialize)]
+    struct Count {
+        units: usize,
+        took_s: f64,
+    }
+    Count {
+        units: v.0,
+        took_s: v.1,
+    }
+    .serialize(s)
 }
 
 pub(super) fn rebuilt(ran: &[&Unit], ws: &Workspace) -> Option<Rebuilt> {

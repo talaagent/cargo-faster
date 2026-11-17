@@ -1,6 +1,6 @@
 //! Findings for a timings analysis.
 
-use super::{Analysis, Kind};
+use super::{Analysis, Kind, UnitTime};
 use crate::finding::{Finding, Severity};
 use crate::fmt::{pct, secs};
 
@@ -82,7 +82,13 @@ fn shape(a: &Analysis, out: &mut Vec<Finding>) {
 /// Long codegen in built units, long analysis after metadata in check
 /// units, slow build scripts.
 fn per_unit(a: &Analysis, out: &mut Vec<Finding>) {
-    if let Some((u, d, c)) = a.long_codegen.first() {
+    if let Some(UnitTime {
+        unit: u,
+        duration: d,
+        part: Some(c),
+        ..
+    }) = a.long_codegen.first()
+    {
         out.push(
             Finding::new("long-codegen", Severity::Medium, format!("Code generation takes {} in {u}", secs(*c)), "generic-code-and-monomorphization")
                 .saw(format!("{u} spent {} of {} in codegen.", secs(*c), secs(*d)))
@@ -90,7 +96,13 @@ fn per_unit(a: &Analysis, out: &mut Vec<Finding>) {
                 .fix("Run `cargo llvm-lines -p <crate>` (on its own checkout, not with a shared cache) to find what's instantiated most, and make the bulk of those functions non-generic."),
         );
     }
-    if let Some((u, d, after)) = a.post_metadata.first() {
+    if let Some(UnitTime {
+        unit: u,
+        duration: d,
+        part: Some(after),
+        ..
+    }) = a.post_metadata.first()
+    {
         out.push(
             Finding::new("post-metadata-analysis", Severity::Low, format!("{u} spends {} after its metadata", secs(*after)), "check-versus-build")
                 .saw(format!("{u} took {}, {} of it after writing its metadata. A check unit has no code generation: this is analysis after metadata (borrow checking, MIR checks) and, with incremental, saving the dependency graph.", secs(*d), secs(*after)))
@@ -98,10 +110,15 @@ fn per_unit(a: &Analysis, out: &mut Vec<Finding>) {
                 .fix(format!("See which queries take the time with `cargo faster check-cost -p {}`. A large incremental save shrinks when the crate is split.", package(u))),
         );
     }
-    if let Some((u, d)) = a.build_scripts.first() {
+    if let Some(UnitTime {
+        unit: u,
+        duration: d,
+        ..
+    }) = a.build_scripts.first()
+    {
         out.push(
             Finding::new("slow-build-script", Severity::Low, format!("Build script {u} takes {}", secs(*d)), "dependencies-and-features")
-                .saw(format!("Slow build scripts: {}.", a.build_scripts.iter().take(4).map(|(u, d)| format!("{u} {}", secs(*d))).collect::<Vec<_>>().join(", ")))
+                .saw(format!("Slow build scripts: {}.", a.build_scripts.iter().take(4).map(|u| format!("{} {}", u.unit, secs(u.duration))).collect::<Vec<_>>().join(", ")))
                 .why("Build scripts run before their crate compiles, often compiling C code (ring, openssl, zstd) or generating code (protobuf). They rerun when their inputs change.")
                 .fix("Check `cargo:rerun-if-changed` lines so it doesn't rerun needlessly, prefer pure-Rust alternatives, or link a system library (`*-sys` crates often support `pkg-config`)."),
         );
