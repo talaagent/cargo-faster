@@ -1,0 +1,17 @@
+name: Feature request
+description: Suggest a new check, finding or subcommand.
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The slow build
+      description: What was slow, how you found the cause, and the numbers before and after the fix.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What cargo faster should report
+      description: The finding you'd want to see, and how it could be detected.
+    validations:
+      required: true

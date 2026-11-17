@@ -1,0 +1,55 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+# Let chains need 1.88.
+rust-version = "1.88"
+license = "Apache-2.0"
+repository = "https://github.com/talaagent/cargo-faster"
+homepage = "https://github.com/talaagent/cargo-faster"
+authors = ["Ian Macalinao <github@igm.pub>"]
+
+[workspace.dependencies]
+analyzeme = "12.0.3"
+bpaf = { version = "0.9.20", features = ["derive", "autocomplete"] }
+bpaf-kit = { version = "0.2.0", features = ["man", "log"] }
+bpaf-kit-build = "0.2.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+shlex = "1.3"
+thiserror = "2"
+toml = { version = "0.9", default-features = false, features = ["parse", "serde", "std"] }
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+tempfile = "3"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+complexity = { level = "deny", priority = -1 }
+must_use_candidate = "allow"
+module_name_repetitions = "allow"
+needless_pass_by_value = "allow"
+missing_errors_doc = "allow"
+# Durations and sizes are reported as f64 seconds/GiB on purpose.
+cast_precision_loss = "allow"
+unwrap_used = "deny"
+clone_on_ref_ptr = "deny"
+std_instead_of_alloc = "deny"
+std_instead_of_core = "deny"
+cognitive_complexity = "deny"
+too_many_lines = "deny"
+
+# The tool is run in debug builds while developing it on big profiles.
+[profile.dev.package.analyzeme]
+opt-level = 2
+[profile.dev.package.decodeme]
+opt-level = 2
+
+[profile.release]
+debug = "line-tables-only"
