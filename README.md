@@ -14,7 +14,6 @@ $ cargo faster
   [high] The machine is busy: timings will be noisy and slower
   [medium] The target dir filesystem is 94% full
   [medium] 6 heavy crates are built in more than one version
-  [medium] NEXTEST_TEST_THREADS overrides your nextest profile
   [medium] tala-agent has 108449 lines of Rust
   [low] cargo is limited to 16 jobs on 32 CPUs
   [low] Editing tala-spool rebuilds 98 of 183 workspace crates
@@ -58,7 +57,7 @@ $ cargo faster check-cost -p tala-agent-bin
 | `setup` | Linker, debug info, codegen units, opt-levels, jobs, rustflags |
 | `cache` | sccache or kache hit rates, incremental, cold worktrees |
 | `machine` | Load, other builds, memory, disk, filesystems |
-| `deps` | Heavy features, duplicate versions, proc macros, async-trait |
+| `deps` | Heavy features, test features in normal builds, duplicate versions, proc macros, async-trait |
 | `tests` | nextest, target runners, thread limits, database-backed tests |
 | `rdeps` | What rebuilds when a crate changes, and which crates are worth splitting |
 
