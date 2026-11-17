@@ -33,6 +33,25 @@ pub struct Analysis {
     /// Test-only features turned on in `[workspace.dependencies]`, which every
     /// crate inheriting the entry gets, in its normal builds too.
     pub workspace_test_features: Vec<WorkspaceTestFeature>,
+    /// `[dev-dependencies]` entries turning on features of other workspace
+    /// crates.
+    pub dev_feature_splits: Vec<DevFeatureSplit>,
+}
+
+/// A workspace crate's `[dev-dependencies]` entry that turns on features of
+/// another workspace crate, so builds with and without dev-dependencies
+/// resolve that crate (and every workspace crate above it) differently.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DevFeatureSplit {
+    /// The workspace crate whose `[dev-dependencies]` asks for the features.
+    pub krate: String,
+    /// The workspace crate whose features it turns on.
+    pub dependency: String,
+    /// The features.
+    pub features: Vec<String>,
+    /// Workspace crates built twice when both feature sets are built: the
+    /// dependency and its workspace reverse dependencies.
+    pub rebuilt: Vec<String>,
 }
 
 /// A `[workspace.dependencies]` entry enabling test-only features.
@@ -236,12 +255,59 @@ pub fn analyze(m: &Metadata) -> Analysis {
             }
         }
     }
+    a.dev_feature_splits = dev_feature_splits(m);
     a.test_features
         .sort_by(|x, y| (&x.krate, &x.dependency).cmp(&(&y.krate, &y.dependency)));
     a.test_features.dedup();
     a.tokio_full_in.dedup();
     a.async_trait_in.dedup();
     a
+}
+
+/// `[dev-dependencies]` entries that turn on features of another workspace
+/// crate, with the workspace crates each one splits into two builds.
+fn dev_feature_splits(m: &Metadata) -> Vec<DevFeatureSplit> {
+    let members: BTreeSet<&str> = m.members().map(|p| p.name.as_str()).collect();
+    // Workspace crate -> the workspace crates with a normal or build
+    // dependency on it.
+    let mut rdeps: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for p in m.members() {
+        for d in &p.dependencies {
+            if d.kind.as_deref() != Some("dev") && members.contains(d.name.as_str()) {
+                rdeps.entry(&d.name).or_default().insert(&p.name);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for p in m.members() {
+        for d in &p.dependencies {
+            if d.kind.as_deref() != Some("dev")
+                || d.features.is_empty()
+                || d.name == p.name
+                || !members.contains(d.name.as_str())
+            {
+                continue;
+            }
+            let mut rebuilt = BTreeSet::from([d.name.as_str()]);
+            let mut todo = vec![d.name.as_str()];
+            while let Some(c) = todo.pop() {
+                for &r in rdeps.get(c).into_iter().flatten() {
+                    if rebuilt.insert(r) {
+                        todo.push(r);
+                    }
+                }
+            }
+            out.push(DevFeatureSplit {
+                krate: p.name.clone(),
+                dependency: d.name.clone(),
+                features: d.features.clone(),
+                rebuilt: rebuilt.into_iter().map(str::to_owned).collect(),
+            });
+        }
+    }
+    out.sort_by(|x, y| (&x.krate, &x.dependency).cmp(&(&y.krate, &y.dependency)));
+    out.dedup();
+    out
 }
 
 /// Semver order, oldest first: `0.8.8 < 0.9.5 < 0.10.3`, and a pre-release
@@ -458,6 +524,50 @@ fn test_features_finding(a: &Analysis) -> Option<Finding> {
     )
 }
 
+/// The `dev-dependency-feature-split` finding.
+fn dev_feature_split_finding(a: &Analysis) -> Option<Finding> {
+    let splits = &a.dev_feature_splits;
+    if splits.is_empty() {
+        return None;
+    }
+    let rebuilt: BTreeSet<&str> = splits
+        .iter()
+        .flat_map(|x| x.rebuilt.iter().map(String::as_str))
+        .collect();
+    let shown: Vec<String> = splits
+        .iter()
+        .take(8)
+        .map(|x| {
+            format!(
+                "{} -> {} [{}] ({} workspace {} built twice)",
+                x.krate,
+                x.dependency,
+                x.features.join(", "),
+                x.rebuilt.len(),
+                if x.rebuilt.len() == 1 { "crate" } else { "crates" }
+            )
+        })
+        .collect();
+    let more = match splits.len().saturating_sub(8) {
+        0 => String::new(),
+        n => format!(" and {n} more"),
+    };
+    let title = if splits.len() == 1 {
+        "1 [dev-dependencies] entry turns on features of a workspace crate".to_owned()
+    } else {
+        format!(
+            "{} [dev-dependencies] entries turn on features of workspace crates",
+            splits.len()
+        )
+    };
+    Some(
+        Finding::new("dev-dependency-feature-split", Severity::Low, title, "dev-dependency-features-split-the-build")
+            .saw(format!("{}{more}. Together {} workspace crates ({}) resolve one feature set in builds with dev-dependencies (tests, `--all-targets`) and another without them.", shown.join(", "), rebuilt.len(), rebuilt.iter().copied().collect::<Vec<_>>().join(", ")))
+            .why("Builds that include the crate's tests turn the features on; builds that don't (`cargo build --release`, `cargo clippy -p bin --lib --bins`) leave them off. Each feature set is a separate compile of that crate and of every workspace crate depending on it, with its own cache keys, so a gate that runs both a production check and a `--workspace --all-targets` build or test compiles them twice and shares nothing between the two.")
+            .fix("If the repo builds both, either make the feature additive and harmless enough to keep on in every build (one feature set, one build), or drop the separate production step and let `--workspace --all-targets` cover it, checking production-only code (`cfg(not(feature = ...))`) another way. If only one kind of build ever runs, this costs nothing. Tradeoff: leaving the feature on compiles test helpers into normal builds (see test-features-in-dependencies)."),
+    )
+}
+
 /// "3 held as `dyn` (`A`, `B`, `C`)".
 fn dyn_held(scan: &Scan) -> String {
     if scan.dyn_traits.is_empty() {
@@ -520,6 +630,7 @@ pub fn section(a: &Analysis) -> Section {
         );
     }
     f.extend(test_features_finding(a));
+    f.extend(dev_feature_split_finding(a));
     f.extend(async_trait_finding(a));
     s.extend(f);
     s.data = serde_json::to_value(a).unwrap_or_default();
@@ -699,6 +810,57 @@ mod tests {
         assert_eq!(f.severity, Severity::Medium);
         assert!(f.saw.ends_with(" and 2 more."));
         assert!(test_features_finding(&Analysis::default()).is_none());
+    }
+
+    #[test]
+    fn dev_dependency_features_of_workspace_crates_split_the_build() {
+        let m = Metadata::parse(r#"{
+          "workspace_root": "/w", "target_directory": "/w/target",
+          "workspace_members": ["agent", "bin", "web", "cli"],
+          "packages": [
+            {"id": "agent", "name": "agent", "version": "0.1.0", "manifest_path": "/w/a/Cargo.toml",
+             "dependencies": [{"name": "tokio", "kind": null}]},
+            {"id": "web", "name": "web", "version": "0.1.0", "manifest_path": "/w/w/Cargo.toml",
+             "dependencies": [{"name": "agent", "kind": null}]},
+            {"id": "bin", "name": "bin", "version": "0.1.0", "manifest_path": "/w/b/Cargo.toml",
+             "dependencies": [
+               {"name": "web", "kind": null},
+               {"name": "agent", "kind": null},
+               {"name": "agent", "kind": "dev", "features": ["testing"]},
+               {"name": "tokio", "kind": "dev", "features": ["test-util"]}
+             ]},
+            {"id": "cli", "name": "cli", "version": "0.1.0", "manifest_path": "/w/c/Cargo.toml",
+             "dependencies": [{"name": "web", "kind": "dev"}]},
+            {"id": "tokio", "name": "tokio", "version": "1.48.0", "manifest_path": "/r/t"}
+          ]
+        }"#).unwrap();
+        let a = analyze(&m);
+        // tokio isn't a workspace crate, and cli's dev-dependency asks for
+        // no features.
+        assert_eq!(
+            a.dev_feature_splits,
+            [DevFeatureSplit {
+                krate: "bin".into(),
+                dependency: "agent".into(),
+                features: vec!["testing".into()],
+                rebuilt: vec!["agent".into(), "bin".into(), "web".into()],
+            }]
+        );
+        let f = dev_feature_split_finding(&a).unwrap();
+        assert_eq!(f.id, "dev-dependency-feature-split");
+        assert_eq!(
+            f.title,
+            "1 [dev-dependencies] entry turns on features of a workspace crate"
+        );
+        assert!(f.saw.starts_with(
+            "bin -> agent [testing] (3 workspace crates built twice). Together 3 workspace crates (agent, bin, web)"
+        ));
+        assert!(dev_feature_split_finding(&Analysis::default()).is_none());
+        // The other fixture: bin's dev-dependency on core [testing]; bin
+        // has no normal dependency on core, core-test-utils has.
+        let a = analyze(&test_feature_fixture());
+        assert_eq!(a.dev_feature_splits.len(), 1);
+        assert_eq!(a.dev_feature_splits[0].rebuilt, ["core", "core-test-utils"]);
     }
 
     #[test]
