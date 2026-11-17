@@ -25,6 +25,16 @@ const BODY_LABELS: &[&str] = &[
 /// Queries whose arguments we keep (the rest are dropped to save memory).
 const ARG_LABELS: &[&str] = &["evaluate_obligation", "expand_proc_macro", "codegen_module"];
 
+/// Events the profiler records about itself. They exist only because of
+/// `-Zself-profile` (`self_profile_alloc_query_strings` turns the recorded
+/// query keys into strings at the end of the session, and grows with
+/// `-Zself-profile-events=args`), so they are left out of the query table,
+/// the wall time and every share, and reported once as profiler overhead.
+#[must_use]
+pub fn is_profiler_event(label: &str) -> bool {
+    label.starts_with("self_profile")
+}
+
 /// Labels that mean LLVM or codegen work (a `cargo build` profile).
 const CODEGEN_PREFIXES: &[&str] = &["LLVM_", "codegen_", "monomorphization_collector", "link"];
 
@@ -173,10 +183,14 @@ pub struct HeavyType {
 /// What a profile says.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Analysis {
-    /// Wall time of the main thread, in seconds.
+    /// Wall time of the main thread, in seconds, without profiler overhead.
     pub wall_secs: f64,
-    /// Sum of all self time, in seconds (more than wall with threads).
+    /// Sum of all self time, in seconds (more than wall with threads),
+    /// without profiler overhead.
     pub total_secs: f64,
+    /// Time the profiler spent on itself (`self_profile_alloc_query_strings`),
+    /// in seconds. Not part of `wall_secs`, `total_secs` or `queries`.
+    pub profiler_secs: f64,
     /// Self time by query, most expensive first.
     pub queries: Vec<Cost>,
     /// Self time of `evaluate_obligation`, in seconds.
@@ -239,13 +253,22 @@ pub fn analyze(p: &Profile) -> Analysis {
         .iter()
         .filter_map(|l| p.label_ids.get(*l).copied())
         .collect();
+    let profiler: Vec<bool> = p.labels.iter().map(|l| is_profiler_event(l)).collect();
+    let is_profiler = |iv: &Interval| profiler[iv.label as usize];
     let mut wall = 0u64;
     for idxs in by_thread.values_mut() {
         idxs.sort_by_key(|&i| (p.intervals[i].start, core::cmp::Reverse(p.intervals[i].end)));
         if let (Some(&first), Some(last)) =
             (idxs.first(), idxs.iter().map(|&i| p.intervals[i].end).max())
         {
-            wall = wall.max(last - p.intervals[first].start.min(last));
+            // The profiler's own work (near the end) is not the crate's.
+            let overhead: u64 = idxs
+                .iter()
+                .map(|&i| p.intervals[i])
+                .filter(is_profiler)
+                .map(|iv| iv.end - iv.start)
+                .sum();
+            wall = wall.max((last - p.intervals[first].start.min(last)).saturating_sub(overhead));
         }
         // Stack of (interval index, nearest enclosing body arg).
         let mut stack: Vec<(usize, Option<u32>)> = Vec::new();
@@ -276,12 +299,17 @@ pub fn analyze(p: &Profile) -> Analysis {
     let mut queries: HashMap<&str, (u64, usize)> = HashMap::new();
     let mut total = 0u64;
     let mut codegen = 0u64;
+    let mut profiler_ns = 0u64;
     let mut preds: HashMap<u32, (u64, usize, ByBody)> = HashMap::new();
     let mut macros: HashMap<&str, (u64, usize)> = HashMap::new();
     let mut bodies: HashMap<&str, (u64, usize)> = HashMap::new();
     for (i, iv) in p.intervals.iter().enumerate() {
         let label = p.label(iv);
         let st = self_ns(i);
+        if is_profiler(iv) {
+            profiler_ns += st;
+            continue;
+        }
         total += st;
         let q = queries.entry(label).or_default();
         q.0 += st;
@@ -323,6 +351,10 @@ pub fn analyze(p: &Profile) -> Analysis {
         wall_secs: s(wall),
         total_secs: s(total),
         codegen_secs: s(codegen),
+        profiler_secs: s(profiler_ns),
+        // All of evaluate_obligation, also when the profile has no
+        // arguments to group it by.
+        trait_solving_secs: queries.get("evaluate_obligation").map_or(0.0, |q| s(q.0)),
         ..Analysis::default()
     };
     a.queries = sorted(queries.into_iter().map(|(k, (t, c))| Cost {
@@ -363,7 +395,6 @@ pub fn analyze(p: &Profile) -> Analysis {
     let mut heavy: HashMap<String, HeavyAcc> = HashMap::new();
     let mut obligations = Vec::new();
     for ((ty, tr), pred) in &by_pred {
-        a.trait_solving_secs += s(pred.ns);
         let c = categories.entry(category(ty)).or_default();
         c.0 += pred.ns;
         c.1 += pred.count;
@@ -874,6 +905,15 @@ pub fn section(a: &Analysis, crate_name: &str) -> Section {
         "proc macros",
         format!("{} ({:.0}%)", secs(macros), pct(macros, a.total_secs)),
     );
+    if a.profiler_secs > 0.0 {
+        s.fact(
+            "profiler overhead",
+            format!(
+                "{} (self_profile_alloc_query_strings; left out of the times above and below)",
+                secs(a.profiler_secs)
+            ),
+        );
+    }
     if a.codegen_secs > 0.0 {
         s.fact(
             "codegen",
@@ -1105,6 +1145,39 @@ mod tests {
         assert_eq!(findings(&a, "a"), []);
         let s = section(&a, "a");
         assert!(s.details[0].contains("typeck"));
+    }
+
+    #[test]
+    fn profiler_overhead_is_not_a_query() {
+        let mut p = Profile::default();
+        p.push("typeck_root", Some("a::f"), 0, 3_000_000_000, 0);
+        // Without arguments: trait solving still counts.
+        p.push("evaluate_obligation", None, 1_000_000_000, 2_000_000_000, 0);
+        p.push(
+            "self_profile_alloc_query_strings",
+            None,
+            3_000_000_000,
+            4_000_000_000,
+            0,
+        );
+        let a = analyze(&p);
+        assert!((a.profiler_secs - 1.0).abs() < 1e-6, "{}", a.profiler_secs);
+        assert!((a.wall_secs - 3.0).abs() < 1e-6, "{}", a.wall_secs);
+        assert!((a.total_secs - 3.0).abs() < 1e-6, "{}", a.total_secs);
+        assert!((a.trait_solving_secs - 1.0).abs() < 1e-6);
+        assert!(
+            a.queries
+                .iter()
+                .all(|q| !q.name.starts_with("self_profile"))
+        );
+        let s = section(&a, "a");
+        let overhead = s
+            .facts
+            .iter()
+            .find(|f| f.key == "profiler overhead")
+            .unwrap();
+        assert!(overhead.value.starts_with("1.00s"), "{}", overhead.value);
+        assert!(!s.details[0].contains("self_profile"), "{}", s.details[0]);
     }
 
     #[test]

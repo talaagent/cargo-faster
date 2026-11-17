@@ -164,6 +164,7 @@ Some query names you'll see often, and what they mean:
 - `layout_of`: computing the size and layout of a type. Large nested futures make this busy.
 - `LLVM_module_codegen_emit_obj`, `LLVM_module_optimize`, `codegen_module`: backend work. If these dominate, look at generics and optimization settings.
 - `link`, `link_binary`: linking.
+- `self_profile_alloc_query_strings`: the profiler itself, turning the recorded query keys into strings at the end. It isn't compile time, and with `args` it can take seconds, so subtract it before you compute shares. `cargo faster check-cost` leaves it out and reports it once as `profiler overhead`.
 
 `crox` converts a profile into the Chrome trace format, which you can open in `chrome://tracing` or in [Perfetto](https://ui.perfetto.dev) to see the nesting on a timeline. `flamegraph` produces a flame graph SVG. Both are useful for seeing which function bodies dominate, especially with `args` recorded, because each event carries the name of the function (or the predicate) it was working on. With a few lines of `jq` over the `crox` output you can group `evaluate_obligation` events by predicate, or group `check_coroutine_obligations` by the function they were checking. That's exactly how the case study found its cause.
 
@@ -750,7 +751,19 @@ or the environment variable `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER`. This
 
 Under `cargo test`, the runner wraps each test *binary*, once. Under nextest, which runs one process per test, it wraps every *test*. A runner that takes a second to start, or that takes a lock, or that coordinates with some other service, now does that thousands of times. Each wrapped test also holds one of nextest's slots while it waits. In the case study, tests that ran in 0.00 seconds were each waiting 3 to 8 seconds in a runner, and that waiting was about 44% of all the test-seconds in the suite.
 
-If you have a runner configured, check whether it's needed for tests, and whether it's set somewhere you didn't expect: a global `~/.cargo/config.toml`, or an environment variable. `cargo faster tests` reports runners, nextest configuration, and relevant environment variables.
+If a runner is needed for `cargo test` but not under nextest, have it step aside. nextest sets `NEXTEST_EXECUTION_MODE=process-per-test` in every test process, so a shell runner can exec the test straight away:
+
+```sh
+#!/bin/sh
+if [ "${NEXTEST_EXECUTION_MODE:-}" = process-per-test ]; then
+  exec "$@"
+fi
+exec my-wrapper "$@"
+```
+
+That costs one extra `exec` per test, about a millisecond. `cargo faster tests` reads runner scripts and grades one that steps aside like this as `info`.
+
+If you have a runner configured, check whether it's needed for tests, and whether it's set somewhere you didn't expect: a global `~/.cargo/config.toml`, or an environment variable. `CARGO_TARGET_<TRIPLE>_RUNNER` set by a script (a CI or pre-merge script, a Makefile) beats the config's runner for that run, so the runner that wraps your CI tests may not be the one in `.cargo/config.toml`. `cargo faster tests` reports runners, the lines in `scripts/`, Makefiles, justfiles and CI workflows that override them, nextest configuration, and relevant environment variables. The surest way to know what a runner costs is to run one quick test a few times through `cargo nextest run` with and without it, back to back.
 
 ### Database-backed tests
 

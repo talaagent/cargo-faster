@@ -82,7 +82,7 @@ If `cargo faster` isn't installed: `cargo install --locked cargo-faster`, or
 | `trait-solving-dominates`, `heavy-function-body` | Return `Pin<Box<dyn Future<Output = T> + Send + '_>>` from functions at module boundaries; split the top body | A box per call |
 | `async-trait-overhead`, `uses-async-trait` | Replace `#[async_trait]` with native `async fn` in traits (`-> impl Future<Output = T> + Send` where callers spawn, `dynosaur` for `dyn`-held traits), and ban it with clippy `disallowed-macros`. Its per-method lifetime bounds split rustc's trait-solving cache; on one workspace this cut trait solving 80%. Erase heavy types too: that's the other lever | Signature churn |
 | `serial-crate`, `big-crate` | Profile it first (`check-cost`). Split only if it's actually just big | Refactor |
-| `target-runner-wraps-tests` | Remove or narrow `target.<triple>.runner`; use a once-per-run nextest setup script | |
+| `target-runner-wraps-tests`, `target-runner-in-scripts` | Remove or narrow `target.<triple>.runner`, or have it `exec "$@"` when `NEXTEST_EXECUTION_MODE=process-per-test`; use a once-per-run nextest setup script | |
 | `nextest-threads-env` | Unset `NEXTEST_TEST_THREADS`; put limits in `.config/nextest.toml` | |
 | `database-tests` | Postgres on tmpfs with fsync off; clone a template database instead of migrating per test | |
 | `full-debuginfo` | `debug = "line-tables-only"` in `[profile.dev]` | Fewer variables in a debugger |
