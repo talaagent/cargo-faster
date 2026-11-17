@@ -131,6 +131,18 @@ impl Unit {
         format!("{}{}", self.name, self.target)
     }
 
+    /// What the unit is, for JSON output.
+    #[must_use]
+    pub fn of(&self) -> UnitOf {
+        UnitOf {
+            krate: self.name.clone(),
+            version: self.version.clone(),
+            target: self.target.trim().to_owned(),
+            mode: self.mode.clone(),
+            kind: self.kind(),
+        }
+    }
+
     fn is_build_script(&self) -> bool {
         self.mode == "run-custom-build" || self.target.contains("build-script")
     }
@@ -278,35 +290,45 @@ pub fn newest_report(target_dir: &Path) -> Option<PathBuf> {
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Analysis {
     /// Wall time of the build, seconds.
+    #[serde(rename = "wall_s")]
     pub wall: f64,
     /// Units compiled (not fresh).
+    #[serde(rename = "units_compiled")]
     pub compiled: usize,
+    /// Units cargo found fresh.
+    pub units_fresh: usize,
     /// Units in the build.
+    #[serde(rename = "units_total")]
     pub total_units: usize,
     /// Sum of unit durations over wall time.
     pub parallelism: f64,
     /// Average CPU use, percent, if sampled.
+    #[serde(rename = "cpu_avg_pct")]
     pub cpu_avg: Option<f64>,
     /// Cargo's `jobs` and the CPU count, from the report.
+    #[serde(serialize_with = "jobs_json")]
     pub jobs: Option<(u32, u32)>,
     /// The chain of units that decided the wall time, first to last.
     pub critical_path: Vec<PathStep>,
     /// Seconds of the critical path between a step's dependency finishing
     /// and the step starting.
+    #[serde(rename = "path_gaps_s")]
     pub path_gaps: f64,
     /// Seconds of the critical path spent waiting inside the cache wrapper.
+    #[serde(rename = "path_waits_s")]
     pub path_waits: f64,
     /// Long units that ran mostly alone.
     pub serial: Vec<Serial>,
     /// Slowest units.
-    pub slowest: Vec<(String, f64)>,
-    /// Built units with long code generation: unit, duration, codegen.
-    pub long_codegen: Vec<(String, f64, f64)>,
-    /// Check units with a long part after their metadata: unit, duration,
-    /// seconds after metadata.
-    pub post_metadata: Vec<(String, f64, f64)>,
+    #[serde(rename = "slowest_units")]
+    pub slowest: Vec<UnitTime>,
+    /// Built units with long code generation (`part`: codegen seconds).
+    pub long_codegen: Vec<UnitTime>,
+    /// Check units with a long part after their metadata (`part`: seconds
+    /// after metadata).
+    pub post_metadata: Vec<UnitTime>,
     /// Slow build scripts.
-    pub build_scripts: Vec<(String, f64)>,
+    pub build_scripts: Vec<UnitTime>,
     /// Seconds by kind of unit.
     pub kinds: Vec<KindTime>,
     /// Binaries and tests.
@@ -319,23 +341,91 @@ pub struct Analysis {
     pub rebuilt: Option<Rebuilt>,
 }
 
+/// What a unit is: its package, target and mode, as in the report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnitOf {
+    /// The package name.
+    #[serde(rename = "crate")]
+    pub krate: String,
+    /// The package version.
+    pub version: String,
+    /// Cargo's target label (`tala-agent "bin" (check)`), empty for a
+    /// library build.
+    pub target: String,
+    /// Cargo's mode (`build`, `check`, `test`, `run-custom-build`).
+    pub mode: String,
+    /// What it produces.
+    pub kind: Kind,
+}
+
+/// A unit and how long it took.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct UnitTime {
+    /// Unit label.
+    pub unit: String,
+    /// What it is.
+    #[serde(flatten)]
+    pub of: UnitOf,
+    /// Seconds it took.
+    #[serde(rename = "took_s")]
+    pub duration: f64,
+    /// The seconds the list is about (codegen, after metadata), when it
+    /// isn't the whole unit.
+    #[serde(rename = "part_s", skip_serializing_if = "Option::is_none")]
+    pub part: Option<f64>,
+}
+
+impl UnitTime {
+    fn new(u: &Unit, part: Option<f64>) -> Self {
+        Self {
+            unit: u.label(),
+            of: u.of(),
+            duration: u.duration,
+            part,
+        }
+    }
+}
+
 /// One step of the critical path.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PathStep {
     /// Unit label.
     pub unit: String,
-    /// Start.
+    /// What it is.
+    #[serde(flatten)]
+    pub of: UnitOf,
+    /// Start, seconds into the build.
+    #[serde(rename = "start_s")]
     pub start: f64,
-    /// Duration.
+    /// Duration, seconds.
+    #[serde(rename = "took_s")]
     pub duration: f64,
     /// Waited for metadata only (pipelined) or the full build.
+    #[serde(rename = "waited", serialize_with = "waited_json")]
     pub via_rmeta: bool,
     /// Seconds between what it waited for finishing and it starting.
+    #[serde(rename = "gap_s")]
     pub gap: f64,
     /// What the cache wrapper did with it.
     pub cache: Option<Outcome>,
     /// Seconds it waited inside the cache wrapper.
+    #[serde(rename = "wait_s")]
     pub wait: f64,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's signature
+fn waited_json<S: serde::Serializer>(via_rmeta: &bool, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(if *via_rmeta { "meta" } else { "full" })
+}
+
+#[allow(clippy::ref_option)] // serde's signature
+fn jobs_json<S: serde::Serializer>(jobs: &Option<(u32, u32)>, s: S) -> Result<S::Ok, S::Error> {
+    #[derive(Serialize)]
+    struct Jobs {
+        jobs: u32,
+        ncpu: u32,
+    }
+    jobs.map(|(jobs, ncpu)| Jobs { jobs, ncpu }).serialize(s)
 }
 
 /// A unit that ran mostly alone.
@@ -343,7 +433,11 @@ pub struct PathStep {
 pub struct Serial {
     /// Unit label.
     pub unit: String,
-    /// Duration.
+    /// What it is.
+    #[serde(flatten)]
+    pub of: UnitOf,
+    /// Duration, seconds.
+    #[serde(rename = "took_s")]
     pub duration: f64,
     /// Average number of other units running alongside.
     pub others: f64,
@@ -373,6 +467,7 @@ pub fn analyze_with(t: &Timings, extra: Extra<'_>) -> Analysis {
     let mut a = Analysis {
         total_units: t.units.len(),
         compiled: ran.len(),
+        units_fresh: t.units.len() - ran.len(),
         jobs: t.jobs,
         ..Analysis::default()
     };
@@ -415,7 +510,7 @@ fn per_unit(a: &mut Analysis, ran: &[&Unit]) {
     a.slowest = slowest
         .iter()
         .take(10)
-        .map(|u| (u.label(), u.duration))
+        .map(|u| UnitTime::new(u, None))
         .collect();
     // A check unit has no LLVM codegen: cargo splits every unit at its
     // metadata, and for a check the part after it is borrowck, MIR checks
@@ -425,21 +520,24 @@ fn per_unit(a: &mut Analysis, ran: &[&Unit]) {
         if after < 5.0 || after < 0.3 * u.duration {
             continue;
         }
-        let row = (u.label(), u.duration, after);
+        let row = UnitTime::new(u, Some(after));
         match u.kind() {
             Kind::Check => a.post_metadata.push(row),
             Kind::Lib | Kind::Link => a.long_codegen.push(row),
             Kind::BuildScript => {}
         }
     }
-    a.long_codegen.sort_by(|x, y| y.2.total_cmp(&x.2));
-    a.post_metadata.sort_by(|x, y| y.2.total_cmp(&x.2));
+    a.long_codegen
+        .sort_by(|x, y| y.part.unwrap_or(0.0).total_cmp(&x.part.unwrap_or(0.0)));
+    a.post_metadata
+        .sort_by(|x, y| y.part.unwrap_or(0.0).total_cmp(&x.part.unwrap_or(0.0)));
     a.build_scripts = ran
         .iter()
         .filter(|u| u.is_build_script() && u.duration >= 3.0)
-        .map(|u| (u.label(), u.duration))
+        .map(|u| UnitTime::new(u, None))
         .collect();
-    a.build_scripts.sort_by(|x, y| y.1.total_cmp(&x.1));
+    a.build_scripts
+        .sort_by(|x, y| y.duration.total_cmp(&x.duration));
 }
 
 /// Long units that ran mostly alone.
@@ -458,6 +556,7 @@ fn serial(ran: &[&Unit]) -> Vec<Serial> {
         if others < 2.0 {
             out.push(Serial {
                 unit: u.label(),
+                of: u.of(),
                 duration: u.duration,
                 others,
             });
@@ -521,6 +620,7 @@ fn critical_path(t: &Timings) -> Vec<(usize, PathStep)> {
             cur,
             PathStep {
                 unit: u.label(),
+                of: u.of(),
                 start: u.start,
                 duration: u.duration,
                 via_rmeta: prev.is_some_and(|(_, r, _)| r),
@@ -594,11 +694,11 @@ pub fn section(a: &Analysis, source: &str) -> Section {
         let rows: Vec<Vec<String>> = a
             .slowest
             .iter()
-            .map(|(u, d)| {
+            .map(|u| {
                 vec![
-                    secs(*d),
-                    format!("{:.0}%", pct(*d, a.wall)),
-                    ellipsize(u, 70),
+                    secs(u.duration),
+                    format!("{:.0}%", pct(u.duration, a.wall)),
+                    ellipsize(&u.unit, 70),
                 ]
             })
             .collect();
@@ -953,6 +1053,34 @@ mod tests {
                 .any(|d| d.starts_with("where the time went"))
         );
         assert!(s.facts.iter().any(|f| f.key == "cache"));
+        json_shape(&s.data);
+    }
+
+    /// The `--json` data: structured, with seconds in `_s` fields.
+    fn json_shape(d: &serde_json::Value) {
+        assert_eq!(d["units_compiled"], 94);
+        assert_eq!(d["units_fresh"], 0);
+        assert!(d["wall_s"].as_f64().unwrap() > 150.0);
+        assert_eq!(d["jobs"]["jobs"], 16);
+        let p = d["critical_path"].as_array().unwrap();
+        assert_eq!(p[0]["unit"], "tala-core");
+        assert_eq!(p[0]["crate"], "tala-core");
+        assert_eq!(p[0]["kind"], "lib");
+        assert_eq!(p[0]["waited"], "full");
+        assert_eq!(p[0]["cache"], "incr");
+        assert_eq!(p[1]["waited"], "meta");
+        let last = p.last().unwrap();
+        assert_eq!(last["crate"], "tala-agent-bin");
+        assert_eq!(last["target"], "tala-agent \"bin\"");
+        assert!(last["start_s"].as_f64().unwrap() > 100.0);
+        assert!(last["took_s"].as_f64().unwrap() > 1.0);
+        let slow = &d["slowest_units"][0];
+        assert_eq!(slow["crate"], "tala-agent");
+        assert!(slow["took_s"].as_f64().unwrap() > 50.0);
+        assert_eq!(d["wrapper"]["incremental"]["units"], 94);
+        assert_eq!(d["rebuilt"]["roots"][0], "tala-core");
+        assert!(d["slowdown"]["top"][0]["before_s"].is_f64());
+        assert!(d["linked"]["slowest"][0]["took_s"].is_f64());
     }
 
     fn lib(i: usize, name: &str, target: &str, start: f64, duration: f64, next: &[usize]) -> Unit {

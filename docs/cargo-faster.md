@@ -36,7 +36,7 @@ $ cargo-faster --man > ~/.local/share/man/man1/cargo-faster.1
 
 Every subcommand takes these:
 
-- `--json` prints the report as JSON instead of text, for scripts and agents. Findings keep their `id`, `severity`, `title`, `saw`, `why`, `fix`, and `guide` fields.
+- `--json` prints the report as JSON instead of text, for scripts and agents. Findings keep their `id`, `severity`, `title`, `saw`, `why`, `fix`, and `guide` fields. Each section also has a `data` object with what it measured, so a script can compare runs without parsing the text tables. For `timings`, that's `wall_s`, `units_compiled`, `units_fresh`, `critical_path` (each step with `unit`, `crate`, `version`, `target`, `mode`, `kind`, `start_s`, `took_s`, `waited` (`full` or `meta`), `gap_s`, and `cache` and `wait_s` when kache's records were joined), `slowest_units`, `kinds`, `linked`, `wrapper`, `slowdown` and `rebuilt`. Seconds are in fields ending in `_s`. For `check-cost`, it's `queries`, `obligations`, `trait_solving_by_category`, `heavy_bodies`, `items` and `modules`.
 - `--manifest-path PATH` points at a workspace other than the current directory's.
 - `--dry-run` prints the builds that `timings --run` and `check-cost` would start, and stops before starting them. The quick checks still run, because they only read things.
 - `-v` and `-q` change how much it logs to stderr.
