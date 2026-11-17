@@ -27,6 +27,10 @@ pub struct Inputs {
     pub kache_stats: Option<Value>,
     /// `kache stats --json --last-build --full --root <root>`.
     pub kache_last: Option<Value>,
+    /// `kache stats --json --last-build --full` without `--root`: the
+    /// latest session anywhere, gathered only when this tree's latest
+    /// session compiled nothing.
+    pub kache_last_any: Option<Value>,
     /// `kache explain --json --root <root>`.
     pub kache_explain: Option<Value>,
     /// `sccache --show-stats --stats-format json`, when sccache is the
@@ -91,21 +95,27 @@ impl Inputs {
                     .ok()?;
                 serde_json::from_slice(&out.stdout).ok()
             });
+        let kache_last = uses_kache
+            .then(|| {
+                json(&[
+                    "stats",
+                    "--json",
+                    "--last-build",
+                    "--full",
+                    "--root",
+                    &root_s,
+                ])
+            })
+            .flatten();
+        let kache_last_any = kache_last
+            .as_ref()
+            .filter(|l| !has_compiles(l))
+            .and_then(|_| json(&["stats", "--json", "--last-build", "--full"]));
         Self {
             sccache_stats,
             kache_stats: uses_kache.then(|| json(&["stats", "--json"])).flatten(),
-            kache_last: uses_kache
-                .then(|| {
-                    json(&[
-                        "stats",
-                        "--json",
-                        "--last-build",
-                        "--full",
-                        "--root",
-                        &root_s,
-                    ])
-                })
-                .flatten(),
+            kache_last,
+            kache_last_any,
             kache_explain: uses_kache
                 .then(|| json(&["explain", "--json", "--root", &root_s]))
                 .flatten(),
@@ -317,6 +327,44 @@ fn session_fact(last: &Value, now_ms: Option<f64>) -> Option<String> {
     Some(format!("started {}{dur}", when(start, now_ms)))
 }
 
+/// Whether a `kache stats --last-build` session compiled anything, beyond
+/// probes (`rustc -vV`, `--print`).
+fn has_compiles(last: &Value) -> bool {
+    let sum = last.get("summary").unwrap_or(&Value::Null);
+    f64_at(sum, &["total_crates"]).unwrap_or(0.0) >= 1.0
+        || f64_at(sum, &["passthroughs"]).unwrap_or(0.0) >= 1.0
+}
+
+/// The session to report: this tree's latest, or, when that one only
+/// probed, the latest session anywhere if it compiled, with its root.
+fn pick_last(inputs: &Inputs) -> Option<(&Value, Option<&str>)> {
+    let here = inputs.kache_last.as_ref()?;
+    if has_compiles(here) {
+        return Some((here, None));
+    }
+    match inputs.kache_last_any.as_ref().filter(|a| has_compiles(a)) {
+        Some(any) => Some((
+            any,
+            Some(
+                any.pointer("/meta/session/root")
+                    .and_then(Value::as_str)
+                    .unwrap_or("another tree"),
+            ),
+        )),
+        None => Some((here, None)),
+    }
+}
+
+/// Say whose session it is when it's another tree's.
+fn elsewhere_label(fact: String, elsewhere: Option<&str>) -> String {
+    match elsewhere {
+        Some(root) => format!(
+            "{fact}, in {root}: this tree's latest session only probed, so this is the latest session with compiles"
+        ),
+        None => fact,
+    }
+}
+
 fn last_build_fact(total: f64, pass: f64, hit: f64, weighted: f64) -> String {
     if total < 1.0 && pass < 1.0 {
         "no compiles in the latest session (only probes); run a build first for per-build numbers"
@@ -476,7 +524,7 @@ pub fn check(ctx: &Context, inputs: &Inputs) -> Section {
             }
         }
     }
-    if let Some(last) = &inputs.kache_last {
+    if let Some((last, elsewhere)) = pick_last(inputs) {
         let sum = last.get("summary").unwrap_or(&Value::Null);
         let total = f64_at(sum, &["total_crates"]).unwrap_or(0.0);
         let pass = f64_at(sum, &["passthroughs"]).unwrap_or(0.0);
@@ -487,7 +535,7 @@ pub fn check(ctx: &Context, inputs: &Inputs) -> Section {
         }
         s.fact(
             "kache last build",
-            last_build_fact(total, pass, hit, weighted),
+            elsewhere_label(last_build_fact(total, pass, hit, weighted), elsewhere),
         );
         if let Some(t) = uncached_tail(last) {
             s.fact("kache latest", tail_fact(&t, inputs.now_unix_ms));
@@ -716,6 +764,7 @@ mod tests {
             worktrees: wt(3, true),
             kache_stats: load("kache-stats.json"),
             kache_last: load("kache-last-build.json"),
+            kache_last_any: None,
             kache_explain: load("kache-explain.json"),
             sccache_stats: None,
             sccache_on_path: false,
@@ -732,6 +781,43 @@ mod tests {
                 .any(|f| f.key == "kache last build" && f.value.contains("1375 passthroughs"))
         );
         assert!(s.details.iter().any(|d| d.contains("adaptive seed")));
+    }
+
+    #[test]
+    fn falls_back_to_the_latest_session_with_compiles() {
+        let ctx = Context {
+            config: CargoConfig::from_strs(&[(
+                "/h/.cargo/config.toml",
+                "[build]\nrustc-wrapper = \"kache\"\n",
+            )]),
+            ..Context::default()
+        };
+        let probes =
+            serde_json::json!({"summary": {"total_crates": 0, "passthroughs": 0, "probes": 4}});
+        let other = serde_json::json!({
+            "summary": {"total_crates": 540, "passthroughs": 2, "hit_rate_pct": 80.9, "weighted_hit_rate_pct": 87.3},
+            "meta": {"session": {"root": "/src/app-worktrees/feature"}},
+        });
+        let fact = |inputs: &Inputs| {
+            check(&ctx, inputs)
+                .facts
+                .into_iter()
+                .find(|f| f.key == "kache last build")
+                .map(|f| f.value)
+                .unwrap()
+        };
+        let mut inputs = Inputs {
+            kache_last: Some(probes),
+            kache_last_any: Some(other),
+            ..Inputs::default()
+        };
+        assert_eq!(
+            fact(&inputs),
+            "81% hits (87% by time) over 540 crates, 2 passthroughs, in /src/app-worktrees/feature: this tree's latest session only probed, so this is the latest session with compiles"
+        );
+        // Nothing compiled anywhere: say so.
+        inputs.kache_last_any = inputs.kache_last.clone();
+        assert!(fact(&inputs).starts_with("no compiles in the latest session (only probes)"));
     }
 
     fn event(ts_s: f64, result: &str, reason: &str) -> Value {
