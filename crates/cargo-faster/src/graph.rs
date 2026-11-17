@@ -161,6 +161,12 @@ pub fn gather(m: &Metadata) -> Vec<CrateInfo> {
 /// A crate this big gets a split suggestion.
 pub const BIG_CRATE_LINES: usize = 40_000;
 
+/// Whether `name` names `krate` (`_` and `-` are the same).
+#[must_use]
+pub fn is_named(krate: &CrateInfo, name: &str) -> bool {
+    name == krate.name || name.replace('_', "-") == krate.name
+}
+
 /// The rdeps section, for one crate or the whole workspace.
 #[must_use]
 pub fn section(crates: &[CrateInfo], only: Option<&str>) -> Section {
@@ -169,7 +175,7 @@ pub fn section(crates: &[CrateInfo], only: Option<&str>) -> Section {
     s.fact("workspace crates", members.to_string());
     let shown: Vec<&CrateInfo> = crates
         .iter()
-        .filter(|c| only.is_none_or(|o| o == c.name || o.replace('_', "-") == c.name))
+        .filter(|c| only.is_none_or(|o| is_named(c, o)))
         .collect();
     if let Some(c) = shown.first().filter(|_| only.is_some()) {
         s.fact("crate", format!("{} ({} lines)", c.name, c.lines));

@@ -1,7 +1,7 @@
 //! The machine: load, other builds, memory, disk, and whether the target
 //! directory and the cache can share data cheaply.
 
-use crate::context::{Context, capture};
+use crate::context::{Context, probe};
 use crate::finding::{Finding, Section, Severity};
 use crate::fmt::bytes;
 use std::path::{Path, PathBuf};
@@ -145,12 +145,12 @@ impl Inputs {
         let mounts = dirs
             .into_iter()
             .filter_map(|(role, path)| {
-                let probe = existing_ancestor(&path)?.to_path_buf();
-                let out = capture("df", &["-PT".into(), probe.display().to_string()], None).ok()?;
+                let dir = existing_ancestor(&path)?.to_path_buf();
+                let out = probe("df").arg("-PT").arg(&dir).output().ok()?;
                 let (fstype, total, avail, mount) = parse_df(&out.stdout_lossy())?;
                 Some(Mount {
                     role,
-                    dev: dev_of(&probe),
+                    dev: dev_of(&dir),
                     path,
                     fstype,
                     mount,

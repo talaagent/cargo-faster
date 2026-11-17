@@ -1,7 +1,7 @@
 //! Compiler caches (sccache, kache), incremental compilation, and the
 //! target directories of git worktrees.
 
-use crate::context::{Context, capture, on_path};
+use crate::context::{Context, on_path, probe};
 use crate::finding::{Finding, Section, Severity};
 use crate::fmt::{bytes, ellipsize, secs};
 use serde_json::Value;
@@ -60,20 +60,18 @@ impl Inputs {
     #[must_use]
     pub fn gather(ctx: &Context) -> Self {
         let root = ctx.root().to_path_buf();
-        let worktrees = capture(
-            "git",
-            &["worktree".into(), "list".into(), "--porcelain".into()],
-            Some(&root),
-        )
-        .ok()
-        .filter(bpaf_kit::cmd::Output::success)
-        .map(|o| parse_worktrees(&o.stdout_lossy(), std::path::Path::exists))
-        .unwrap_or_default();
+        let worktrees = probe("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(&root)
+            .output()
+            .ok()
+            .filter(bpaf_kit::cmd::Output::success)
+            .map(|o| parse_worktrees(&o.stdout_lossy(), std::path::Path::exists))
+            .unwrap_or_default();
         let wrapper = wrapper(ctx).map(|(w, _)| w);
         let uses_kache = wrapper.as_deref().is_some_and(|w| w.contains("kache"));
         let json = |args: &[&str]| -> Option<Value> {
-            let args: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
-            let out = capture("kache", &args, Some(&root)).ok()?;
+            let out = probe("kache").args(args).current_dir(&root).output().ok()?;
             serde_json::from_slice(&out.stdout).ok()
         };
         let root_s = root.display().to_string();
