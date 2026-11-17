@@ -164,6 +164,7 @@ Some query names you'll see often, and what they mean:
 - `layout_of`: computing the size and layout of a type. Large nested futures make this busy.
 - `LLVM_module_codegen_emit_obj`, `LLVM_module_optimize`, `codegen_module`: backend work. If these dominate, look at generics and optimization settings.
 - `link`, `link_binary`: linking.
+- `self_profile_alloc_query_strings`: the profiler itself, turning the recorded query keys into strings at the end. It isn't compile time, and with `args` it can take seconds, so subtract it before you compute shares. `cargo faster check-cost` leaves it out and reports it once as `profiler overhead`.
 
 `crox` converts a profile into the Chrome trace format, which you can open in `chrome://tracing` or in [Perfetto](https://ui.perfetto.dev) to see the nesting on a timeline. `flamegraph` produces a flame graph SVG. Both are useful for seeing which function bodies dominate, especially with `args` recorded, because each event carries the name of the function (or the predicate) it was working on. With a few lines of `jq` over the `crox` output you can group `evaluate_obligation` events by predicate, or group `check_coroutine_obligations` by the function they were checking. That's exactly how the case study found its cause.
 
