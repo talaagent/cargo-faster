@@ -83,13 +83,16 @@ enum Command {
         #[bpaf(positional("CRATE"))]
         krate: Option<String>,
     },
-    /// Read a --timings report: critical path, crates that serialize the build, long codegen
+    /// Read a --timings report: critical path, where the time went, cache hits and waits, slow links, contention
     #[bpaf(command)]
     Timings {
         /// Run `cargo check --workspace --timings` first
         run: bool,
         #[bpaf(external(nice))]
         nice: Nice,
+        /// An earlier report to compare unit times with (default for a build: the newest earlier check report)
+        #[bpaf(argument("FILE"))]
+        baseline: Option<PathBuf>,
         /// A cargo-timing.html report (default: the newest in target/cargo-timings)
         #[bpaf(positional("FILE"))]
         file: Option<PathBuf>,
@@ -208,12 +211,14 @@ fn run(opts: &Opts) -> Result<Report, Error> {
     if let Command::Timings {
         file: Some(file),
         run: false,
+        baseline,
         ..
     } = &opts.cmd
+        && Context::gather(opts.manifest_path.as_deref()).is_err()
     {
         return Ok(Report {
             workspace: None,
-            sections: vec![timings_file_section(file)?],
+            sections: vec![timings_file_section(None, file, baseline.as_deref())?],
             skipped: Vec::new(),
         });
     }
@@ -244,18 +249,21 @@ fn run(opts: &Opts) -> Result<Report, Error> {
             run,
             nice,
             nextest_args,
-        } => {
-            let inputs = tests::Inputs::gather(&ctx);
-            report.sections.push(tests::check(&ctx, &inputs));
-            if *run {
-                test_run_sections(&ctx, &inputs, nice.n, nextest_args, &mut report)?;
-            }
-        }
+        } => tests_sections(&ctx, *run, nice.n, nextest_args, &mut report)?,
         Command::Rdeps { krate } => report.sections.push(rdeps_section(&m, krate.as_deref())?),
-        Command::Timings { file, run, nice } => {
-            report
-                .sections
-                .push(timings_section(&ctx, file.as_deref(), *run, nice.n)?);
+        Command::Timings {
+            file,
+            run,
+            nice,
+            baseline,
+        } => {
+            report.sections.push(timings_section(
+                &ctx,
+                file.as_deref(),
+                *run,
+                nice.n,
+                baseline.as_deref(),
+            )?);
         }
         Command::CheckCost {
             package,
@@ -354,7 +362,7 @@ fn full_report(ctx: &Context, m: &cargo_faster::context::Metadata, report: &mut 
     report
         .sections
         .push(graph::section(&graph::gather(m), None));
-    match timings_section(ctx, None, false, 0) {
+    match timings_section(ctx, None, false, 0, None) {
         Ok(s) => report.sections.push(s),
         Err(e) => report.skipped.push(Fact {
             key: "timings".into(),
@@ -402,6 +410,7 @@ fn timings_section(
     file: Option<&Path>,
     run: bool,
     nice: i32,
+    baseline: Option<&Path>,
 ) -> Result<Section, Error> {
     if run {
         let out = build(ctx, nice, cargo_bin(&ctx.env))
@@ -419,18 +428,23 @@ fn timings_section(
         Some(f) => f.to_path_buf(),
         None => timings::newest_report(&ctx.target_dir()).ok_or(Error::NoTimings)?,
     };
-    timings_file_section(&path)
+    timings_file_section(Some(ctx), &path, baseline)
 }
 
-/// `tests --run`: time the test build, run the tests, report both, then
-/// the build's timings.
-fn test_run_sections(
+/// `tests`: the configuration checks; with `--run`, also time the test
+/// build, run the tests, report both, then the build's timings.
+fn tests_sections(
     ctx: &Context,
-    inputs: &tests::Inputs,
+    run: bool,
     nice: i32,
     args: &[String],
     report: &mut Report,
 ) -> Result<(), Error> {
+    let inputs = tests::Inputs::gather(ctx);
+    report.sections.push(tests::check(ctx, &inputs));
+    if !run {
+        return Ok(());
+    }
     let build_start = SystemTime::now();
     let started = Instant::now();
     let built = build(ctx, nice, cargo_bin(&ctx.env))
@@ -494,7 +508,9 @@ fn test_run_sections(
             .is_ok_and(|t| t >= build_start)
     });
     match fresh {
-        Some(path) => report.sections.push(timings_file_section(&path)?),
+        Some(path) => report
+            .sections
+            .push(timings_file_section(Some(ctx), &path, None)?),
         None => report.skipped.push(Fact {
             key: "timings".into(),
             value: "the test build wrote no cargo-timing.html".into(),
@@ -503,12 +519,49 @@ fn test_run_sections(
     Ok(())
 }
 
-fn timings_file_section(path: &Path) -> Result<Section, Error> {
-    let html =
-        std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
-    let t = timings::Timings::parse_html(&html)?;
-    Ok(timings::section(
-        &timings::analyze(&t),
-        &path.display().to_string(),
-    ))
+/// Read a report; with a workspace, join the cache wrapper's records,
+/// compare with a baseline (given, or the newest earlier check report when
+/// this one is a build) and count the workspace crates it rebuilt.
+fn timings_file_section(
+    ctx: Option<&Context>,
+    path: &Path,
+    baseline: Option<&Path>,
+) -> Result<Section, Error> {
+    let read = |p: &Path| -> Result<timings::Timings, Error> {
+        let html =
+            std::fs::read_to_string(p).map_err(|e| format!("reading {}: {e}", p.display()))?;
+        Ok(timings::Timings::parse_html(&html)?)
+    };
+    let mut t = read(path)?;
+    let base = match baseline {
+        Some(b) => Some((b.to_path_buf(), read(b)?)),
+        None if !t.is_check() => timings::check_before(path),
+        None => None,
+    };
+    let ws = ctx.and_then(|c| c.metadata.as_ref().map(timings::Workspace::from_metadata));
+    let mut joined = None;
+    if let (Some(c), Some(start)) = (ctx, t.start_unix_ms) {
+        let events = timings::wrapper::gather(c, start);
+        if !events.is_empty() {
+            joined = Some(timings::wrapper::join(&mut t, &events));
+        }
+    }
+    let a = timings::analyze_with(
+        &t,
+        timings::Extra {
+            baseline: base.as_ref().map(|(_, b)| b),
+            workspace: ws.as_ref(),
+        },
+    );
+    let mut s = timings::section(&a, &path.display().to_string());
+    if let Some((p, _)) = &base {
+        s.fact("baseline", p.display().to_string());
+    }
+    if joined == Some(0) {
+        s.fact(
+            "cache",
+            "kache has records for this period but none matched the report's units",
+        );
+    }
+    Ok(s)
 }

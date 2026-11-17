@@ -92,7 +92,19 @@ Below the chart is a second graph showing concurrency over time: how many units 
 
 At the bottom is a table of every unit with its total time and its codegen time, sorted longest first. For each unit, Cargo also records which other units became ready to start when this one finished: its *unlocked units*. A unit that unlocks a lot of others is a bottleneck. If it finished earlier, a whole set of work could start earlier. In the chart, you can see these relationships drawn between bars. The report distinguishes units unlocked by this unit's metadata (the `.rmeta`, under pipelining) from units unlocked only when it finished entirely, like a binary waiting for an `.rlib`.
 
-`cargo faster timings` reads this report for you and prints the critical path and the codegen-heavy units.
+`cargo faster timings` reads this report for you and prints the critical path, the codegen-heavy units, and where the time went: how much of it was checks, library builds, binaries and tests (codegen and link), and build scripts.
+
+### Compiles, cache hits and waits
+
+The timeline tells you when `rustc` ran, but not what it was doing. With a compiler cache in front of `rustc`, a 40 second bar may be a real compile, an incremental compile the cache passed through, or a wait: for a slot in the cache's own scheduler, or for another build that's compiling the same thing. A cache hit shows up as a short bar.
+
+Three numbers tell those apart:
+
+- **Gaps on the critical path.** A unit on the path that started well after the unit it waited for had finished was waiting on something else: a job slot, Cargo's lock, or the machine. Lots of gap time means the build wasn't bound by its own graph.
+- **What the cache did with each unit.** kache keeps a record of every invocation: hit, miss, or passthrough (and why), how long `rustc` ran, and how long it waited. `cargo faster timings` asks `kache stats` for the records of the build's time window and joins them to the report's units, so the critical path shows `hit`, `miss` or `incr` and the wait for each step. An edit to a workspace crate is usually all `incr`: incremental builds aren't cached, by design.
+- **The same units in a check.** A library built under `cargo build` does everything `cargo check` does before writing its metadata. If that part takes far longer than the whole check of the same crate did, the build wasn't slow because of codegen; the machine was busy. Run `cargo check --timings` just before the build, and `cargo faster timings` compares the two reports unit by unit.
+
+If none of those explains a slow build, look at what it rebuilt. An edit to a crate near the root of the workspace rebuilds everything above it (see [rebuild fan-out](#rebuild-fan-out)), and under `cargo build` that includes linking every binary and test that depends on it.
 
 ### Self-profiling one crate
 
@@ -635,7 +647,9 @@ On macOS, Apple's newer linker (introduced with Xcode 15, sometimes called `ld-p
 
 The other big factor is **debug info**. Debug info is often most of the size of a debug binary, and the linker has to process all of it. If linking dominates your timeline even with a fast linker, reduce debug info, as described in the next section. And remember that every test binary is linked separately, which matters a lot for test suites with many integration test files.
 
-`cargo faster setup` checks which linker you're using, along with your profile settings.
+**Many binaries.** A `cargo build` of a workspace with forty binaries and test targets links forty times, and an edit to a shared crate relinks every one of them, often at the very end of the build, when nothing else is left to run in parallel. If you're iterating on one binary, build just that one (`cargo build --bin app`) and leave the full build for when you need it. If many of the binaries are integration tests, see [fewer test binaries](#fewer-test-binaries).
+
+`cargo faster setup` checks which linker you're using, along with your profile settings. `cargo faster timings` reports how much of a build went to units that link, and how long the build ran on linking alone after everything else finished.
 
 ## Profile settings
 
@@ -856,6 +870,8 @@ Finally, the build runs on a computer, and that computer may be busier than you 
 **Disk.** `target/` directories grow large with several worktrees and profiles, and a full disk fails builds in confusing ways. `cargo clean` reclaims it all.
 
 **Same filesystem.** Compiler caches and Cargo copy a lot of files. When the cache directory and the target directory are on the same filesystem, a cache can use hard links or, on filesystems like Btrfs and XFS, reflinks (copy-on-write clones), which are nearly instant. Across filesystems, every hit is a full copy of the data. Keep `target/` and your cache directory on the same filesystem where you can.
+
+**Contention shows up in timings.** When the same crate takes three times longer in a build than its check took minutes earlier, the code didn't change; the machine did. `cargo faster timings` compares a build with an earlier check report and says so.
 
 `cargo faster machine` reports load, memory, swap, and disk, and whether your cache and target directories share a filesystem.
 

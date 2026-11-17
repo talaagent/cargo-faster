@@ -47,6 +47,13 @@ If `cargo faster` isn't installed: `cargo install --locked cargo-faster`, or
    go to step 4. Units that spend most of their time in codegen point to generics and
    monomorphization (`cargo llvm-lines`). Build scripts and proc macros show up too.
 
+   For a slow `cargo build` (not a check), run `cargo check --workspace --timings` first and
+   then the build with `--timings`: `cargo faster timings` compares the build with that check
+   (or `--baseline FILE`), and with kache it shows each unit's cache outcome and waits. The
+   facts and findings then say whether the time went to rebuilt workspace crates
+   (`edit-rebuilt-many`), links (`slow-links`), waits (`wrapper-wait`,
+   `critical-path-waiting`) or a busy machine (`contention`).
+
 4. **Profile the slow crate.**
 
    ```sh
