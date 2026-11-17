@@ -1,0 +1,36 @@
+{
+ "schema_version": 1,
+ "command": "stats",
+ "success": true,
+ "disk": {
+  "store_bytes": 70974295695,
+  "store_limit_bytes": 322122547200,
+  "disk_private_bytes": 20356235755,
+  "cloned_into_targets_bytes": 50618059940,
+  "snapshot_retained_bytes": 0,
+  "cloned_coverage": "partial"
+ },
+ "lifetime": {
+  "since": "2026-11-16T14:00:59.564620297Z",
+  "hits": 30261,
+  "hit_compile_time_ms": 44546907,
+  "zero_copy_bytes": 81095097091,
+  "copied_bytes": 20564553294,
+  "pruned_automatic_bytes": 27571930567,
+  "pruned_requested_bytes": 0
+ },
+ "hit_rate_pct": 70.72971204188482,
+ "weighted_hit_rate_pct": 51.82557351160055,
+ "time_saved_ms": 44546907,
+ "local_hits": 30261,
+ "dups": 2566,
+ "misses": 9957,
+ "daemon_version": "2.0.1",
+ "stores": [
+  {
+   "path": "/home/user/.cache/kache-store",
+   "bytes": 71792339833,
+   "entries": 8980
+  }
+ ]
+}
