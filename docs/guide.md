@@ -861,7 +861,7 @@ $ cargo nextest run --workspace --no-run --timings   # the build
 $ cargo nextest run --workspace                      # the run
 ```
 
-`cargo faster tests --run` does both. Arguments after `--` go to both commands, e.g. `cargo faster tests --run -- --profile ci`. It reports:
+`cargo faster tests --run` does both. Arguments after `--` go to both commands, e.g. `cargo faster tests --run -- --profile ci`, except that the `--no-run` build drops the ones nextest only accepts for a run (`--no-fail-fast`, `--test-threads`, `--retries`, `-E` and other filters, reporter options, test binary arguments after a second `--`), so a gate's command line can be pasted as is. It reports:
 
 - **build vs run wall time.** In big workspaces the build is often most of the wait: in one workspace, building the tests took 9 minutes cold and 98 s after a one-line edit, and running all 3,885 of them took 66 s. Faster tests wouldn't have helped; the timings section (from the `--no-run` build) shows which units to work on.
 - **the slowest tests and test binaries.** Under nextest every test is a process, so a binary's fastest test is roughly what it costs to start one of its processes.

@@ -782,7 +782,7 @@ fn tests_sections(
     let started = Instant::now();
     let built = build(ctx, nice, cargo_bin(&ctx.env))
         .args(["nextest", "run", "--workspace", "--no-run", "--timings"])
-        .args(args)
+        .args(testrun::build_args(args))
         .current_dir(ctx.root())
         .output()?;
     let build_secs = started.elapsed().as_secs_f64();
@@ -792,7 +792,8 @@ fn tests_sections(
     let started = Instant::now();
     let ran = build(ctx, nice, cargo_bin(&ctx.env))
         .env("NEXTEST_EXPERIMENTAL_LIBTEST_JSON", "1")
-        .args(["nextest", "run", "--workspace", "--no-fail-fast"])
+        .args(["nextest", "run", "--workspace"])
+        .args(testrun::fail_fast_arg(args))
         .args(["--message-format", "libtest-json-plus"])
         .args(testrun::no_tests_arg(args))
         .args(args)

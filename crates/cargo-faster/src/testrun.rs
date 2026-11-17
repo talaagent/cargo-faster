@@ -42,6 +42,123 @@ pub fn duration_secs(s: &str) -> Option<f64> {
     any.then_some(total)
 }
 
+/// `cargo nextest run` options that only affect running tests, with a
+/// value. nextest rejects them (and test filters) next to `--no-run`.
+const RUN_ONLY_VALUE: &[&str] = &[
+    "-E",
+    "--filterset",
+    "--filter-expr",
+    "--run-ignored",
+    "--partition",
+    "-j",
+    "--test-threads",
+    "--retries",
+    "--max-fail",
+    "--no-tests",
+    "--stress-count",
+    "--stress-duration",
+    "--debugger",
+    "--tracer",
+    "--failure-output",
+    "--success-output",
+    "--status-level",
+    "--final-status-level",
+    "--show-progress",
+    "--max-progress-running",
+    "--message-format",
+    "--message-format-version",
+];
+
+/// Run-only switches.
+const RUN_ONLY_SWITCH: &[&str] = &[
+    "--ignore-default-filter",
+    "--fail-fast",
+    "--no-fail-fast",
+    "--hide-progress-bar",
+    "--no-output-indent",
+    "--no-capture",
+    "--nocapture",
+    "--no-run",
+];
+
+/// Build options that take a separate value, so the value isn't mistaken
+/// for a test filter.
+const BUILD_VALUE: &[&str] = &[
+    "-P",
+    "--profile",
+    "-p",
+    "--package",
+    "--exclude",
+    "-F",
+    "--features",
+    "--cargo-profile",
+    "--target",
+    "--target-dir",
+    "--manifest-path",
+    "--bin",
+    "--example",
+    "--test",
+    "--bench",
+    "--config",
+    "--config-file",
+    "--tool-config-file",
+    "--color",
+    "-Z",
+    "--build-jobs",
+    "--archive-file",
+    "--archive-format",
+    "--extract-to",
+    "--workspace-remap",
+    "--binaries-metadata",
+    "--cargo-metadata",
+    "--target-dir-remap",
+    "--user-config-file",
+];
+
+/// The arguments for the `cargo nextest run --no-run` build: `args` without
+/// run-only options (with their values), test filters, and anything after
+/// `--` (test binary arguments). The run step gets all of `args`.
+#[must_use]
+pub fn build_args(args: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let flag = a.split_once('=').map_or(a.as_str(), |(f, _)| f);
+        let short_joined = |set: &[&str]| {
+            set.iter()
+                .any(|f| f.len() == 2 && a.len() > 2 && !a.starts_with("--") && a.starts_with(f))
+        };
+        if a == "--" {
+            break;
+        } else if RUN_ONLY_SWITCH.contains(&a.as_str()) {
+        } else if RUN_ONLY_VALUE.contains(&flag) || short_joined(RUN_ONLY_VALUE) {
+            if flag == a.as_str() && !short_joined(RUN_ONLY_VALUE) {
+                it.next();
+            }
+        } else if !a.starts_with('-') {
+            // A test filter.
+        } else {
+            out.push(a.clone());
+            if BUILD_VALUE.contains(&a.as_str())
+                && let Some(v) = it.next()
+            {
+                out.push(v.clone());
+            }
+        }
+    }
+    out
+}
+
+/// `--no-fail-fast` for the run, unless the arguments already pick a
+/// fail-fast mode.
+#[must_use]
+pub fn fail_fast_arg(args: &[String]) -> Option<&'static str> {
+    (!args
+        .iter()
+        .any(|a| a == "--no-fail-fast" || a == "--fail-fast" || a.starts_with("--max-fail")))
+    .then_some("--no-fail-fast")
+}
+
 /// The value of `--flag v` or `--flag=v` in nextest arguments.
 fn arg_value(args: &[String], flags: &[&str]) -> Option<String> {
     args.iter().enumerate().find_map(|(i, a)| {
@@ -379,6 +496,51 @@ not json
         assert_eq!(slow_timeout(Some(&cfg), "ci"), 30.0);
         assert_eq!(slow_timeout(None, "default"), 60.0);
         assert_eq!(profile(&args(&[]), Some("ci")), "ci");
+    }
+
+    #[test]
+    fn build_args_drop_run_only_options() {
+        let args = |a: &[&str]| a.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        let gate = args(&[
+            "--profile",
+            "gate",
+            "--no-fail-fast",
+            "--test-threads",
+            "8",
+            "-j4",
+            "--retries=2",
+            "-E",
+            "package(app)",
+            "-p",
+            "app",
+            "--features",
+            "db",
+            "--cargo-profile=ci",
+            "db::",
+            "--run-ignored",
+            "all",
+            "--",
+            "--exact",
+        ]);
+        assert_eq!(
+            build_args(&gate),
+            args(&[
+                "--profile",
+                "gate",
+                "-p",
+                "app",
+                "--features",
+                "db",
+                "--cargo-profile=ci"
+            ])
+        );
+        assert_eq!(fail_fast_arg(&gate), None);
+        assert_eq!(fail_fast_arg(&args(&["--max-fail=3"])), None);
+        assert_eq!(fail_fast_arg(&args(&["-P", "ci"])), Some("--no-fail-fast"));
+        assert_eq!(
+            build_args(&args(&["-P", "ci", "--release"])),
+            args(&["-P", "ci", "--release"])
+        );
     }
 
     #[test]
