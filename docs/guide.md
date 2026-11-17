@@ -587,6 +587,16 @@ cargo enables dev-dependency features only when it builds that crate's tests, ex
 
 `cargo faster deps` flags non-optional normal and build dependencies that enable features named `testing`, `test-*`, `mock*` or `fake*`, and skips workspace crates that are themselves test support (`*-test-utils`, `*-testing`). A test feature in the root's `[workspace.dependencies]` is reported once, with the number of crates that inherit it: every one of them gets it in normal builds, so take it out there and add it to the `[dev-dependencies]` entries that need it. If a feature with such a name is needed at runtime, it isn't test-only; leave it.
 
+Moving the feature only helps builds without tests: release and production builds such as `cargo build --release` or `cargo build -p app`. A `cargo clippy --workspace --all-targets` or `cargo nextest run --workspace` builds every crate's dev-dependencies, which turns the feature on again, so those gain nothing from the move. `cargo faster deps` says so in the finding.
+
+### Dev-dependency features split the build
+
+The other side of the same coin: a `[dev-dependencies]` entry that turns on a feature of another workspace crate (`app-core = { path = "../core", features = ["testing"] }` in the binary's dev-dependencies) gives that crate two feature sets. Builds that include the binary's tests (`--all-targets`, `cargo test`, nextest) compile `app-core` with `testing`; builds that don't (`cargo build --release`, a production `cargo clippy -p app --lib --bins`) compile it without. Each set is a separate compile of `app-core` and of every workspace crate that depends on it, with its own cache keys. A gate that runs both a production check and a `--workspace --all-targets` build compiles those crates twice; on one workspace the production clippy took 213 s of a 387 s gate because nothing it built was shared.
+
+If the repo runs only one kind of build, this costs nothing. If it runs both, pick one feature set: make the feature additive and cheap enough to leave on everywhere (enable it from `[dependencies]` and accept the helpers in normal builds), or drop the separate production step and let the `--workspace --all-targets` build cover it, checking the production-only code (`cfg(not(feature = "testing"))`) some other way, such as a release build in CI only.
+
+`cargo faster deps` lists each such dev-dependency with the workspace crates it splits: the feature's crate and its workspace reverse dependencies, counted from `cargo metadata`.
+
 ## Caching
 
 The fastest compilation is the one that doesn't happen. Rust has several layers of caching, and they behave in ways that aren't always obvious.
@@ -915,7 +925,7 @@ Finally, the build runs on a computer, and that computer may be busier than you 
 
 **Contention shows up in timings.** When the same crate takes three times longer in a build than its check took minutes earlier, the code didn't change; the machine did. `cargo faster timings` compares a build with an earlier check report and says so.
 
-`cargo faster machine` reports load, memory, swap, and disk, and whether your cache and target directories share a filesystem.
+`cargo faster machine` reports load, memory, swap, and disk, and whether your cache and target directories share a filesystem. When the load is high, it samples `/proc` for half a second on Linux and names the processes using the most CPU (grouped by name, in CPUs), so you can tell another build from a nix build or a test suite.
 
 ## Case study: a 312 second check
 
