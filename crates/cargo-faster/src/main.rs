@@ -82,16 +82,17 @@ enum Command {
     #[bpaf(
         command,
         footer(
-            "Uses RUSTC_BOOTSTRAP=1 so a stable rustc accepts -Zself-profile. `-p` picks the crate to profile; cargo itself always builds with --workspace so caches keyed on the package set (kache) stay warm."
+            "Uses RUSTC_BOOTSTRAP=1 so a stable rustc accepts -Zself-profile. `-p` picks the package and --lib/--bin/--test/--example/--bench the target; the rustc command is captured from `cargo check --workspace -vv` with the matching filter (--lib, --bin NAME, ...; with --tests also --profile test), which first checks the selected targets in every member and what they depend on. Cargo always gets --workspace, never -p, so caches keyed on the package set (kache) stay warm. Target flags in CARGO_ARGS (-- --tests) replace the filter; the lib's --test build is then profiled when they include --tests."
         )
     )]
     CheckCost {
         /// The workspace member to profile (default: the root package, else the biggest)
         #[bpaf(short('p'), long, argument("NAME"))]
         package: Option<String>,
-        /// Profile this binary target instead of the library
-        #[bpaf(argument("NAME"))]
-        bin: Option<String>,
+        #[bpaf(external(target_sel), optional)]
+        target: Option<TargetSel>,
+        /// Profile the --test (unit test, cfg(test)) build of the library, binary or example
+        tests: bool,
         /// Write the profile into DIR and keep it
         #[bpaf(argument("DIR"))]
         keep: Option<PathBuf>,
@@ -103,6 +104,35 @@ enum Command {
         /// Extra `cargo check` arguments, after `--` (e.g. -- --features x)
         #[bpaf(positional("CARGO_ARGS"), strict, many)]
         cargo_args: Vec<String>,
+    },
+}
+
+// Which target `check-cost` profiles. No doc comment: bpaf would make it a
+// help section of its own.
+#[derive(Debug, Clone, Bpaf)]
+enum TargetSel {
+    /// Profile the library (the default; a package without one: its first binary)
+    #[bpaf(long("lib"))]
+    Lib,
+    Bin {
+        /// Profile this binary
+        #[bpaf(argument("NAME"))]
+        bin: String,
+    },
+    Test {
+        /// Profile this integration test (tests/NAME.rs; always built with --test)
+        #[bpaf(argument("NAME"))]
+        test: String,
+    },
+    Example {
+        /// Profile this example
+        #[bpaf(argument("NAME"))]
+        example: String,
+    },
+    Bench {
+        /// Profile this benchmark (always built with --test)
+        #[bpaf(argument("NAME"))]
+        bench: String,
     },
 }
 
@@ -205,7 +235,8 @@ fn run(opts: &Opts) -> Result<Report, Error> {
         }
         Command::CheckCost {
             package,
-            bin,
+            target,
+            tests,
             keep,
             nice,
             profile: _,
@@ -213,7 +244,15 @@ fn run(opts: &Opts) -> Result<Report, Error> {
         } => {
             let o = checkcost::Options {
                 package: package.clone(),
-                bin: bin.clone(),
+                target: match target.clone() {
+                    None => checkcost::Select::Auto,
+                    Some(TargetSel::Lib) => checkcost::Select::Lib,
+                    Some(TargetSel::Bin { bin }) => checkcost::Select::Bin(bin),
+                    Some(TargetSel::Test { test }) => checkcost::Select::Test(test),
+                    Some(TargetSel::Example { example }) => checkcost::Select::Example(example),
+                    Some(TargetSel::Bench { bench }) => checkcost::Select::Bench(bench),
+                },
+                tests: *tests,
                 cargo_args: cargo_args.clone(),
                 nice: nice.n,
                 keep: keep.clone(),
@@ -312,8 +351,25 @@ fn profile_section(
     let name = crate_name.map_or_else(|| checkcost::crate_from_file(file), str::to_owned);
     eprintln!("cargo faster: analyzing {}", file.display());
     let p = checkcost::load(file)?;
+    let unit = shlex::split(&p.cmd).map(|args| checkcost::Unit::from_args(&args));
     let mut s = profile::section(&profile::analyze(&p), &name, module_lines);
-    s.fact("measured with", "RUSTC_BOOTSTRAP=1 -Zself-profile -Zself-profile-events=default,args, CARGO_INCREMENTAL=0, no RUSTC_WRAPPER");
+    if let Some(u) = &unit {
+        s.name = format!("{} ({})", s.name, u.label());
+        s.facts.insert(
+            0,
+            Fact {
+                key: "target".into(),
+                value: u.describe(),
+            },
+        );
+    }
+    s.fact(
+        "measured with",
+        format!(
+            "rustc{} with RUSTC_BOOTSTRAP=1 -Zself-profile -Zself-profile-events=default,args, CARGO_INCREMENTAL=0, no RUSTC_WRAPPER",
+            if unit.as_ref().is_some_and(|u| u.test) { " --test" } else { "" }
+        ),
+    );
     Ok(s)
 }
 
