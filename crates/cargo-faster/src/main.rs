@@ -761,6 +761,36 @@ fn fresh_report(ctx: &Context, since: SystemTime) -> Option<PathBuf> {
         })
 }
 
+/// Each test binary's test count, from `cargo nextest list` after the
+/// `--no-run` build (so it only lists); empty if listing fails.
+fn list_binaries(ctx: &Context, nice: i32, args: &[String]) -> Result<Vec<testrun::Listed>, Error> {
+    let listed = build(ctx, nice, cargo_bin(&ctx.env))
+        .args(["nextest", "list", "--workspace", "--message-format", "json"])
+        .args(testrun::build_args(args))
+        .current_dir(ctx.root())
+        .output()?;
+    Ok(if listed.success() {
+        testrun::parse_list(&listed.stdout_lossy())
+    } else {
+        Vec::new()
+    })
+}
+
+/// The test units of a `--no-run` build's timings report, and whether the
+/// build compiled nothing.
+fn test_timings(path: &Path) -> Option<(Vec<testrun::TestUnit>, bool)> {
+    let html = std::fs::read_to_string(path).ok()?;
+    let t = timings::Timings::parse_html(&html).ok()?;
+    let a = timings::analyze(&t);
+    Some((
+        testrun::test_units(
+            &t,
+            &a.critical_path.iter().map(|p| &p.of).collect::<Vec<_>>(),
+        ),
+        a.compiled == 0,
+    ))
+}
+
 /// `tests`: the configuration checks; with `--run`, also time the test
 /// build, run the tests, report both, then the build's timings.
 fn tests_sections(
@@ -770,9 +800,9 @@ fn tests_sections(
     args: &[String],
     report: &mut Report,
 ) -> Result<(), Error> {
-    let inputs = tests::Inputs::gather(ctx);
-    report.sections.push(tests::check(ctx, &inputs));
+    let mut inputs = tests::Inputs::gather(ctx);
     if !run {
+        report.sections.push(tests::check(ctx, &inputs));
         return Ok(());
     }
     if !inputs.nextest_installed {
@@ -782,17 +812,19 @@ fn tests_sections(
     let started = Instant::now();
     let built = build(ctx, nice, cargo_bin(&ctx.env))
         .args(["nextest", "run", "--workspace", "--no-run", "--timings"])
-        .args(args)
+        .args(testrun::build_args(args))
         .current_dir(ctx.root())
         .output()?;
     let build_secs = started.elapsed().as_secs_f64();
     if !built.success() {
         return Err(format!("building the tests failed\n{}", built.stderr_lossy().trim()).into());
     }
+    let binaries = list_binaries(ctx, nice, args)?;
     let started = Instant::now();
     let ran = build(ctx, nice, cargo_bin(&ctx.env))
         .env("NEXTEST_EXPERIMENTAL_LIBTEST_JSON", "1")
-        .args(["nextest", "run", "--workspace", "--no-fail-fast"])
+        .args(["nextest", "run", "--workspace"])
+        .args(testrun::fail_fast_arg(args))
         .args(["--message-format", "libtest-json-plus"])
         .args(testrun::no_tests_arg(args))
         .args(args)
@@ -812,9 +844,14 @@ fn tests_sections(
         )
         .into());
     }
-    let config = inputs.nextest_config.as_ref();
+    // Only the report this build wrote, not an older one.
+    let timings_path = fresh_report(ctx, build_start);
+    let timings = timings_path.as_deref().and_then(test_timings);
+    let build_fresh = timings.as_ref().is_some_and(|t| t.1);
+    let config = inputs.nextest_config.clone();
+    let config = config.as_ref();
     let profile = testrun::profile(args, ctx.var("NEXTEST_PROFILE"));
-    let mut s = testrun::section(&testrun::Inputs {
+    let run_inputs = testrun::Inputs {
         build_secs: Some(build_secs),
         run_secs,
         threads: testrun::threads(
@@ -826,7 +863,13 @@ fn tests_sections(
         ),
         slow_timeout: testrun::slow_timeout(config, &profile),
         run,
-    });
+        binaries,
+        units: timings.map(|t| t.0).unwrap_or_default(),
+        build_fresh,
+    };
+    inputs.process_cost = testrun::process_cost(&run_inputs);
+    report.sections.push(tests::check(ctx, &inputs));
+    let mut s = testrun::section(&run_inputs);
     s.facts.insert(
         0,
         Fact {
@@ -835,8 +878,9 @@ fn tests_sections(
         },
     );
     report.sections.push(s);
-    // Only the report this build wrote, not an older one.
-    match fresh_report(ctx, build_start) {
+    match timings_path {
+        // The test run section says the build was fresh.
+        Some(_) if build_fresh => {}
         Some(path) => report
             .sections
             .push(timings_file_section(Some(ctx), &path, None)?),

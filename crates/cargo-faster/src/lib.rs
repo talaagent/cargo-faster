@@ -65,6 +65,7 @@ pub const GUIDE_ANCHORS: &[&str] = &[
     "test-runners-that-wrap-every-test",
     "database-backed-tests",
     "fewer-test-binaries",
+    "test-binaries-without-tests",
     "measuring-a-test-run",
     "the-machine",
     "procedural-macros",
