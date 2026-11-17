@@ -13,12 +13,13 @@ homepage = "https://github.com/talaagent/cargo-faster"
 authors = ["Ian Macalinao <github@igm.pub>"]
 
 [workspace.dependencies]
+nextest-libtest-json = { version = "0.1.0", path = "crates/nextest-libtest-json" }
 analyzeme = "12.0.3"
 bpaf = { version = "0.9.20", features = ["derive", "autocomplete"] }
 bpaf-kit = { version = "0.2.1", features = ["man", "log", "table"] }
 bpaf-kit-build = "0.2.1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
 shlex = "2.0"
 thiserror = "2"
 toml = { version = "1.2", default-features = false, features = ["display", "parse", "serde", "std"] }

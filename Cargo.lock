@@ -102,6 +102,7 @@ dependencies = [
  "bpaf",
  "bpaf-kit",
  "bpaf-kit-build",
+ "nextest-libtest-json",
  "serde",
  "serde_json",
  "shlex",
@@ -359,6 +360,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "723e3ebdcdc5c023db1df315364573789f8857c11b631a2fdfad7c00f5c046b4"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "nextest-libtest-json"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

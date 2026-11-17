@@ -1,0 +1,10 @@
+{"type":"suite","event":"started","test_count":3,"nextest":{"crate":"demo","test_binary":"demo","kind":"lib"}}
+{"type":"test","event":"started","name":"demo::demo$tests::ignored"}
+{"type":"test","event":"started","name":"demo::demo$tests::passes"}
+{"type":"test","event":"started","name":"demo::demo$tests::fails"}
+{"type":"test","event":"ignored","name":"demo::demo$tests::ignored"}
+{"type":"test","event":"ok","name":"demo::demo$tests::passes","exec_time":0.003154019}
+{"type":"suite","event":"ok","passed":1,"failed":0,"ignored":1,"measured":0,"filtered_out":0,"exec_time":0.003154019,"nextest":{"crate":"demo","test_binary":"demo","kind":"lib"}}
+{"type":"suite","event":"started","test_count":3,"nextest":{"crate":"demo","test_binary":"demo","kind":"lib"}}
+{"type":"test","event":"failed","name":"demo::demo$tests::fails#2","exec_time":0.00248946,"stdout":"\nthread 'tests::fails' (3051244) panicked at src/lib.rs:7:9:\nassertion `left == right` failed: math is broken\n  left: 2\n right: 3\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n"}
+{"type":"suite","event":"failed","passed":0,"failed":1,"ignored":1,"measured":0,"filtered_out":1,"exec_time":0.00248946,"nextest":{"crate":"demo","test_binary":"demo","kind":"lib"}}
