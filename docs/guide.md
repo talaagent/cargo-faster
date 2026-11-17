@@ -906,4 +906,16 @@ A few things to take away from this:
 
 ## Using cargo faster
 
-Everything in this guide can be done by hand with Cargo, `rustc`, and the tools mentioned along the way. `cargo faster` automates the measuring: it reads your timeline, self-profiles a crate and attributes the trait-solving time, shows what rebuilds when you edit a crate, and audits your configuration, caches, test setup, and machine. See [Using cargo faster](cargo-faster.md).
+Everything in this guide can be done by hand with Cargo, `rustc`, and the tools mentioned along the way. `cargo faster` automates the measuring. Each subcommand maps to a part of this guide:
+
+- `cargo faster` runs every quick check at once and builds nothing. Start here.
+- `cargo faster timings` reads a `--timings` report and finds [the critical path](#the-critical-path) and the crates that serialize the build.
+- `cargo faster check-cost` does the [self-profiling](#self-profiling-one-crate) from the case study for you: it replays one crate's `rustc` command with `-Zself-profile`, then groups the [trait solving](#trait-solving-and-async-code) by predicate and by function body.
+- `cargo faster setup` audits [linking](#linking) and [profile settings](#profile-settings).
+- `cargo faster cache` checks [caching](#caching) and cold worktrees.
+- `cargo faster machine` checks [the machine](#the-machine) before you believe any timing.
+- `cargo faster deps` looks for [heavy features and duplicate versions](#dependencies-and-features).
+- `cargo faster tests` checks how your [test suite](#test-suites) runs.
+- `cargo faster rdeps` shows [rebuild fan-out](#rebuild-fan-out) and crates worth [splitting](#splitting-a-big-crate).
+
+See [Using cargo faster](cargo-faster.md) for how to read each one's output, with real examples. If you work with a coding agent, the same workflow is written down as a skill in [`skills/debug-slow-rust-builds`](../skills/debug-slow-rust-builds/SKILL.md).
