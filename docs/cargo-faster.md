@@ -135,7 +135,7 @@ $ cargo faster check-cost -p tala-agent-bin
 Here's what it does, so you know what you're running:
 
 1. It updates the modification time of the crate's root source file. That's the only change it makes to your tree, and the contents stay the same.
-2. It runs `cargo check --workspace -vv` and captures the exact `rustc` command line Cargo uses for your crate. It always uses `--workspace`, and never `cargo -p`, even when you pass `-p` to `cargo faster`. Some caches, like kache, key on the set of packages being built, so `cargo -p` would miss the cache and rebuild your dependencies.
+2. It runs `cargo check --workspace -vv` with a filter for the target you picked (`--lib`, `--bin NAME`, `--test NAME`, ...; `--profile test` for `--tests`) and captures the exact `rustc` command line Cargo uses for your crate. That build checks the selected targets in every member and everything they depend on, so on a cold cache it is most of the run. It always uses `--workspace`, and never `cargo -p`, even when you pass `-p` to `cargo faster`. Some caches, like kache, key on the set of packages being built, so `cargo -p` would miss the cache and rebuild your dependencies.
 3. It runs that `rustc` command again, by itself, with self-profiling turned on: `-Zself-profile -Zself-profile-events=default,args`, with `CARGO_INCREMENTAL=0` and no `RUSTC_WRAPPER`.
 4. It reads the profile and analyzes it.
 
@@ -148,21 +148,25 @@ Incremental compilation is off so the profile shows the full cost of checking th
 Options:
 
 - `-p NAME` picks the workspace member. The default is the root package, or the biggest member if there isn't one.
-- `--bin NAME` profiles a binary target instead of the library.
-- `-- ARGS` passes extra arguments to `cargo check`, like `-- --features postgres`.
+- `--lib`, `--bin NAME`, `--test NAME`, `--example NAME` and `--bench NAME` pick the target. The default is the library, or the first binary if there is no library. `--test NAME` is an integration test, `tests/NAME.rs`.
+- `--tests` profiles the `--test` build of the library, binary or example: the unit-test crate, with its `#[cfg(test)]` modules and the test harness. That is the crate `cargo test` and `cargo nextest` rebuild after every edit, and it is often much bigger than the library itself. Integration tests and benchmarks are always built with `--test`.
+- `-- ARGS` passes extra arguments to `cargo check`, like `-- --features postgres`. Target flags here (`-- --tests`, `-- --all-targets`) replace the filter `cargo faster` would add. When they produce both builds of the library, the normal one is profiled, unless they include `--tests` or `--profile test`; then it is the `--test` one.
 - `--keep DIR` writes the profile into `DIR` and keeps it, so you can analyze it again with `--profile` or open it with `summarize` and `crox` from [measureme](https://github.com/rust-lang/measureme).
 - `--profile FILE` analyzes an existing `.mm_profdata` file without building anything.
 - `--nice N` sets the priority, as with `timings`.
 
+The header and the `target` line say which build was profiled: `(lib)`, `(bin)`, `(lib, --test)` for unit tests, `(test)` for an integration test. With `--test`, `measured with` starts with `rustc --test`. Both come from the command line recorded in the profile, so `--profile FILE` shows them too.
+
 Here's a real profile of the binary crate from the case study, after the first fix:
 
 ```text
-== check-cost: tala_agent_bin
+== check-cost: tala_agent_bin (bin)
+  target         crates/tala-agent-bin/src/main.rs (bin, without #[cfg(test)] code)
   profiled time  38.7s wall, 38.6s across threads
   trait solving  32.1s (83%)
   proc macros    0.076s (0%)
   codegen        0.004s (0%)
-  measured with  RUSTC_BOOTSTRAP=1 -Zself-profile -Zself-profile-events=default,args, CARGO_INCREMENTAL=0, no RUSTC_WRAPPER
+  measured with  rustc with RUSTC_BOOTSTRAP=1 -Zself-profile -Zself-profile-events=default,args, CARGO_INCREMENTAL=0, no RUSTC_WRAPPER
 
   top queries by self time
   self    %      count   query

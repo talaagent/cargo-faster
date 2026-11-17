@@ -26,10 +26,10 @@ $ cargo faster check-cost -p tala-agent-bin
 ```
 
 ```text
-== check-cost: tala_agent_bin
+== check-cost: tala_agent_bin (bin)
   profiled time  38.7s wall, 38.6s across threads
   trait solving  32.1s (83%)
-  measured with  RUSTC_BOOTSTRAP=1 -Zself-profile -Zself-profile-events=default,args, CARGO_INCREMENTAL=0, no RUSTC_WRAPPER
+  measured with  rustc with RUSTC_BOOTSTRAP=1 -Zself-profile -Zself-profile-events=default,args, CARGO_INCREMENTAL=0, no RUSTC_WRAPPER
 
   most expensive obligations
   self    count  bodies  predicate
@@ -45,7 +45,7 @@ $ cargo faster check-cost -p tala-agent-bin
   [medium] Send/Sync proofs for `tala_agent::bot::Bot` are repeated in every async body
 ```
 
-`check-cost` runs on the stable toolchain. It sets `RUSTC_BOOTSTRAP=1` so that stable `rustc` accepts `-Zself-profile`, and it says so in the output.
+`--lib`, `--bin`, `--test`, `--example` and `--bench` pick the target, and `--tests` profiles the unit-test (`--test`) build, which is what `cargo test` rebuilds after an edit. `check-cost` runs on the stable toolchain. It sets `RUSTC_BOOTSTRAP=1` so that stable `rustc` accepts `-Zself-profile`, and it says so in the output.
 
 ## Subcommands
 
