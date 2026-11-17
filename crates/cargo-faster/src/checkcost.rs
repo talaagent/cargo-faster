@@ -623,7 +623,7 @@ pub fn load(path: &Path) -> Result<crate::profile::Profile, Error> {
     } else {
         path.to_path_buf()
     };
-    Ok(crate::profile::Profile::load(&stem)?)
+    crate::profile::Profile::load(&stem).map_err(|e| Error::Other(e.to_string()))
 }
 
 /// The crate name from a profile file name (`tala_agent-12345.mm_profdata`).

@@ -5,7 +5,7 @@
 # Nix dev shell has it; with rustup, `rustup target add wasm32v1-none`).
 set -euo pipefail
 
-crates=(nextest-libtest-json)
+crates=(nextest-libtest-json rustc-self-profile)
 
 for c in "${crates[@]}"; do
   cargo build --locked -p "$c" --no-default-features --target wasm32v1-none

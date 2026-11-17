@@ -38,6 +38,10 @@ repository under `tests/fixtures/cargo-faster/`.
 
 - `crates/nextest-libtest-json`: nextest's experimental libtest-json(-plus)
   output as typed events and a run summary.
+- `crates/rustc-self-profile`: rustc `-Zself-profile` analysis: queries,
+  per-body/item/module typeck and borrowck time, repeated trait
+  obligations, proc macros, profiler overhead (`load` via analyzeme is
+  std-only).
 
 `crates/cargo-faster` is a library (`src/lib.rs`, unstable API, for tests)
 and the `cargo-faster` binary (`src/main.rs`, the bpaf CLI).
@@ -57,8 +61,8 @@ and the `cargo-faster` binary (`src/main.rs`, the bpaf CLI).
 - `testrun.rs`: `tests --run` findings over a `nextest-libtest-json` run.
 - `tests.rs`: nextest config, target runners, `NEXTEST_TEST_THREADS`,
   database-backed tests.
-- `profile.rs`: self-profile analysis (`analyzeme` adapter plus a pure
-  aggregator over intervals); `checkcost.rs` runs the profile.
+- `profile.rs`: self-profile findings over a `rustc-self-profile`
+  analysis; `checkcost.rs` runs the profile.
 - `context.rs`: the project context (metadata, config, env) the checks
   read, and the `probe`/`build` helpers every subprocess goes through
   (`bpaf_kit::cmd::Cmd`, so builds echo and honor `--dry-run`).
