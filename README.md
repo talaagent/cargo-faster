@@ -12,10 +12,8 @@ $ cargo faster
 ```text
 == summary
   [high] The machine is busy: timings will be noisy and slower
-  [high] Every test process runs under `scripts/kache-test-runner`
   [medium] The target dir filesystem is 94% full
   [medium] 6 heavy crates are built in more than one version
-  [medium] NEXTEST_TEST_THREADS overrides your nextest profile
   [medium] tala-agent has 108449 lines of Rust
   [low] cargo is limited to 16 jobs on 32 CPUs
   [low] Editing tala-spool rebuilds 98 of 183 workspace crates
@@ -28,10 +26,10 @@ $ cargo faster check-cost -p tala-agent-bin
 ```
 
 ```text
-== check-cost: tala_agent_bin
+== check-cost: tala_agent_bin (bin)
   profiled time  38.7s wall, 38.6s across threads
   trait solving  32.1s (83%)
-  measured with  RUSTC_BOOTSTRAP=1 -Zself-profile -Zself-profile-events=default,args, CARGO_INCREMENTAL=0, no RUSTC_WRAPPER
+  measured with  rustc with RUSTC_BOOTSTRAP=1 -Zself-profile -Zself-profile-events=default,args, CARGO_INCREMENTAL=0, no RUSTC_WRAPPER
 
   most expensive obligations
   self    count  bodies  predicate
@@ -47,7 +45,7 @@ $ cargo faster check-cost -p tala-agent-bin
   [medium] Send/Sync proofs for `tala_agent::bot::Bot` are repeated in every async body
 ```
 
-`check-cost` runs on the stable toolchain. It sets `RUSTC_BOOTSTRAP=1` so that stable `rustc` accepts `-Zself-profile`, and it says so in the output.
+`--lib`, `--bin`, `--test`, `--example` and `--bench` pick the target, and `--tests` profiles the unit-test (`--test`) build, which is what `cargo test` rebuilds after an edit. `check-cost` runs on the stable toolchain. It sets `RUSTC_BOOTSTRAP=1` so that stable `rustc` accepts `-Zself-profile`, and it says so in the output.
 
 ## Subcommands
 
@@ -55,11 +53,11 @@ $ cargo faster check-cost -p tala-agent-bin
 |---|---|
 | `cargo faster` | Everything below that doesn't build: a quick overall report |
 | `timings` | A `--timings` report: critical path, crates that serialize the build, long codegen |
-| `check-cost` | Self-profiles one crate: top queries, trait solving by type and by function body, proc macros |
+| `check-cost` | Self-profiles one crate: top queries, trait solving by type and by function body, time by module, proc macros |
 | `setup` | Linker, debug info, codegen units, opt-levels, jobs, rustflags |
 | `cache` | sccache or kache hit rates, incremental, cold worktrees |
 | `machine` | Load, other builds, memory, disk, filesystems |
-| `deps` | Heavy features, duplicate versions, proc macros, async-trait |
+| `deps` | Heavy features, test features in normal builds, duplicate versions, proc macros, async-trait |
 | `tests` | nextest, target runners, thread limits, database-backed tests |
 | `rdeps` | What rebuilds when a crate changes, and which crates are worth splitting |
 

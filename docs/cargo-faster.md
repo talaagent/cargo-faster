@@ -52,10 +52,8 @@ With no subcommand, `cargo faster` runs every check that's quick and doesn't bui
 ```text
 == summary
   [high] The machine is busy: timings will be noisy and slower
-  [high] Every test process runs under `scripts/kache-test-runner`
   [medium] The target dir filesystem is 94% full
   [medium] 6 heavy crates are built in more than one version
-  [medium] NEXTEST_TEST_THREADS overrides your nextest profile
   [medium] tala-agent has 108449 lines of Rust
   [low] cargo is limited to 16 jobs on 32 CPUs
   [low] Editing tala-spool rebuilds 98 of 183 workspace crates
@@ -182,32 +180,38 @@ $ cargo faster check-cost -p tala-agent-bin
 Here's what it does, so you know what you're running:
 
 1. It updates the modification time of the crate's root source file. That's the only change it makes to your tree, and the contents stay the same.
-2. It runs `cargo check --workspace -vv` and captures the exact `rustc` command line Cargo uses for your crate. It always uses `--workspace`, and never `cargo -p`, even when you pass `-p` to `cargo faster`. Some caches, like kache, key on the set of packages being built, so `cargo -p` would miss the cache and rebuild your dependencies.
+2. It runs `cargo check --workspace -vv` with a filter for the target you picked (`--lib`, `--bin NAME`, `--test NAME`, ...; `--profile test` for `--tests`) and captures the exact `rustc` command line Cargo uses for your crate. That build checks the selected targets in every member and everything they depend on, so on a cold cache it is most of the run. It always uses `--workspace`, and never `cargo -p`, even when you pass `-p` to `cargo faster`. Some caches, like kache, key on the set of packages being built, so `cargo -p` would miss the cache and rebuild your dependencies.
 3. It runs that `rustc` command again, by itself, with self-profiling turned on: `-Zself-profile -Zself-profile-events=default,args`, with `CARGO_INCREMENTAL=0` and no `RUSTC_WRAPPER`.
 4. It reads the profile and analyzes it.
 
 `-Z` flags are normally nightly-only. `cargo faster` sets `RUSTC_BOOTSTRAP=1` so your stable compiler accepts them. That's an unstable escape hatch, and the report says so on a `measured with` line, so that nobody mistakes these numbers for an ordinary build. Profiling your crate with the same compiler you normally use matters: a nightly might have a different trait solver.
+
+The profiler costs time of its own: at the end of the run it turns every recorded query key into a string (`self_profile_alloc_query_strings`), which takes seconds with `args` on a big crate. That isn't compile time, so it's left out of the query table, the profiled time and every percentage, and shown once on a `profiler overhead` line. The `rustc wall time` line is the replay as measured from outside, overhead included.
 
 Incremental compilation is off so the profile shows the full cost of checking the crate, not whatever happened to be cached. The wrapper is off so a cache can't hand back a stored result instead of compiling.
 
 Options:
 
 - `-p NAME` picks the workspace member. The default is the root package, or the biggest member if there isn't one.
-- `--bin NAME` profiles a binary target instead of the library.
-- `-- ARGS` passes extra arguments to `cargo check`, like `-- --features postgres`.
+- `--lib`, `--bin NAME`, `--test NAME`, `--example NAME` and `--bench NAME` pick the target. The default is the library, or the first binary if there is no library. `--test NAME` is an integration test, `tests/NAME.rs`.
+- `--tests` profiles the `--test` build of the library, binary or example: the unit-test crate, with its `#[cfg(test)]` modules and the test harness. That is the crate `cargo test` and `cargo nextest` rebuild after every edit, and it is often much bigger than the library itself. Integration tests and benchmarks are always built with `--test`.
+- `-- ARGS` passes extra arguments to `cargo check`, like `-- --features postgres`. Target flags here (`-- --tests`, `-- --all-targets`) replace the filter `cargo faster` would add. When they produce both builds of the library, the normal one is profiled, unless they include `--tests` or `--profile test`; then it is the `--test` one.
 - `--keep DIR` writes the profile into `DIR` and keeps it, so you can analyze it again with `--profile` or open it with `summarize` and `crox` from [measureme](https://github.com/rust-lang/measureme).
 - `--profile FILE` analyzes an existing `.mm_profdata` file without building anything.
 - `--nice N` sets the priority, as with `timings`.
 
+The header and the `target` line say which build was profiled: `(lib)`, `(bin)`, `(lib, --test)` for unit tests, `(test)` for an integration test. With `--test`, `measured with` starts with `rustc --test`. Both come from the command line recorded in the profile, so `--profile FILE` shows them too.
+
 Here's a real profile of the binary crate from the case study, after the first fix:
 
 ```text
-== check-cost: tala_agent_bin
+== check-cost: tala_agent_bin (bin)
+  target         crates/tala-agent-bin/src/main.rs (bin, without #[cfg(test)] code)
   profiled time  38.7s wall, 38.6s across threads
   trait solving  32.1s (83%)
   proc macros    0.076s (0%)
   codegen        0.004s (0%)
-  measured with  RUSTC_BOOTSTRAP=1 -Zself-profile -Zself-profile-events=default,args, CARGO_INCREMENTAL=0, no RUSTC_WRAPPER
+  measured with  rustc with RUSTC_BOOTSTRAP=1 -Zself-profile -Zself-profile-events=default,args, CARGO_INCREMENTAL=0, no RUSTC_WRAPPER
 
   top queries by self time
   self    %      count   query
@@ -251,6 +255,7 @@ Here's how to read it, from the top:
 - **trait solving by what is being proved** groups the solver's time by the crate that defines the type in each predicate. Here, proofs about `matrix_sdk` types are 4 seconds of a crate that doesn't define any of them. That's the sign of a heavy type from a dependency leaking into your async code.
 - **most expensive obligations** lists single predicates. The `count` and `bodies` columns are the ones to look at: `Bot: Send` was proved 54 times, in 47 different function bodies. Each proof costs little, but the compiler doesn't share the answer between bodies, so you pay it again and again.
 - **bodies doing the most trait solving** attributes the solver's time to the function that asked for it. This is where you start editing. In this case, one `invite` method is a fifth of the crate.
+- **time by module** adds up the self time of every body query (`typeck_root`, `mir_borrowck`, `mir_built` and friends) by top-level module, with closures and async blocks counted towards the item they're in. **bodies by total frontend time** is the same per item. When no table has a hot spot and these two show the time spread over many items, the crate is slow because it is big: the `check-time-is-crate-size` finding names the modules to [split out](guide.md#splitting-a-big-crate) first, with their line counts when the profile came from a live run.
 
 The findings then put it together:
 
@@ -290,6 +295,8 @@ It looks at:
 - **the parallel frontend** (`-Zthreads`), and `-C target-cpu=native`;
 - **`RUSTFLAGS`** in the environment, which silently replaces the `rustflags` in your Cargo config, and changes every cache key;
 - **jobs**: `CARGO_BUILD_JOBS` or `build.jobs` limiting parallelism.
+
+It reads settings the way cargo does, environment included: rustflags come from `CARGO_ENCODED_RUSTFLAGS`, else `RUSTFLAGS`, else `target.<triple>.rustflags` plus `CARGO_TARGET_<TRIPLE>_RUSTFLAGS`, else `build.rustflags` plus `CARGO_BUILD_RUSTFLAGS`; incremental from `CARGO_INCREMENTAL`, else `build.incremental` (or `CARGO_BUILD_INCREMENTAL`), else the profile. Each line names where its value came from, e.g. `linker  mold (CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS)`.
 
 Every one of these is a tradeoff, and the finding says what you give up. Turning off debug info makes builds faster and debugging worse. Optimizing dependencies makes tests faster and clean builds slower. `setup` tells you what you have; you decide.
 
@@ -370,6 +377,7 @@ It finds:
 - `tokio` with the `full` feature asked for by a workspace crate;
 - `syn` with `full`, and more than one major version of `syn`;
 - duplicate versions of heavy crates;
+- test-only features (`testing`, `test-util`, `mock*`, `fake*`) enabled from `[dependencies]` instead of `[dev-dependencies]`, which compile test helpers into every normal build ([Keep test features out of normal builds](guide.md#keep-test-features-out-of-normal-builds));
 - proc macros;
 - `#[async_trait]` attributes counted in the workspace's sources (not its manifests), the traits they define, and how many of those are held as `dyn`. Ten or more uses is `[medium]`; `check-cost` then tells you what they actually cost.
 
@@ -386,21 +394,24 @@ Slow tests are often not slow to compile at all. `tests` checks how they're run:
   nextest               installed, .config/nextest.toml present
   test binaries         198 (6 integration test files)
   target runner         scripts/kache-test-runner (target.x86_64-unknown-linux-gnu.runner in .cargo/config.toml)
+  runner override       scripts/gate:180 ("cargo nextest|$runner_var=$PWD/scripts/test-runner $cargo nextest run ...")
   NEXTEST_TEST_THREADS  4
   database crates       sqlx
+  db tests: template databases  crates/tala-core/src/pg_testing.rs:602
+  db tests: fsync off           crates/tala-core/src/pg_testing.rs:231
+  db tests: tmpfs               crates/tala-core/src/pg_testing.rs:4
 
-  [high] Every test process runs under `scripts/kache-test-runner`
-  [medium] NEXTEST_TEST_THREADS overrides your nextest profile
-  [info] Database-backed tests: make each database cheap
+  [low] `scripts/kache-test-runner` steps aside under nextest
+  [info] NEXTEST_TEST_THREADS=4 sets the threads for plain nextest runs
 ```
 
-The first finding is the expensive one. A *target runner* wraps every execution of a test binary, and nextest runs every test in its own process. So the runner starts once per test. In this workspace, tests that took 0.00 seconds waited 3 to 8 seconds each in the runner, and the runner took about 44% of all test-seconds.
+A *target runner* wraps every execution of a test binary, and nextest runs every test in its own process, so a runner starts once per test. In the case study, tests that took 0.00 seconds waited 3 to 8 seconds each in the runner, and the runner took about 44% of all test-seconds. `tests` reads the runner: if it's a script that checks `NEXTEST_EXECUTION_MODE` and execs the test directly, it costs a millisecond per test and the finding is `info`; if it doesn't, it's `high` under nextest. It also finds scripts that set `CARGO_TARGET_<TRIPLE>_RUNNER` themselves, like the `scripts/gate` above, whose runner beats the configured one for those runs (here `low`: the gate's runner doesn't step aside).
 
-It also checks:
+Beyond runners, it checks:
 
 - whether you use nextest at all;
-- `NEXTEST_TEST_THREADS` in the environment, which silently beats `test-threads` in your profile;
-- database-backed tests, and how to make each test database cheap: Postgres on tmpfs, and cloning a template database instead of running migrations for every test;
+- `NEXTEST_TEST_THREADS` in the environment, which silently beats `test-threads` in your profile, unless the scripts that run that profile pass `--test-threads` themselves (as `scripts/gate` does here, so it's only `info`);
+- database-backed tests, and how to make each test database cheap: Postgres on tmpfs, and cloning a template database instead of running migrations for every test. It looks for what the workspace already does first (here all three, so there's no finding);
 - many integration test files, each of which is its own binary to link.
 
 See [Test suites](guide.md#test-suites).

@@ -176,10 +176,11 @@ Some query names you'll see often, and what they mean:
 - `layout_of`: computing the size and layout of a type. Large nested futures make this busy.
 - `LLVM_module_codegen_emit_obj`, `LLVM_module_optimize`, `codegen_module`: backend work. If these dominate, look at generics and optimization settings.
 - `link`, `link_binary`: linking.
+- `self_profile_alloc_query_strings`: the profiler itself, turning the recorded query keys into strings at the end. It isn't compile time, and with `args` it can take seconds, so subtract it before you compute shares. `cargo faster check-cost` leaves it out and reports it once as `profiler overhead`.
 
 `crox` converts a profile into the Chrome trace format, which you can open in `chrome://tracing` or in [Perfetto](https://ui.perfetto.dev) to see the nesting on a timeline. `flamegraph` produces a flame graph SVG. Both are useful for seeing which function bodies dominate, especially with `args` recorded, because each event carries the name of the function (or the predicate) it was working on. With a few lines of `jq` over the `crox` output you can group `evaluate_obligation` events by predicate, or group `check_coroutine_obligations` by the function they were checking. That's exactly how the case study found its cause.
 
-`cargo faster check-cost <crate>` runs this whole procedure for one crate, prints the top queries, and attributes trait-solving time to the function bodies and types involved.
+`cargo faster check-cost <crate>` runs this whole procedure for one crate, prints the top queries, and attributes trait-solving time to the function bodies and types involved. `--tests` profiles the crate's `--test` build instead: the unit-test crate with its `#[cfg(test)]` modules, which is what `cargo test` rebuilds after an edit and is often much bigger than the library. `--test NAME` profiles an integration test.
 
 ### Counting LLVM lines
 
@@ -502,6 +503,8 @@ It doesn't help when the pieces end up depending on each other in a chain. If `b
 
 So before splitting, profile. If the time is spread fairly evenly across many functions and modules, and you can draw a line through the crate where the two sides don't need each other, a split is likely to pay off. If the time is concentrated, fix the concentration.
 
+`cargo faster check-cost` answers this directly. Its details have two tables: **time by module**, which adds up each body's type checking, borrow checking and MIR building (closures and async blocks count towards the function they're in) by top-level module, and **bodies by total frontend time**, which lists the most expensive items. When trait solving is small, no single body stands out, and most of the profile is many ordinary bodies, it reports `check-time-is-crate-size` and names the top modules with their share, item count and line count. Those modules are where to draw the first line. Times are self time, so a module's share is what moving it out would take off this crate's check, as long as nothing else in the crate needs to be re-checked because of the move.
+
 ## Dependencies and features
 
 Most of the code you compile on a cold build isn't yours. A few habits keep that under control.
@@ -547,7 +550,26 @@ You can't always fix duplicates, since you don't control your dependencies' requ
 
 **Count the proc macros.** Every proc macro crate is compiled for the host and blocks pipelining for its dependents. Several crates with small optional `derive` features each pulling in `syn` can add up.
 
-`cargo faster deps` reports heavy features, duplicate versions, and proc macros in your graph.
+`cargo faster deps` reports heavy features, duplicate versions, and proc macros in your graph. Duplicate versions are listed in semver order, oldest first, since the oldest copy is usually the one to chase.
+
+### Keep test features out of normal builds
+
+Workspaces often give a crate a `testing` (or `test-util`, `mock`, `fake`) feature that compiles in test helpers: fake servers, recorded fixtures, builders for test data. Enable it from `[dependencies]` and, since features are unified across the build, every normal build of that crate gets the helpers, and so does everything that depends on it. An edit to a test helper then rebuilds libraries and the binary on top instead of only test targets. tokio's `test-util` in `[dependencies]` is the same mistake, and it also lets production code pause time.
+
+Ask for the feature where the tests are:
+
+```toml
+# crates/app/Cargo.toml
+[dependencies]
+app-core = { workspace = true }
+
+[dev-dependencies]
+app-core = { workspace = true, features = ["testing"] }
+```
+
+cargo enables dev-dependency features only when it builds that crate's tests, examples and benches. If one crate's tests need another crate's helpers transitively, give the middle crate its own `testing = ["app-core/testing"]` feature and turn it on from `[dev-dependencies]` too. The tradeoff: `cargo build` and `cargo test` now resolve different feature sets for those crates, so each is compiled once per set. That's one extra build of a few crates, against rebuilding the whole stack whenever a helper changes.
+
+`cargo faster deps` flags non-optional normal and build dependencies that enable features named `testing`, `test-*`, `mock*` or `fake*`, and skips workspace crates that are themselves test support (`*-test-utils`, `*-testing`). A test feature in the root's `[workspace.dependencies]` is reported once, with the number of crates that inherit it: every one of them gets it in normal builds, so take it out there and add it to the `[dev-dependencies]` entries that need it. If a feature with such a name is needed at runtime, it isn't test-only; leave it.
 
 ## Caching
 
@@ -559,7 +581,7 @@ Incremental compilation saves the results of `rustc`'s queries between builds, i
 
 Some things to know about it:
 
-- **It's on by default for the `dev` and `test` profiles, and off for `release`.** You can change that with `incremental = true` or `false` in a profile, or override it with `CARGO_INCREMENTAL=0` or `1`.
+- **It's on by default for the `dev` and `test` profiles, and off for `release`.** You can change that with `incremental = true` or `false` in a profile. `build.incremental` in your Cargo config (or `CARGO_BUILD_INCREMENTAL`) overrides every profile, and `CARGO_INCREMENTAL=0` or `1` overrides both.
 - **It's only used for workspace members and path dependencies.** Crates from crates.io are compiled once and not recompiled when you edit your code, so there's nothing to gain.
 - **It's still a rerun of the crate.** `rustc` still has to parse and expand the whole crate, and check what changed. For a big crate, an incremental rebuild after a small edit is much faster than a full one, but not free.
 - **It's tied to its target directory.** The saved state lives inside `target/` and refers to your sources and output by path. Copying it into a different checkout doesn't reliably give you incremental reuse; we'll come back to this below.
@@ -618,6 +640,8 @@ rustflags = ["-C", "link-arg=-fuse-ld=mold"]
 ```
 
 Or, without changing your config, run Cargo under mold: `mold -run cargo build`.
+
+The same settings can come from the environment (a nix or direnv shell often sets them): `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS` and `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER`. Cargo takes rustflags from exactly one place: `CARGO_ENCODED_RUSTFLAGS`, else `RUSTFLAGS`, else the target's rustflags (config and environment together), else `build.rustflags`. So setting `RUSTFLAGS`, or any target rustflags, silently drops a mold flag kept in `build.rustflags`.
 
 On macOS, Apple's newer linker (introduced with Xcode 15, sometimes called `ld-prime`) is much faster than the old one and is the default with current Xcode. If linking on macOS is slow, check that your Xcode command line tools are up to date.
 
@@ -729,7 +753,7 @@ fail-fast = false
 
 `cargo nextest run --profile ci` picks a profile. Individual tests can declare that they need more than one slot, with `threads-required` in a per-test override, which is useful for tests that themselves use many threads.
 
-One trap: **the `NEXTEST_TEST_THREADS` environment variable takes precedence over the profile's `test-threads`.** If it's set in your shell profile, your CI environment, or a wrapper script, your config file's setting is silently ignored. If your test parallelism doesn't seem to match your configuration, check your environment.
+One trap: **the `NEXTEST_TEST_THREADS` environment variable takes precedence over the profile's `test-threads`.** If it's set in your shell profile, your CI environment, or a wrapper script, your config file's setting is silently ignored. If your test parallelism doesn't seem to match your configuration, check your environment. An explicit `--test-threads` on the command line beats both, so a script that runs a profile can pass it (`cargo nextest run --profile ci --test-threads 8`) to be immune to whatever the environment says; `cargo faster tests` looks for that in `scripts/`, Makefiles, justfiles and CI workflows and grades the variable `info` when every profile that sets `test-threads` is run that way.
 
 ### Test runners that wrap every test
 
@@ -745,7 +769,19 @@ or the environment variable `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER`. This
 
 Under `cargo test`, the runner wraps each test *binary*, once. Under nextest, which runs one process per test, it wraps every *test*. A runner that takes a second to start, or that takes a lock, or that coordinates with some other service, now does that thousands of times. Each wrapped test also holds one of nextest's slots while it waits. In the case study, tests that ran in 0.00 seconds were each waiting 3 to 8 seconds in a runner, and that waiting was about 44% of all the test-seconds in the suite.
 
-If you have a runner configured, check whether it's needed for tests, and whether it's set somewhere you didn't expect: a global `~/.cargo/config.toml`, or an environment variable. `cargo faster tests` reports runners, nextest configuration, and relevant environment variables.
+If a runner is needed for `cargo test` but not under nextest, have it step aside. nextest sets `NEXTEST_EXECUTION_MODE=process-per-test` in every test process, so a shell runner can exec the test straight away:
+
+```sh
+#!/bin/sh
+if [ "${NEXTEST_EXECUTION_MODE:-}" = process-per-test ]; then
+  exec "$@"
+fi
+exec my-wrapper "$@"
+```
+
+That costs one extra `exec` per test, about a millisecond. `cargo faster tests` reads runner scripts and grades one that steps aside like this as `info`.
+
+If you have a runner configured, check whether it's needed for tests, and whether it's set somewhere you didn't expect: a global `~/.cargo/config.toml`, or an environment variable. `CARGO_TARGET_<TRIPLE>_RUNNER` set by a script (a CI or pre-merge script, a Makefile) beats the config's runner for that run, so the runner that wraps your CI tests may not be the one in `.cargo/config.toml`. `cargo faster tests` reports runners, the lines in `scripts/`, Makefiles, justfiles and CI workflows that override them, nextest configuration, and relevant environment variables. The surest way to know what a runner costs is to run one quick test a few times through `cargo nextest run` with and without it, back to back.
 
 ### Database-backed tests
 
@@ -765,6 +801,8 @@ Tests that talk to a real database are often slow for reasons that have nothing 
   ```
 
   Copying a template is a file-level copy, and is usually much faster than replaying migrations. (Postgres requires that nobody else is connected to the template while it's being copied.)
+
+`cargo faster tests` looks for these in your crates' sources, scripts and compose files (`CREATE DATABASE .. TEMPLATE` from a template of your own, `fsync=off` or `synchronous_commit=off`, `/dev/shm` or `tmpfs` next to Postgres) and only suggests the ones it can't find.
 
 ### Fewer test binaries
 
@@ -994,7 +1032,7 @@ Everything in this guide can be done by hand with Cargo, `rustc`, and the tools 
 - `cargo faster setup` audits [linking](#linking) and [profile settings](#profile-settings).
 - `cargo faster cache` checks [caching](#caching) and cold worktrees.
 - `cargo faster machine` checks [the machine](#the-machine) before you believe any timing.
-- `cargo faster deps` looks for [heavy features and duplicate versions](#dependencies-and-features).
+- `cargo faster deps` looks for [heavy features and duplicate versions](#dependencies-and-features), and [test features in normal builds](#keep-test-features-out-of-normal-builds).
 - `cargo faster tests` checks how your [test suite](#test-suites) runs.
 - `cargo faster rdeps` shows [rebuild fan-out](#rebuild-fan-out) and crates worth [splitting](#splitting-a-big-crate).
 

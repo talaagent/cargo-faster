@@ -23,14 +23,36 @@ use bpaf_kit::suggest::UnknownValue;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 
+/// Which target of the package to profile.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Select {
+    /// The library, else the first binary.
+    #[default]
+    Auto,
+    /// The library.
+    Lib,
+    /// The binary with this name.
+    Bin(String),
+    /// The integration test (`tests/NAME.rs`) with this name.
+    Test(String),
+    /// The example with this name.
+    Example(String),
+    /// The benchmark with this name.
+    Bench(String),
+}
+
 /// What to profile and how.
 #[derive(Debug, Clone, Default)]
 pub struct Options {
     /// Package to profile (a workspace member). Default: the root package,
     /// else the member with the most code.
     pub package: Option<String>,
-    /// Profile the binary target with this name instead of the library.
-    pub bin: Option<String>,
+    /// The target to profile.
+    pub target: Select,
+    /// Profile the `--test` (cfg(test), unit test) build of the library,
+    /// binary or example instead of the normal one. Integration tests and
+    /// benchmarks are always built with `--test`.
+    pub tests: bool,
     /// Extra `cargo check` arguments (e.g. `--features x`). `--workspace`
     /// is always passed.
     pub cargo_args: Vec<String>,
@@ -64,22 +86,167 @@ pub struct Run {
     pub wall_secs: f64,
     /// Whether rustc reported errors.
     pub failed: bool,
+    /// The directory of the target's root source file (`src`).
+    pub src_dir: PathBuf,
+}
+
+/// The compilation unit a rustc command line builds: which kind of target,
+/// and whether it is the `--test` (cfg(test)) build.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unit {
+    /// `lib`, `proc-macro`, `bin`, `example`, `test` or `bench`.
+    pub kind: &'static str,
+    /// The root source file.
+    pub src: String,
+    /// Built with `--test`: `#[cfg(test)]` code and the test harness are in.
+    pub test: bool,
+}
+
+impl Unit {
+    /// Read the unit from rustc's arguments (the profile metadata's `cmd`,
+    /// or a captured invocation).
+    #[must_use]
+    pub fn from_args<S: AsRef<str>>(args: &[S]) -> Self {
+        let args: Vec<&str> = args.iter().map(AsRef::as_ref).collect();
+        let src = args
+            .iter()
+            .find(|a| !a.starts_with('-') && Path::new(a).extension().is_some_and(|x| x == "rs"))
+            .map_or_else(String::new, |s| (*s).to_owned());
+        let test = args.contains(&"--test");
+        let crate_type = args
+            .iter()
+            .position(|a| *a == "--crate-type")
+            .and_then(|i| args.get(i + 1).copied())
+            .or_else(|| args.iter().find_map(|a| a.strip_prefix("--crate-type=")));
+        let path = src.replace('\\', "/");
+        let under =
+            |dir: &str| path.starts_with(&format!("{dir}/")) || path.contains(&format!("/{dir}/"));
+        let kind = if under("examples") {
+            "example"
+        } else if under("tests") && test {
+            "test"
+        } else if under("benches") && test {
+            "bench"
+        } else {
+            match crate_type {
+                Some("proc-macro") => "proc-macro",
+                Some("bin") => "bin",
+                Some(_) => "lib",
+                None if path.ends_with("src/main.rs") || path.contains("src/bin/") => "bin",
+                None if test => "lib",
+                None => "bin",
+            }
+        };
+        Self { kind, src, test }
+    }
+
+    /// `lib`, `lib, --test`, `test`: for the section header.
+    #[must_use]
+    pub fn label(&self) -> String {
+        if self.test && !matches!(self.kind, "test" | "bench") {
+            format!("{}, --test", self.kind)
+        } else {
+            self.kind.to_owned()
+        }
+    }
+
+    /// A sentence for the `target` fact.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        let what = match (self.kind, self.test) {
+            ("test", _) => "integration test".to_owned(),
+            ("bench", _) => "benchmark, built as a test".to_owned(),
+            (k, true) => format!(
+                "{k} built with --test: the unit-test crate, with #[cfg(test)] code and the test harness"
+            ),
+            (k, false) => format!("{k}, without #[cfg(test)] code"),
+        };
+        if self.src.is_empty() {
+            what
+        } else {
+            format!("{} ({what})", self.src)
+        }
+    }
+}
+
+/// The `cargo check` target filters for a selection, unless the user's own
+/// cargo arguments already pick targets. Narrowing the capture build to the
+/// one target keeps it from checking every test and example first.
+#[must_use]
+pub fn filter_args(
+    target: &Select,
+    kind: &str,
+    name: &str,
+    tests: bool,
+    user: &[String],
+) -> Vec<String> {
+    let picks = |a: &String| {
+        let flag = a.split('=').next().unwrap_or(a);
+        matches!(
+            flag,
+            "--lib"
+                | "--bin"
+                | "--bins"
+                | "--test"
+                | "--tests"
+                | "--example"
+                | "--examples"
+                | "--bench"
+                | "--benches"
+                | "--all-targets"
+        )
+    };
+    if user.iter().any(picks) {
+        return Vec::new();
+    }
+    let mut out: Vec<String> = match (target, kind) {
+        (Select::Test(n), _) => vec!["--test".into(), n.clone()],
+        (Select::Bench(n), _) => vec!["--bench".into(), n.clone()],
+        (Select::Example(n), _) => vec!["--example".into(), n.clone()],
+        (_, "bin") => vec!["--bin".into(), name.to_owned()],
+        _ => vec!["--lib".into()],
+    };
+    let has_profile = user
+        .iter()
+        .any(|a| a == "--release" || a == "-r" || a.starts_with("--profile"));
+    if tests && !has_profile && !matches!(target, Select::Test(_) | Select::Bench(_)) {
+        out.extend(["--profile".into(), "test".into()]);
+    }
+    out
+}
+
+/// Whether the user's cargo arguments ask for the `--test` build
+/// (`-- --tests` or `-- --profile test`).
+#[must_use]
+pub fn user_wants_tests(user: &[String]) -> bool {
+    user.iter().any(|a| a == "--tests" || a == "--profile=test")
+        || user
+            .windows(2)
+            .any(|w| w[0] == "--profile" && w[1] == "test")
 }
 
 /// Find the `Running` line for `crate_name` (`--crate-name`, underscored)
-/// whose source root is `src`, and parse it.
+/// whose source root is `src`, and parse it. With `test`, only the line
+/// built with (`Some(true)`) or without (`Some(false)`) `--test`: a test
+/// build runs rustc on the library twice, once for each.
 #[must_use]
-pub fn find_invocation(stderr: &str, crate_name: &str, src: &str) -> Option<Invocation> {
+pub fn find_invocation(
+    stderr: &str,
+    crate_name: &str,
+    src: &str,
+    test: Option<bool>,
+) -> Option<Invocation> {
     let needle = format!("--crate-name {crate_name} ");
     stderr
         .lines()
         .map(strip_ansi)
         .filter(|l| l.contains(&needle) && l.contains(src))
-        .find_map(|line| {
+        .filter_map(|line| {
             let start = line.find("Running `")? + "Running `".len();
             let end = line.rfind('`')?;
             (end > start).then(|| parse_invocation(&line[start..end]))?
         })
+        .find(|inv| test.is_none_or(|t| inv.args.iter().any(|a| a == "--test") == t))
 }
 
 /// Drop terminal colour escapes (`ESC [ ... letter`), in case the user's
@@ -207,30 +374,65 @@ pub fn pick<'a>(ctx: &'a Context, opts: &Options) -> Result<(&'a Package, &'a Ta
             .ok_or("the workspace has no members")?
     };
     let kinds = |t: &Target, k: &str| t.kind.iter().any(|x| x == k);
-    let target = match &opts.bin {
-        Some(bin) => Some(
-            pkg.targets
-                .iter()
-                .find(|t| kinds(t, "bin") && &t.name == bin)
-                .ok_or_else(|| {
-                    UnknownValue::new(
-                        format!("{} binary", pkg.name),
-                        bin,
-                        pkg.targets
-                            .iter()
-                            .filter(|t| kinds(t, "bin"))
-                            .map(|t| t.name.as_str()),
-                    )
-                })?,
-        ),
-        None => pkg
+    let is_lib = |t: &Target| {
+        t.kind
+            .iter()
+            .any(|k| k.ends_with("lib") || k == "proc-macro")
+    };
+    let named = |kind: &str, what: &str, name: &str| -> Result<&'a Target, Error> {
+        pkg.targets
+            .iter()
+            .find(|t| kinds(t, kind) && t.name == name)
+            .ok_or_else(|| {
+                UnknownValue::new(
+                    format!("{} {what}", pkg.name),
+                    name,
+                    pkg.targets
+                        .iter()
+                        .filter(|t| kinds(t, kind))
+                        .map(|t| t.name.as_str()),
+                )
+                .into()
+            })
+    };
+    let target = match &opts.target {
+        Select::Bin(n) => named("bin", "binary", n)?,
+        Select::Test(n) => named("test", "integration test", n)?,
+        Select::Example(n) => named("example", "example", n)?,
+        Select::Bench(n) => named("bench", "benchmark", n)?,
+        Select::Lib => pkg
             .targets
             .iter()
-            .find(|t| kinds(t, "lib") || kinds(t, "rlib") || kinds(t, "proc-macro"))
-            .or_else(|| pkg.targets.iter().find(|t| kinds(t, "bin"))),
-    }
-    .ok_or_else(|| format!("{} has no matching target", pkg.name))?;
+            .find(|t| is_lib(t))
+            .ok_or_else(|| format!("{} has no library target", pkg.name))?,
+        Select::Auto => pkg
+            .targets
+            .iter()
+            .find(|t| is_lib(t))
+            .or_else(|| pkg.targets.iter().find(|t| kinds(t, "bin")))
+            .ok_or_else(|| format!("{} has no library or binary target", pkg.name))?,
+    };
     Ok((pkg, target))
+}
+
+/// The target filters for the capture build, and whether the invocation to
+/// replay must be built with `--test` (`None`: integration tests and
+/// benchmarks, which always are).
+fn capture_plan(opts: &Options, target: &Target) -> (Vec<String>, Option<bool>) {
+    let tests = opts.tests || user_wants_tests(&opts.cargo_args);
+    let kind = if target.kind.iter().any(|k| k == "bin") {
+        "bin"
+    } else {
+        "lib"
+    };
+    let filters = filter_args(&opts.target, kind, &target.name, tests, &opts.cargo_args);
+    // Integration tests and benchmarks are always `--test`; for the rest,
+    // the library is built both ways when tests are, so pick the one asked.
+    let want_test = match opts.target {
+        Select::Test(_) | Select::Bench(_) => None,
+        _ => Some(tests),
+    };
+    (filters, want_test)
 }
 
 /// Profile one crate. Prints progress to stderr.
@@ -242,9 +444,21 @@ pub fn run(ctx: &Context, opts: &Options) -> Result<Run, Error> {
     let (pkg, target) = pick(ctx, opts)?;
     let crate_name = target.name.replace('-', "_");
     let root = ctx.root().to_path_buf();
+    let (filters, want_test) = capture_plan(opts, target);
     eprintln!(
-        "cargo faster: capturing the rustc command for {} ({crate_name})",
-        pkg.name
+        "cargo faster: capturing the rustc command for {} ({crate_name}{}): `cargo check --workspace {}` checks the selected targets and what they depend on first",
+        pkg.name,
+        if want_test == Some(true) {
+            ", --test"
+        } else {
+            ""
+        },
+        filters
+            .iter()
+            .chain(&opts.cargo_args)
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(" ")
     );
     // Make cargo run rustc for this crate. Only the mtime changes.
     if cmd::dry_run_enabled() {
@@ -258,6 +472,7 @@ pub fn run(ctx: &Context, opts: &Options) -> Result<Run, Error> {
     }
     let out = build(ctx, opts.nice, cargo_bin(&ctx.env))
         .args(["check", "--workspace", "-vv", "--color", "never"])
+        .args(&filters)
         .args(&opts.cargo_args)
         .current_dir(&root)
         .output()?;
@@ -273,26 +488,18 @@ pub fn run(ctx: &Context, opts: &Options) -> Result<Run, Error> {
         .unwrap_or(&target.src_path)
         .display()
         .to_string();
-    let inv = find_invocation(&stderr, &crate_name, &src).ok_or_else(|| -> Error {
+    let inv = find_invocation(&stderr, &crate_name, &src, want_test).ok_or_else(|| -> Error {
         format!(
-            "cargo didn't run rustc for {crate_name}; is it a dependency of the selected packages? last output:\n{}",
+            "cargo didn't run rustc for {crate_name}{}; is it a dependency of the selected packages? last output:\n{}",
+            match want_test {
+                Some(true) => " with --test",
+                Some(false) => " without --test",
+                None => "",
+            },
             stderr.lines().rev().take(10).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n")
         ).into()
     })?;
-    let dir = if let Some(d) = &opts.keep {
-        d.clone()
-    } else {
-        let tmp = std::env::temp_dir();
-        remove_stale_temp_dirs(&tmp);
-        let dir = tmp.join(format!("{TEMP_PREFIX}{}", std::process::id()));
-        // Removed on Ctrl-C; the caller removes it after the analysis.
-        bpaf_kit::interrupt::on_interrupt({
-            let dir = dir.clone();
-            move || drop(std::fs::remove_dir_all(dir))
-        })
-        .keep();
-        dir
-    };
+    let dir = profile_dir(opts.keep.as_deref());
     std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
     eprintln!(
         "cargo faster: profiling {crate_name} with RUSTC_BOOTSTRAP=1 -Zself-profile (no wrapper{}, no incremental){}",
@@ -332,7 +539,31 @@ pub fn run(ctx: &Context, opts: &Options) -> Result<Run, Error> {
         profile,
         wall_secs,
         failed: !replay.success(),
+        src_dir: target
+            .src_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default(),
     })
+}
+
+/// Where the replay writes its profile: `--keep DIR`, else a temporary
+/// directory that is removed on Ctrl-C.
+fn profile_dir(keep: Option<&Path>) -> PathBuf {
+    if let Some(d) = keep {
+        d.to_path_buf()
+    } else {
+        let tmp = std::env::temp_dir();
+        remove_stale_temp_dirs(&tmp);
+        let dir = tmp.join(format!("{TEMP_PREFIX}{}", std::process::id()));
+        // Removed on Ctrl-C; the caller removes it after the analysis.
+        bpaf_kit::interrupt::on_interrupt({
+            let dir = dir.clone();
+            move || drop(std::fs::remove_dir_all(dir))
+        })
+        .keep();
+        dir
+    }
 }
 
 /// How much of the replayed rustc command line is echoed, in characters.
@@ -417,7 +648,7 @@ mod tests {
     #[test]
     fn parses_cargo_running_line() {
         let stderr = format!("   Compiling app v0.1.0\n{LINE}\n");
-        let inv = find_invocation(&stderr, "app", "crates/app/src/lib.rs").unwrap();
+        let inv = find_invocation(&stderr, "app", "crates/app/src/lib.rs", Some(false)).unwrap();
         assert_eq!(inv.rustc, "/u/bin/rustc");
         assert_eq!(inv.wrapper.as_deref(), Some("/u/bin/kache"));
         assert_eq!(
@@ -425,11 +656,11 @@ mod tests {
             ("OUT_DIR".into(), "/w/target/debug/build/app-1/out".into())
         );
         assert_eq!(inv.args[..2], ["--crate-name", "app"]);
-        assert!(find_invocation(&stderr, "other", "crates/app/src/lib.rs").is_none());
+        assert!(find_invocation(&stderr, "other", "crates/app/src/lib.rs", None).is_none());
         // CARGO_TERM_COLOR=always wraps the status word in escapes.
         let coloured = LINE.replacen("Running", "\u{1b}[1m\u{1b}[92mRunning\u{1b}[0m", 1);
         assert_eq!(
-            find_invocation(&coloured, "app", "crates/app/src/lib.rs"),
+            find_invocation(&coloured, "app", "crates/app/src/lib.rs", None),
             Some(inv.clone())
         );
 
@@ -467,5 +698,109 @@ mod tests {
             "tala_agent_bin"
         );
         assert_eq!(crate_from_file(Path::new("x.mm_profdata")), "x");
+    }
+
+    #[test]
+    fn picks_the_test_or_normal_build_of_the_library() {
+        // `cargo check --tests` runs rustc on the library twice.
+        let test_line = LINE.replace(" --crate-type lib ", " --test ");
+        let stderr = format!("{test_line}\n{LINE}\n");
+        let src = "crates/app/src/lib.rs";
+        let has_test = |t| {
+            find_invocation(&stderr, "app", src, t)
+                .unwrap()
+                .args
+                .iter()
+                .any(|a| a == "--test")
+        };
+        assert!(has_test(Some(true)));
+        assert!(!has_test(Some(false)));
+        assert!(has_test(None), "the first line when either will do");
+        assert!(find_invocation(LINE, "app", src, Some(true)).is_none());
+    }
+
+    fn unit(cmd: &str) -> Unit {
+        Unit::from_args(&shlex::split(cmd).unwrap())
+    }
+
+    #[test]
+    fn reads_the_unit_from_the_command_line() {
+        let lib = unit(
+            "rustc --crate-name app --edition=2024 crates/app/src/lib.rs --crate-type lib --emit=metadata",
+        );
+        assert_eq!((lib.kind, lib.test), ("lib", false));
+        assert_eq!(lib.label(), "lib");
+        assert_eq!(lib.src, "crates/app/src/lib.rs");
+        let t = unit("rustc --crate-name app crates/app/src/lib.rs --emit=metadata --test");
+        assert_eq!(t.label(), "lib, --test");
+        assert!(t.describe().contains("#[cfg(test)]"), "{}", t.describe());
+        assert_eq!(
+            unit("rustc --crate-name app src/main.rs --test").label(),
+            "bin, --test"
+        );
+        assert_eq!(
+            unit("rustc --crate-name app src/main.rs --crate-type bin").label(),
+            "bin"
+        );
+        assert_eq!(
+            unit("rustc --crate-name it a/tests/it.rs --test").label(),
+            "test"
+        );
+        assert_eq!(
+            unit("rustc --crate-name bb benches/bb.rs --test").label(),
+            "bench"
+        );
+        assert_eq!(
+            unit("rustc --crate-name ex a/examples/ex.rs --crate-type bin").label(),
+            "example"
+        );
+        assert_eq!(
+            unit("rustc --crate-name m m/src/lib.rs --crate-type proc-macro").label(),
+            "proc-macro"
+        );
+        // A module directory called `tests` inside src is still the lib.
+        assert_eq!(
+            unit("rustc --crate-name a src/tests/x.rs --crate-type lib").label(),
+            "lib"
+        );
+    }
+
+    #[test]
+    fn filters_the_capture_build_to_the_target() {
+        let f = |t: &Select, kind, tests, user: &[&str]| {
+            let user: Vec<String> = user.iter().map(|s| (*s).to_owned()).collect();
+            filter_args(t, kind, "app", tests, &user).join(" ")
+        };
+        assert_eq!(f(&Select::Auto, "lib", false, &[]), "--lib");
+        assert_eq!(f(&Select::Lib, "lib", true, &[]), "--lib --profile test");
+        assert_eq!(
+            f(&Select::Auto, "bin", true, &[]),
+            "--bin app --profile test"
+        );
+        assert_eq!(
+            f(&Select::Test("it".into()), "test", true, &[]),
+            "--test it"
+        );
+        assert_eq!(
+            f(&Select::Bench("bb".into()), "bench", false, &[]),
+            "--bench bb"
+        );
+        assert_eq!(
+            f(&Select::Example("ex".into()), "example", true, &[]),
+            "--example ex --profile test"
+        );
+        // The user's own target flags or profile win.
+        assert_eq!(f(&Select::Auto, "lib", true, &["--tests"]), "");
+        assert_eq!(f(&Select::Auto, "lib", false, &["--bin=x"]), "");
+        assert_eq!(f(&Select::Lib, "lib", true, &["--release"]), "--lib");
+        assert_eq!(f(&Select::Lib, "lib", false, &["--features", "x"]), "--lib");
+
+        let w =
+            |a: &[&str]| user_wants_tests(&a.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>());
+        assert!(w(&["--tests"]));
+        assert!(w(&["--profile", "test"]));
+        assert!(w(&["--profile=test"]));
+        assert!(!w(&["--all-targets"]));
+        assert!(!w(&["--features", "test"]));
     }
 }

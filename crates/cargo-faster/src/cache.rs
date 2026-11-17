@@ -127,6 +127,29 @@ fn last_build_fact(total: f64, pass: f64, hit: f64, weighted: f64) -> String {
     }
 }
 
+/// Whether dev builds are incremental, and why, in cargo's order:
+/// `CARGO_INCREMENTAL`, then `build.incremental` (`CARGO_BUILD_INCREMENTAL`
+/// or config), then the profile.
+fn incremental(ctx: &Context) -> (bool, String) {
+    let incremental_env = ctx.var("CARGO_INCREMENTAL");
+    match incremental_env {
+        Some("0") => (false, "CARGO_INCREMENTAL=0".to_owned()),
+        Some(_) => (true, "CARGO_INCREMENTAL".to_owned()),
+        // `build.incremental` (config or CARGO_BUILD_INCREMENTAL) beats
+        // every profile's `incremental`.
+        None => match ctx.var("CARGO_BUILD_INCREMENTAL") {
+            Some(v) => (v != "false", format!("CARGO_BUILD_INCREMENTAL={v}")),
+            None => match ctx.config.get("build.incremental") {
+                Some((v, f)) => (v.as_bool().unwrap_or(true), f.display().to_string()),
+                None => match ctx.profile_value("dev", "incremental") {
+                    Some((v, src)) => (v.as_bool().unwrap_or(true), src),
+                    None => (true, "default for dev".to_owned()),
+                },
+            },
+        },
+    }
+}
+
 /// Run the check.
 #[must_use]
 #[allow(
@@ -146,18 +169,7 @@ pub fn check(ctx: &Context, inputs: &Inputs) -> Section {
             .as_ref()
             .map_or_else(|| "none".to_owned(), |(w, src)| format!("{w} ({src})")),
     );
-    let incremental_env = ctx.var("CARGO_INCREMENTAL");
-    let incremental = match incremental_env {
-        Some("0") => (false, "CARGO_INCREMENTAL=0".to_owned()),
-        Some(_) => (true, "CARGO_INCREMENTAL".to_owned()),
-        None => match ctx.profile_value("dev", "incremental") {
-            Some((v, src)) => (v.as_bool().unwrap_or(true), src),
-            None => match ctx.config.get("build.incremental") {
-                Some((v, f)) => (v.as_bool().unwrap_or(true), f.display().to_string()),
-                None => (true, "default for dev".to_owned()),
-            },
-        },
-    };
+    let incremental = incremental(ctx);
     s.fact(
         "incremental (dev)",
         format!(
@@ -454,5 +466,30 @@ mod tests {
             .map(|f| f.id)
             .collect();
         assert_eq!(ids, ["workspace-wrapper", "incremental-off"]);
+    }
+
+    #[test]
+    fn build_incremental_beats_profile() {
+        let incremental = |ctx: &Context| {
+            check(ctx, &Inputs::default())
+                .facts
+                .into_iter()
+                .find(|f| f.key == "incremental (dev)")
+                .map(|f| f.value)
+                .unwrap_or_default()
+        };
+        let mut ctx = Context {
+            config: crate::context::CargoConfig::from_strs(&[(
+                "/w/.cargo/config.toml",
+                "[build]\nincremental = true\n[profile.dev]\nincremental = false\n",
+            )]),
+            ..Context::default()
+        };
+        assert_eq!(incremental(&ctx), "on (/w/.cargo/config.toml)");
+        ctx.env
+            .insert("CARGO_BUILD_INCREMENTAL".into(), "false".into());
+        assert_eq!(incremental(&ctx), "off (CARGO_BUILD_INCREMENTAL=false)");
+        ctx.env.insert("CARGO_INCREMENTAL".into(), "1".into());
+        assert_eq!(incremental(&ctx), "on (CARGO_INCREMENTAL)");
     }
 }
