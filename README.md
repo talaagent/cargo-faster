@@ -54,7 +54,7 @@ $ cargo faster check-cost -p tala-agent-bin
 |---|---|
 | `cargo faster` | Everything below that doesn't build: a quick overall report |
 | `timings` | A `--timings` report: critical path, crates that serialize the build, long codegen |
-| `check-cost` | Self-profiles one crate: top queries, trait solving by type and by function body, proc macros |
+| `check-cost` | Self-profiles one crate: top queries, trait solving by type and by function body, time by module, proc macros |
 | `setup` | Linker, debug info, codegen units, opt-levels, jobs, rustflags |
 | `cache` | sccache or kache hit rates, incremental, cold worktrees |
 | `machine` | Load, other builds, memory, disk, filesystems |

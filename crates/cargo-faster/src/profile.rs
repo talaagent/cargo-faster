@@ -16,7 +16,11 @@ use std::time::SystemTime;
 const BODY_LABELS: &[&str] = &[
     "check_coroutine_obligations",
     "typeck",
+    "typeck_root",
     "mir_borrowck",
+    "mir_built",
+    "mir_promoted",
+    "thir_body",
     "check_well_formed",
     "mir_drops_elaborated_and_const_checked",
     "optimized_mir",
@@ -214,6 +218,20 @@ pub struct Analysis {
     pub proc_macros: Vec<Cost>,
     /// Type checking and borrow checking, inclusive time by body.
     pub heavy_bodies: Vec<Cost>,
+    /// Self time of every query run for some function body (type checking,
+    /// borrow checking, MIR building, the trait solving they asked for), in
+    /// seconds. The rest is crate-wide work: expansion, lints, metadata.
+    pub body_secs: f64,
+    /// Distinct items (functions, methods, constants) whose bodies were
+    /// checked; closures and async blocks count with their item.
+    pub body_count: usize,
+    /// Body time by item, most expensive first (up to 20). `count` is the
+    /// number of body queries.
+    pub items: Vec<Cost>,
+    /// Body time by top-level module (`krate::module`, or `krate` for items
+    /// at the crate root), most expensive first. `count` is the number of
+    /// items.
+    pub modules: Vec<Cost>,
     /// Self time of codegen and LLVM, in seconds.
     pub codegen_secs: f64,
 }
@@ -249,6 +267,8 @@ pub fn analyze(p: &Profile) -> Analysis {
     let n = p.intervals.len();
     let mut child = vec![0u64; n];
     let mut body_of: Vec<Option<u32>> = vec![None; n];
+    // The body an interval works for: its own, or the enclosing one.
+    let mut owner: Vec<Option<u32>> = vec![None; n];
     let body_label_ids: Vec<u32> = BODY_LABELS
         .iter()
         .filter_map(|l| p.label_ids.get(*l).copied())
@@ -290,6 +310,7 @@ pub fn analyze(p: &Profile) -> Analysis {
             } else {
                 enclosing
             };
+            owner[i] = here;
             stack.push((i, here));
         }
     }
@@ -303,6 +324,7 @@ pub fn analyze(p: &Profile) -> Analysis {
     let mut preds: HashMap<u32, (u64, usize, ByBody)> = HashMap::new();
     let mut macros: HashMap<&str, (u64, usize)> = HashMap::new();
     let mut bodies: HashMap<&str, (u64, usize)> = HashMap::new();
+    let mut per_body: HashMap<u32, (u64, usize)> = HashMap::new();
     for (i, iv) in p.intervals.iter().enumerate() {
         let label = p.label(iv);
         let st = self_ns(i);
@@ -316,6 +338,11 @@ pub fn analyze(p: &Profile) -> Analysis {
         q.1 += 1;
         if CODEGEN_PREFIXES.iter().any(|c| label.starts_with(c)) {
             codegen += st;
+        }
+        if let Some(b) = owner[i] {
+            let e = per_body.entry(b).or_default();
+            e.0 += st;
+            e.1 += usize::from(owner[i] == iv.arg && body_label_ids.contains(&iv.label));
         }
         match label {
             "evaluate_obligation" => {
@@ -332,7 +359,7 @@ pub fn analyze(p: &Profile) -> Analysis {
                 e.0 += iv.end - iv.start;
                 e.1 += 1;
             }
-            "typeck" | "mir_borrowck" => {
+            "typeck" | "typeck_root" | "mir_borrowck" => {
                 // Inclusive time, but only for the outermost of nested
                 // body queries (closures are checked with their parent).
                 if body_of[i].is_none()
@@ -469,7 +496,67 @@ pub fn analyze(p: &Profile) -> Analysis {
         count: c,
     }));
     a.heavy_bodies.truncate(15);
+
+    // Body time by item, then by module.
+    let mut items: HashMap<&str, (u64, usize)> = HashMap::new();
+    for (b, (ns, count)) in per_body {
+        a.body_secs += s(ns);
+        let e = items.entry(body_item(&p.args[b as usize])).or_default();
+        e.0 += ns;
+        e.1 += count;
+    }
+    a.body_count = items.len();
+    let mut modules: HashMap<&str, (u64, usize)> = HashMap::new();
+    for (item, (ns, _)) in &items {
+        let e = modules.entry(module_of(item)).or_default();
+        e.0 += ns;
+        e.1 += 1;
+    }
+    a.modules = sorted(modules.into_iter().map(|(k, (t, c))| Cost {
+        name: k.to_owned(),
+        secs: s(t),
+        count: c,
+    }));
+    a.items = sorted(items.into_iter().map(|(k, (t, c))| Cost {
+        name: k.to_owned(),
+        secs: s(t),
+        count: c,
+    }));
+    a.items.truncate(20);
     a
+}
+
+/// The item a body belongs to: `a::f::{{closure}}#1` is `a::f`. Closures,
+/// async blocks and anonymous constants are checked with their item.
+#[must_use]
+pub fn body_item(def: &str) -> &str {
+    let mut end = def.len();
+    let mut at = 0;
+    for seg in def.split("::") {
+        let anon =
+            seg.starts_with('{') && !seg.starts_with("{{impl}}") && !seg.starts_with("{impl");
+        if anon && at > 0 {
+            end = at - 2;
+            break;
+        }
+        at += seg.len() + 2;
+    }
+    &def[..end]
+}
+
+/// The top-level module of an item: `krate::module` when the item is inside
+/// a module, `krate` when it is at the crate root (`krate::f`,
+/// `krate::{{impl}}::m`).
+#[must_use]
+pub fn module_of(item: &str) -> &str {
+    let mut segs = item.splitn(3, "::");
+    let krate = segs.next().unwrap_or(item);
+    match (segs.next(), segs.next()) {
+        (Some(m), Some(_)) if !m.starts_with('{') && !m.contains(['<', ' ']) => {
+            &item[..krate.len() + 2 + m.len()]
+        }
+        _ => krate,
+    }
 }
 
 fn sorted(it: impl Iterator<Item = Cost>) -> Vec<Cost> {
@@ -644,7 +731,11 @@ const SEND_SHARE: f64 = 2.0;
     clippy::too_many_lines,
     reason = "a flat list of independent findings reads best in one place"
 )]
-pub fn findings(a: &Analysis, crate_name: &str) -> Vec<Finding> {
+///
+/// `module_lines` are the crate's top-level source entries and their line
+/// counts (`("agent", 9000)`, `("lib.rs", 120)`), as `rdeps` counts them;
+/// pass `&[]` when the sources aren't at hand.
+pub fn findings(a: &Analysis, crate_name: &str, module_lines: &[(String, usize)]) -> Vec<Finding> {
     let mut out = Vec::new();
     let total = a.total_secs.max(1e-9);
     let ts_share = pct(a.trait_solving_secs, total);
@@ -784,7 +875,95 @@ pub fn findings(a: &Analysis, crate_name: &str) -> Vec<Finding> {
                 .fix("Split it into smaller functions, and box the futures of the expensive branches (`Box::pin(...)` or `.boxed()`), so each piece is checked on its own."),
         );
     }
+
+    // Nothing above explains most of the time: it is the size of the crate.
+    let explained = out.iter().any(|f| {
+        matches!(
+            f.id,
+            "trait-solving-dominates"
+                | "send-proofs-per-async-body"
+                | "heavy-function-body"
+                | "codegen-dominates"
+        )
+    });
+    if !explained && let Some(f) = size_finding(a, crate_name, module_lines) {
+        out.push(f);
+    }
     out
+}
+
+/// When no body, type or macro stands out but the crate still takes long:
+/// the cost is many ordinary bodies, and the lever is splitting the crate.
+fn size_finding(
+    a: &Analysis,
+    crate_name: &str,
+    module_lines: &[(String, usize)],
+) -> Option<Finding> {
+    let total = a.total_secs.max(1e-9);
+    let body_share = pct(a.body_secs, total);
+    let top_item = a
+        .items
+        .first()
+        .map_or(0.0, |i| pct(i.secs, a.body_secs.max(1e-9)));
+    if a.wall_secs < 10.0 || a.body_count < 100 || body_share < 50.0 || top_item >= 10.0 {
+        return None;
+    }
+    let lines = |module: &str| {
+        let name = module.rsplit("::").next().unwrap_or(module);
+        module_lines
+            .iter()
+            .find(|(m, _)| m == name || m.strip_suffix(".rs") == Some(name))
+            .map(|(_, n)| format!(", {n} lines"))
+            .unwrap_or_default()
+    };
+    let top: Vec<&Cost> = a
+        .modules
+        .iter()
+        .filter(|m| m.name.contains("::"))
+        .take(3)
+        .collect();
+    if top.is_empty() {
+        return None;
+    }
+    let mods: Vec<String> = top
+        .iter()
+        .map(|m| {
+            format!(
+                "`{}` {:.0}% ({}, {} items{})",
+                m.name,
+                pct(m.secs, total),
+                secs(m.secs),
+                m.count,
+                lines(&m.name)
+            )
+        })
+        .collect();
+    let names: Vec<String> = top.iter().map(|m| format!("`{}`", m.name)).collect();
+    Some(
+        Finding::new(
+            "check-time-is-crate-size",
+            if a.wall_secs >= 20.0 { Severity::Medium } else { Severity::Low },
+            format!(
+                "{crate_name}'s {} check is spread over {} items: split it by module",
+                secs(a.wall_secs),
+                a.body_count
+            ),
+            "splitting-a-big-crate",
+        )
+        .saw(format!(
+            "Trait solving is small ({}, {:.0}%) and no single body stands out (the biggest is {top_item:.1}% of body time). The cost is {} items whose bodies took {} of type checking, borrow checking and MIR building ({body_share:.0}% of the profile). By top-level module: {}.",
+            secs(a.trait_solving_secs),
+            pct(a.trait_solving_secs, total),
+            a.body_count,
+            secs(a.body_secs),
+            mods.join(", ")
+        ))
+        .why("rustc's frontend checks a crate's bodies one after another on one thread, and an edit anywhere in the crate checks all of them again. With no hot spot, the time is proportional to the amount of code, and the lever is making each crate smaller.")
+        .fix(format!(
+            "Move the most expensive modules that don't need the rest of the crate into crates of their own, starting with {}. They then check in parallel with the rest, and edits elsewhere skip them. `cargo faster rdeps {crate_name}` shows the module sizes and what each crate rebuilds. Tradeoff: the pieces talk through a public API, and dependency cycles between modules have to be cut first.",
+            names.join(", ")
+        )),
+    )
 }
 
 fn short_ty(ty: &str) -> String {
@@ -803,29 +982,25 @@ pub fn details(a: &Analysis) -> Vec<String> {
             ellipsize(&c.name, name_max),
         ]
     };
+    let costs = |title: String, head: &[&str], v: &[Cost], n: usize, name_max: usize| {
+        let rows: Vec<Vec<String>> = v.iter().take(n).map(|c| row(c, name_max)).collect();
+        format!("{title}\n{}", table(head, &rows))
+    };
     let mut out = Vec::new();
-    out.push(format!(
-        "top queries by self time\n{}",
-        table(
-            &["self", "%", "count", "query"],
-            &a.queries
-                .iter()
-                .take(12)
-                .map(|c| row(c, 60))
-                .collect::<Vec<_>>()
-        )
+    out.push(costs(
+        "top queries by self time".to_owned(),
+        &["self", "%", "count", "query"],
+        &a.queries,
+        12,
+        60,
     ));
     if !a.trait_solving_by_category.is_empty() {
-        out.push(format!(
-            "trait solving by what is being proved\n{}",
-            table(
-                &["self", "%", "count", "category"],
-                &a.trait_solving_by_category
-                    .iter()
-                    .take(10)
-                    .map(|c| row(c, 60))
-                    .collect::<Vec<_>>()
-            )
+        out.push(costs(
+            "trait solving by what is being proved".to_owned(),
+            &["self", "%", "count", "category"],
+            &a.trait_solving_by_category,
+            10,
+            60,
         ));
     }
     if !a.obligations.is_empty() {
@@ -852,29 +1027,42 @@ pub fn details(a: &Analysis) -> Vec<String> {
         ));
     }
     if !a.proving_bodies.is_empty() {
-        out.push(format!(
-            "bodies doing the most trait solving\n{}",
-            table(
-                &["self", "%", "preds", "body"],
-                &a.proving_bodies
-                    .iter()
-                    .take(8)
-                    .map(|c| row(c, 100))
-                    .collect::<Vec<_>>()
-            )
+        out.push(costs(
+            "bodies doing the most trait solving".to_owned(),
+            &["self", "%", "preds", "body"],
+            &a.proving_bodies,
+            8,
+            100,
+        ));
+    }
+    if a.modules.len() > 1 {
+        out.push(costs(
+            format!(
+                "time by module (bodies only; {} of the profile)",
+                secs(a.body_secs)
+            ),
+            &["self", "%", "items", "module"],
+            &a.modules,
+            10,
+            80,
+        ));
+    }
+    if !a.items.is_empty() {
+        out.push(costs(
+            "bodies by total frontend time".to_owned(),
+            &["time", "%", "queries", "item"],
+            &a.items,
+            10,
+            100,
         ));
     }
     if !a.proc_macros.is_empty() {
-        out.push(format!(
-            "proc macro expansion\n{}",
-            table(
-                &["time", "%", "uses", "macro"],
-                &a.proc_macros
-                    .iter()
-                    .take(8)
-                    .map(|c| row(c, 60))
-                    .collect::<Vec<_>>()
-            )
+        out.push(costs(
+            "proc macro expansion".to_owned(),
+            &["time", "%", "uses", "macro"],
+            &a.proc_macros,
+            8,
+            60,
         ));
     }
     out
@@ -882,7 +1070,7 @@ pub fn details(a: &Analysis) -> Vec<String> {
 
 /// A section for one analyzed profile.
 #[must_use]
-pub fn section(a: &Analysis, crate_name: &str) -> Section {
+pub fn section(a: &Analysis, crate_name: &str, module_lines: &[(String, usize)]) -> Section {
     let mut s = Section::new(format!("check-cost: {crate_name}"));
     s.fact(
         "profiled time",
@@ -925,7 +1113,7 @@ pub fn section(a: &Analysis, crate_name: &str) -> Section {
         );
     }
     s.details = details(a);
-    s.extend(findings(a, crate_name));
+    s.extend(findings(a, crate_name, module_lines));
     s.data = serde_json::to_value(a).unwrap_or_default();
     s
 }
@@ -1062,7 +1250,7 @@ mod tests {
                 .any(|c| c.name == "types from app")
         );
 
-        let f = findings(&a, "app");
+        let f = findings(&a, "app", &[]);
         assert_eq!(f[0].id, "send-proofs-per-async-body");
         assert_eq!(f[0].severity, Severity::High);
         assert!(f[0].saw.contains("`app::Bot`"), "{}", f[0].saw);
@@ -1102,7 +1290,7 @@ mod tests {
         assert_eq!(a.async_trait_obligations, 2);
         assert!((a.async_trait_secs - 3.0).abs() < 1e-6);
         assert!((a.trait_solving_secs - 4.0).abs() < 1e-6);
-        let f = findings(&a, "a");
+        let f = findings(&a, "a", &[]);
         assert!(
             f.iter()
                 .any(|f| f.id == "async-trait-overhead" && f.severity == Severity::High)
@@ -1119,7 +1307,7 @@ mod tests {
                 async_trait_obligations: 100,
                 ..Analysis::default()
             };
-            findings(&a, "a")
+            findings(&a, "a", &[])
                 .into_iter()
                 .find(|f| f.id == "async-trait-overhead")
                 .map(|f| f.severity)
@@ -1142,8 +1330,8 @@ mod tests {
             0,
         );
         let a = analyze(&p);
-        assert_eq!(findings(&a, "a"), []);
-        let s = section(&a, "a");
+        assert_eq!(findings(&a, "a", &[]), []);
+        let s = section(&a, "a", &[]);
         assert!(s.details[0].contains("typeck"));
     }
 
@@ -1170,7 +1358,7 @@ mod tests {
                 .iter()
                 .all(|q| !q.name.starts_with("self_profile"))
         );
-        let s = section(&a, "a");
+        let s = section(&a, "a", &[]);
         let overhead = s
             .facts
             .iter()
@@ -1188,5 +1376,88 @@ mod tests {
         let a = analyze(&p);
         let outer = a.queries.iter().find(|q| q.name == "outer").unwrap();
         assert!((outer.secs - 100e-9).abs() < 1e-12);
+    }
+
+    #[test]
+    fn names_body_items_and_modules() {
+        assert_eq!(body_item("a::m::f::{closure#0}"), "a::m::f");
+        assert_eq!(body_item("a::m::f::{{closure}}[1]::{{closure}}"), "a::m::f");
+        assert_eq!(body_item("a::m::{{impl}}[1]::g"), "a::m::{{impl}}[1]::g");
+        assert_eq!(
+            body_item("a::m::{impl#2}::g::{closure#1}"),
+            "a::m::{impl#2}::g"
+        );
+        assert_eq!(body_item("a::{constant#0}"), "a");
+        assert_eq!(module_of("a::m::{{impl}}[1]::g"), "a::m");
+        assert_eq!(module_of("a::m::f"), "a::m");
+        assert_eq!(module_of("a::f"), "a");
+        assert_eq!(module_of("a::{{impl}}::g"), "a");
+    }
+
+    /// `n` bodies of 10ms each per module, closures folded into their item.
+    fn even_profile(mods: &[(&str, usize)]) -> Profile {
+        let mut p = Profile::default();
+        let mut t = 0;
+        for (m, n) in mods {
+            for i in 0..*n {
+                let f = format!("app::{m}::f{i}");
+                p.push("typeck_root", Some(&f), t, t + 6_000_000, 0);
+                p.push(
+                    "mir_borrowck",
+                    Some(&format!("{f}::{{closure#0}}")),
+                    t + 6_000_000,
+                    t + 10_000_000,
+                    0,
+                );
+                t += 10_000_000;
+            }
+        }
+        p
+    }
+
+    #[test]
+    fn attributes_body_time_to_items_and_modules() {
+        let a = analyze(&even_profile(&[("big", 1000), ("small", 200)]));
+        assert_eq!(a.body_count, 1200);
+        assert!((a.body_secs - 12.0).abs() < 1e-6, "{}", a.body_secs);
+        assert_eq!(a.modules[0].name, "app::big");
+        assert_eq!(a.modules[0].count, 1000);
+        assert!((a.modules[0].secs - 10.0).abs() < 1e-6);
+        assert_eq!(a.modules[1].name, "app::small");
+        // The closure's borrowck counts towards its item.
+        assert!((a.items[0].secs - 0.01).abs() < 1e-9, "{}", a.items[0].secs);
+        assert_eq!(a.items[0].count, 2);
+        assert_eq!(a.items.len(), 20);
+    }
+
+    #[test]
+    fn spread_out_check_time_says_split_the_crate() {
+        let a = analyze(&even_profile(&[("big", 1500), ("small", 600)]));
+        let lines = [("big".to_owned(), 9000), ("small.rs".to_owned(), 2000)];
+        let f = findings(&a, "app", &lines);
+        let size = f
+            .iter()
+            .find(|f| f.id == "check-time-is-crate-size")
+            .unwrap();
+        assert_eq!(size.severity, Severity::Medium);
+        let text = format!("{size:?}");
+        assert!(text.contains("`app::big` 71%"), "{text}");
+        assert!(text.contains("9000 lines"), "{text}");
+        assert!(text.contains("2000 lines"), "{text}");
+
+        // Small crates and crates with one hot body don't get it.
+        let small = analyze(&even_profile(&[("big", 50)]));
+        assert_eq!(findings(&small, "app", &[]).len(), 0);
+        let mut p = even_profile(&[("big", 1500)]);
+        p.push(
+            "typeck_root",
+            Some("app::hot"),
+            15_000_000_000,
+            21_000_000_000,
+            0,
+        );
+        let hot = analyze(&p);
+        let ids: Vec<_> = findings(&hot, "app", &[]).iter().map(|f| f.id).collect();
+        assert!(!ids.contains(&"check-time-is-crate-size"), "{ids:?}");
     }
 }

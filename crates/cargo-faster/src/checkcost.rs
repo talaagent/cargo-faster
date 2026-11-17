@@ -64,6 +64,8 @@ pub struct Run {
     pub wall_secs: f64,
     /// Whether rustc reported errors.
     pub failed: bool,
+    /// The directory of the target's root source file (`src`).
+    pub src_dir: PathBuf,
 }
 
 /// Find the `Running` line for `crate_name` (`--crate-name`, underscored)
@@ -332,6 +334,11 @@ pub fn run(ctx: &Context, opts: &Options) -> Result<Run, Error> {
         profile,
         wall_secs,
         failed: !replay.success(),
+        src_dir: target
+            .src_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default(),
     })
 }
 
