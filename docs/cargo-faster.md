@@ -42,7 +42,7 @@ Every subcommand takes these, before or after the subcommand's name (`cargo fast
 - `--dry-run` prints the builds that `timings --run`, `tests --run` and `check-cost` would start, and stops before starting them. The quick checks still run, because they only read things.
 - `-v` and `-q` change how much it logs to stderr.
 
-The builds it starts are echoed to stderr before they run. Errors go to stderr as `cargo faster: error[CODE]: message`. The codes are stable: `usage`, `build_failed`, `no_workspace`, `no_timings`, `unknown_value`, `failed`, and `cmd_spawn`, `cmd_exit`, `cmd_timeout`, `cmd_io`, `cmd_utf8` when a command it runs goes wrong. A misspelled crate name for `rdeps`, `timings --edit`, or a wrong `-p` or `--bin` for `check-cost`, lists the three closest names.
+The builds it starts are echoed to stderr before they run. Errors go to stderr as `cargo faster: error[CODE]: message`. The codes are stable: `usage`, `build_failed`, `no_nextest`, `no_workspace`, `no_timings`, `unknown_value`, `failed`, and `cmd_spawn`, `cmd_exit`, `cmd_timeout`, `cmd_io`, `cmd_utf8` when a command it runs goes wrong. A misspelled crate name for `rdeps`, `timings --edit`, or a wrong `-p` or `--bin` for `check-cost`, lists the three closest names.
 
 The exit status is:
 
@@ -403,7 +403,7 @@ Every one of these is a tradeoff, and the finding says what you give up. Turning
   [info] 82 worktree(s) have no target directory yet
 ```
 
-It knows about `sccache` and `kache`. With kache, it reads `kache stats --json` for the last day and for the last build in this workspace, and `kache explain --json` for why the misses missed. The last build is kache's latest *session* in this workspace, and a session can span several cargo commands, so `kache session` says when it started and how long it ran. When the latest builds in it were all incremental compiles that kache passed straight to rustc, a `kache latest` line says so ("94 crates compiled incrementally, starting 3 min ago, with no cache lookups"): the hit rate and the miss causes are from the session's earlier builds, and the miss causes are labeled with when kache recorded them. It reports hit rates by count *and* by compile time. Those can differ a lot: a cache that hits 98% of crates but misses your three biggest ones still leaves you with most of the build.
+It knows about `sccache` and `kache`. With sccache, it reads `sccache --show-stats --stats-format json`: hits and misses since the sccache server started, what it couldn't cache and why (`not_cached`), and how full the cache is. Its findings are `sccache-low-hit-rate` (under half of at least 50 cacheable compiles hit) and `sccache-cache-full` (the cache is at 95% of its limit, so it's evicting). The counters cover everything the server has compiled since it started, for every project: `sccache --zero-stats` and one build give numbers for just that build. With kache, it reads `kache stats --json` for the last day and for the last build in this workspace, and `kache explain --json` for why the misses missed. The last build is kache's latest *session* in this workspace, and a session can span several cargo commands, so `kache session` says when it started and how long it ran. When the latest builds in it were all incremental compiles that kache passed straight to rustc, a `kache latest` line says so ("94 crates compiled incrementally, starting 3 min ago, with no cache lookups"): the hit rate and the miss causes are from the session's earlier builds, and the miss causes are labeled with when kache recorded them. It reports hit rates by count *and* by compile time. Those can differ a lot: a cache that hits 98% of crates but misses your three biggest ones still leaves you with most of the build.
 
 It also looks at git worktrees, because they change the picture. Every worktree has its own target directory, so the first build in a new one is cold: nothing incremental, and whatever the cache can give you at best. A few things we learned the hard way, which `cache` points out when it sees the setup that causes them:
 
@@ -506,7 +506,7 @@ All of that is read from configuration. To measure, add `--run`:
 $ cargo faster tests --run -- --profile gate --test-threads 8
 ```
 
-It times `cargo nextest run --workspace --no-run --timings`, runs the tests (`--no-fail-fast`, with nextest's libtest-json output), and adds a `test run` section and the build's `timings` section:
+It times `cargo nextest run --workspace --no-run --timings`, runs the tests (`--no-fail-fast`, `--no-tests=warn`, with nextest's libtest-json output), and adds a `test run` section and the build's `timings` section:
 
 ```text
 == test run
@@ -534,7 +534,7 @@ It times `cargo nextest run --workspace --no-run --timings`, runs the tests (`--
 
 Here one hung test, killed by the profile's terminate-after at 600s, is most of the 11-minute run; without it the suite needs about a minute on 8 threads.
 
-Its findings: `test-build-dominates` (the build takes over a minute and more than twice the run), `tests-near-slow-timeout` (tests at half the profile's `slow-timeout` or more), and `test-threads-idle` (the threads were busy less than half the run). Arguments after `--` go to both nextest commands; never pass `-p` there if you use a caching wrapper, as it changes feature resolution and the cache keys.
+Its findings: `test-build-dominates` (the build takes over a minute and more than twice the run), `tests-near-slow-timeout` (tests at half the profile's `slow-timeout` or more), `test-threads-idle` (the threads were busy less than half the run), and `no-tests-ran` (nextest found no tests, and the `tests` fact says `0 tests`). It needs cargo-nextest, on `PATH` or in `~/.cargo/bin`; without it, it stops with `error[no_nextest]` and the install command. Arguments after `--` go to both nextest commands; never pass `-p` there if you use a caching wrapper, as it changes feature resolution and the cache keys.
 
 See [Test suites](guide.md#test-suites) and [Measuring a test run](guide.md#measuring-a-test-run).
 

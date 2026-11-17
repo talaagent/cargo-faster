@@ -502,6 +502,18 @@ pub fn on_path(env: &BTreeMap<String, String>, prog: &str) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
+/// Whether cargo can find the subcommand `cargo-{name}`: on `PATH`, or in
+/// `$CARGO_HOME/bin` (`~/.cargo/bin`), where cargo also looks.
+pub fn has_subcommand(env: &BTreeMap<String, String>, name: &str) -> bool {
+    let prog = format!("cargo-{name}");
+    let home_bin = env
+        .get("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env.get("HOME").map(|h| Path::new(h).join(".cargo")))
+        .map(|h| h.join("bin").join(&prog));
+    on_path(env, &prog).is_some() || home_bin.is_some_and(|p| p.is_file())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

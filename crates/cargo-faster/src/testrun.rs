@@ -212,7 +212,15 @@ fn timeout_finding(slowest: &[&TestTime], slow_timeout: f64) -> Option<Finding> 
     Some(finding)
 }
 
-/// The `test run` section.
+/// `--no-tests=warn`, so a workspace (or a filter) with no tests reports
+/// "0 tests" instead of failing, unless the user passed `--no-tests`.
+#[must_use]
+pub fn no_tests_arg(args: &[String]) -> Option<&'static str> {
+    (!args.iter().any(|a| a.starts_with("--no-tests"))).then_some("--no-tests=warn")
+}
+
+/// The `test run` section: build and run time, the slowest tests and
+/// binaries, how busy the threads were.
 #[must_use]
 pub fn section(i: &Inputs) -> Section {
     let mut s = Section::new("test run");
@@ -224,6 +232,14 @@ pub fn section(i: &Inputs) -> Section {
         s.fact("build (--no-run)", secs(b));
     }
     s.fact("run", secs(i.run_secs));
+    if tests.is_empty() && i.run.ignored == 0 {
+        s.fact("tests", "0 tests: nextest found none to run");
+        s.extend([Finding::new("no-tests-ran", Severity::Info, "No tests ran", "measuring-a-test-run")
+            .saw("`cargo nextest run --workspace` found 0 tests, so there is no run to measure.")
+            .why("A workspace with no `#[test]` functions, or a filter or `--profile` default-filter that matches none, gives an empty run.")
+            .fix("Check the filter and the profile's `default-filter` in .config/nextest.toml; `cargo nextest list --workspace` shows what nextest would run.")]);
+        return s;
+    }
     s.fact(
         "tests",
         format!(
@@ -406,6 +422,27 @@ not json
             "{}",
             fact("test-seconds")
         );
+    }
+
+    #[test]
+    fn zero_tests() {
+        let s = section(&Inputs {
+            build_secs: Some(3.0),
+            run_secs: 0.2,
+            threads: (8, "CPUs".into()),
+            slow_timeout: 60.0,
+            run: parse(""),
+        });
+        assert_eq!(s.facts[2].key, "tests");
+        assert_eq!(s.facts[2].value, "0 tests: nextest found none to run");
+        let ids: Vec<_> = s.findings.iter().map(|f| f.id).collect();
+        assert_eq!(ids, ["no-tests-ran"]);
+        let args = |a: &[&str]| a.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        assert_eq!(
+            no_tests_arg(&args(&["--profile", "ci"])),
+            Some("--no-tests=warn")
+        );
+        assert_eq!(no_tests_arg(&args(&["--no-tests=fail"])), None);
     }
 
     #[test]

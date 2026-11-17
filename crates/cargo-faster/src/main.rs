@@ -775,6 +775,9 @@ fn tests_sections(
     if !run {
         return Ok(());
     }
+    if !inputs.nextest_installed {
+        return Err(Error::NoNextest);
+    }
     let build_start = SystemTime::now();
     let started = Instant::now();
     let built = build(ctx, nice, cargo_bin(&ctx.env))
@@ -791,6 +794,7 @@ fn tests_sections(
         .env("NEXTEST_EXPERIMENTAL_LIBTEST_JSON", "1")
         .args(["nextest", "run", "--workspace", "--no-fail-fast"])
         .args(["--message-format", "libtest-json-plus"])
+        .args(testrun::no_tests_arg(args))
         .args(args)
         .current_dir(ctx.root())
         .output()?;

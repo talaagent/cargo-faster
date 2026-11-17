@@ -29,6 +29,9 @@ pub struct Inputs {
     pub kache_last: Option<Value>,
     /// `kache explain --json --root <root>`.
     pub kache_explain: Option<Value>,
+    /// `sccache --show-stats --stats-format json`, when sccache is the
+    /// wrapper.
+    pub sccache_stats: Option<Value>,
     /// Whether `sccache` is on PATH (for the no-cache advice).
     pub sccache_on_path: bool,
     /// Now, Unix milliseconds, for the age of what kache reports.
@@ -77,7 +80,19 @@ impl Inputs {
             serde_json::from_slice(&out.stdout).ok()
         };
         let root_s = root.display().to_string();
+        let sccache_stats = wrapper
+            .as_deref()
+            .filter(|w| w.contains("sccache"))
+            .and_then(|w| {
+                let out = probe(w)
+                    .args(["--show-stats", "--stats-format", "json"])
+                    .current_dir(&root)
+                    .output()
+                    .ok()?;
+                serde_json::from_slice(&out.stdout).ok()
+            });
         Self {
+            sccache_stats,
             kache_stats: uses_kache.then(|| json(&["stats", "--json"])).flatten(),
             kache_last: uses_kache
                 .then(|| {
@@ -120,6 +135,89 @@ pub fn wrapper(ctx: &Context) -> Option<(String, String)> {
 
 fn f64_at(v: &Value, path: &[&str]) -> Option<f64> {
     path.iter().try_fold(v, |v, k| v.get(k))?.as_f64()
+}
+
+/// The sum of a `{"counts": {"Rust": n, ...}}` object in sccache's stats.
+fn counts(st: &Value, key: &str) -> f64 {
+    st.pointer(&format!("/stats/{key}/counts"))
+        .and_then(Value::as_object)
+        .map_or(0.0, |m| m.values().filter_map(Value::as_f64).sum())
+}
+
+/// sccache's stats (since its server started): hit rate, what it couldn't
+/// cache and why, and how full the cache is.
+fn sccache(st: &Value, s: &mut Section, f: &mut Vec<Finding>) {
+    let (hits, misses) = (counts(st, "cache_hits"), counts(st, "cache_misses"));
+    let not_cacheable = f64_at(st, &["stats", "requests_not_cacheable"]).unwrap_or(0.0);
+    let cacheable = hits + misses;
+    let pct = if cacheable > 0.0 {
+        hits / cacheable * 100.0
+    } else {
+        0.0
+    };
+    s.fact(
+        "sccache",
+        format!(
+            "{hits:.0} hits, {misses:.0} misses ({pct:.0}% hits), {not_cacheable:.0} not cacheable, since its server started"
+        ),
+    );
+    let size = f64_at(st, &["cache_size"]);
+    let max = f64_at(st, &["max_cache_size"]);
+    let location = st
+        .get("cache_location")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown location");
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let size_of = |v: f64| bytes(v as u64);
+    s.fact(
+        "sccache cache",
+        match (size, max) {
+            (Some(used), Some(limit)) => {
+                format!("{} of {}, {location}", size_of(used), size_of(limit))
+            }
+            (None, Some(limit)) => format!("max {}, {location}", size_of(limit)),
+            _ => location.to_owned(),
+        },
+    );
+    let mut reasons: Vec<(String, f64)> = st
+        .pointer("/stats/not_cached")
+        .and_then(Value::as_object)
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| Some((k.clone(), v.as_f64()?)))
+                .collect()
+        })
+        .unwrap_or_default();
+    reasons.sort_by(|a, b| b.1.total_cmp(&a.1));
+    if !reasons.is_empty() {
+        s.details.push(format!(
+            "sccache not cached, by reason\n{}",
+            reasons
+                .iter()
+                .map(|(r, c)| format!("  {c:>6.0}  {r}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+    if cacheable >= 50.0 && pct < 50.0 {
+        f.push(
+            Finding::new("sccache-low-hit-rate", Severity::Low, format!("sccache hits {pct:.0}% of cacheable compiles"), "sccache-and-kache")
+                .saw(format!("{hits:.0} hits and {misses:.0} misses since the sccache server started."))
+                .why("Every miss is a full compile plus a cache write. sccache's key includes the compiler, the arguments and the source's absolute path, so the same crate built from another worktree or directory, with other RUSTFLAGS or other features, misses.")
+                .fix("Zero the counters with `sccache --zero-stats`, run the build you care about twice, and look again. If the second build still misses, set SCCACHE_BASEDIRS to the directories your checkouts live in (recent sccache; restart the server with `sccache --stop-server` after setting it), and keep RUSTFLAGS and features the same between builds. `sccache --show-adv-stats` breaks the misses down by compiler."),
+        );
+    }
+    if let (Some(used), Some(limit)) = (size, max)
+        && limit > 0.0
+        && used >= limit * 0.95
+    {
+        f.push(
+            Finding::new("sccache-cache-full", Severity::Low, "The sccache cache is full", "sccache-and-kache")
+                .saw(format!("The cache holds {} of its {} limit ({location}).", size_of(used), size_of(limit)))
+                .why("A full cache evicts the oldest entries to make room, so builds you go back to (another branch, a release build) miss again.")
+                .fix("Raise the limit with SCCACHE_CACHE_SIZE (for example SCCACHE_CACHE_SIZE=\"50G\"), if the disk has room; restart the server (`sccache --stop-server`) for it to take effect."),
+        );
+    }
 }
 
 /// `10:07 UTC, 12 min ago` for a time kache recorded.
@@ -345,6 +443,9 @@ pub fn check(ctx: &Context, inputs: &Inputs) -> Section {
         );
     }
 
+    if let Some(st) = &inputs.sccache_stats {
+        sccache(st, &mut s, &mut f);
+    }
     if let Some(st) = &inputs.kache_stats {
         let hit = f64_at(st, &["hit_rate_pct"]).unwrap_or(0.0);
         let weighted = f64_at(st, &["weighted_hit_rate_pct"]).unwrap_or(0.0);
@@ -533,6 +634,66 @@ mod tests {
     }
 
     #[test]
+    fn sccache_fixture() {
+        let ctx = Context {
+            config: CargoConfig::from_strs(&[(
+                "/h/.cargo/config.toml",
+                "[build]\nrustc-wrapper = \"sccache\"\n",
+            )]),
+            ..Context::default()
+        };
+        let stats = std::fs::read_to_string(format!(
+            "{}/tests/fixtures/sccache-stats.json",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        let inputs = Inputs {
+            sccache_stats: serde_json::from_str(&stats).ok(),
+            ..Inputs::default()
+        };
+        let s = check(&ctx, &inputs);
+        let fact = |k: &str| {
+            s.facts
+                .iter()
+                .find(|f| f.key == k)
+                .map(|f| f.value.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            fact("sccache"),
+            "210 hits, 898 misses (19% hits), 212 not cacheable, since its server started"
+        );
+        assert!(
+            fact("sccache cache").ends_with("of 10.0 GiB, Local disk: \"/home/u/.cache/sccache\""),
+            "{}",
+            fact("sccache cache")
+        );
+        assert!(
+            s.details[0].starts_with("sccache not cached, by reason\n     190  incremental"),
+            "{}",
+            s.details[0]
+        );
+        let ids: Vec<_> = s.findings.iter().map(|f| f.id).collect();
+        assert!(ids.contains(&"sccache-low-hit-rate"), "{ids:?}");
+        assert!(ids.contains(&"sccache-cache-full"), "{ids:?}");
+        // An empty server (just started): facts, no findings about it.
+        let empty =
+            serde_json::json!({"stats": {"cache_hits": {"counts": {}}}, "max_cache_size": 1024});
+        let s = check(
+            &ctx,
+            &Inputs {
+                sccache_stats: Some(empty),
+                ..Inputs::default()
+            },
+        );
+        assert!(
+            s.findings
+                .iter()
+                .all(|f| !f.id.starts_with("sccache-") || f.id == "sccache-incremental")
+        );
+    }
+
+    #[test]
     fn kache_fixture() {
         let ctx = Context {
             config: CargoConfig::from_strs(&[(
@@ -556,6 +717,7 @@ mod tests {
             kache_stats: load("kache-stats.json"),
             kache_last: load("kache-last-build.json"),
             kache_explain: load("kache-explain.json"),
+            sccache_stats: None,
             sccache_on_path: false,
             now_unix_ms: None,
         };
