@@ -899,7 +899,7 @@ Finally, the build runs on a computer, and that computer may be busier than you 
 
 **Contention shows up in timings.** When the same crate takes three times longer in a build than its check took minutes earlier, the code didn't change; the machine did. `cargo faster timings` compares a build with an earlier check report and says so.
 
-`cargo faster machine` reports load, memory, swap, and disk, and whether your cache and target directories share a filesystem.
+`cargo faster machine` reports load, memory, swap, and disk, and whether your cache and target directories share a filesystem. When the load is high, it samples `/proc` for half a second on Linux and names the processes using the most CPU (grouped by name, in CPUs), so you can tell another build from a nix build or a test suite.
 
 ## Case study: a 312 second check
 

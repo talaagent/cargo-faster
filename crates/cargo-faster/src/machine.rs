@@ -4,6 +4,7 @@
 use crate::context::{Context, probe};
 use crate::finding::{Finding, Section, Severity};
 use crate::fmt::bytes;
+use alloc::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// A filesystem a build directory lives on.
@@ -44,6 +45,10 @@ pub struct Inputs {
     pub rustc_procs: usize,
     /// Other `cargo` processes running now.
     pub cargo_procs: usize,
+    /// The processes using the most CPU while the machine was busy, by
+    /// name: (name, CPUs used), most first. Measured on Linux only, and
+    /// only when the load is high.
+    pub top_cpu: Vec<(String, f64)>,
     /// Filesystems of the build directories.
     pub mounts: Vec<Mount>,
     /// What couldn't be measured on this platform (`load`, `memory`,
@@ -126,6 +131,90 @@ pub fn fstype_from_mounts(mounts: &str, mount: &str) -> Option<String> {
             (cols.len() >= 3 && cols[1] == mount).then(|| cols[2].to_owned())
         })
         .filter(|t| !t.is_empty())
+}
+
+/// A process's name and CPU time (user + system, in clock ticks) from
+/// `/proc/PID/stat` (`123 (comm) S ppid ... utime stime ...`). The name
+/// may hold spaces and parentheses, so it ends at the last `)`.
+#[must_use]
+pub fn parse_proc_stat(s: &str) -> Option<(String, u64)> {
+    let (head, rest) = s.rsplit_once(')')?;
+    let name = head.split_once('(')?.1;
+    let cols: Vec<&str> = rest.split_whitespace().collect();
+    let utime: u64 = cols.get(11)?.parse().ok()?;
+    let stime: u64 = cols.get(12)?.parse().ok()?;
+    Some((name.to_owned(), utime + stime))
+}
+
+/// How many processes [`top_cpu`] names.
+const TOP_CPU: usize = 5;
+
+/// The process names that used the most CPU between two samples of
+/// pid -> (name, ticks), as CPUs (1.0 = one core busy), most first, at
+/// least a tenth of a CPU each. Processes are grouped by name, so 30
+/// `rustc`s show up as one line; a process that started in between counts
+/// from zero.
+#[must_use]
+pub fn top_cpu(
+    before: &BTreeMap<u32, (String, u64)>,
+    after: &BTreeMap<u32, (String, u64)>,
+    ticks: f64,
+) -> Vec<(String, f64)> {
+    let mut by_name: BTreeMap<&str, u64> = BTreeMap::new();
+    for (pid, (name, t)) in after {
+        let t0 = before.get(pid).filter(|b| b.0 == *name).map_or(0, |b| b.1);
+        *by_name.entry(name).or_default() += t.saturating_sub(t0);
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let mut v: Vec<(String, f64)> = by_name
+        .into_iter()
+        .map(|(n, d)| (n.to_owned(), d as f64 / ticks.max(1.0)))
+        .filter(|(_, c)| *c >= 0.1)
+        .collect();
+    v.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    v.truncate(TOP_CPU);
+    v
+}
+
+/// Every process's name and CPU ticks from `/proc`, but ours.
+fn proc_cpu() -> Option<BTreeMap<u32, (String, u64)>> {
+    let me = std::process::id();
+    let mut out = BTreeMap::new();
+    for e in std::fs::read_dir("/proc").ok()?.flatten() {
+        let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else {
+            continue;
+        };
+        if pid == me {
+            continue;
+        }
+        if let Some(st) = read(&e.path().join("stat").to_string_lossy())
+            .as_deref()
+            .and_then(parse_proc_stat)
+        {
+            out.insert(pid, st);
+        }
+    }
+    Some(out)
+}
+
+/// The top CPU consumers over half a second, from `/proc` (Linux only;
+/// empty elsewhere). `/proc` counts in `USER_HZ` ticks, which is 100 on
+/// every mainstream Linux.
+fn sample_top_cpu() -> Vec<(String, f64)> {
+    const SECS: f64 = 0.5;
+    let Some(before) = proc_cpu() else {
+        return Vec::new();
+    };
+    std::thread::sleep(core::time::Duration::from_secs_f64(SECS));
+    proc_cpu().map_or_else(Vec::new, |after| top_cpu(&before, &after, 100.0 * SECS))
+}
+
+/// "nix-daemon 8.0 CPUs, rustc 2.5 CPUs".
+fn top_cpu_list(top: &[(String, f64)]) -> String {
+    top.iter()
+        .map(|(n, c)| format!("{n} {c:.1} CPUs"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Parse `/proc/meminfo` into (total, available, swap used) bytes.
@@ -317,6 +406,14 @@ impl Inputs {
         if ctx.var("CARGO").is_some() {
             cargo_procs = cargo_procs.saturating_sub(1);
         }
+        // Naming what keeps the machine busy costs half a second, so only
+        // when it is.
+        #[allow(clippy::cast_precision_loss)]
+        let top_cpu = if load1 >= ctx.cpus().max(1) as f64 * 0.5 {
+            sample_top_cpu()
+        } else {
+            Vec::new()
+        };
         let mut dirs = vec![("target dir".to_owned(), ctx.target_dir())];
         if let Some(c) = cache_dir {
             dirs.push(("cache".to_owned(), c));
@@ -336,6 +433,7 @@ impl Inputs {
             swap_used,
             rustc_procs,
             cargo_procs,
+            top_cpu,
             mounts,
             unavailable,
         }
@@ -400,6 +498,9 @@ fn facts(m: &Inputs, s: &mut Section) {
             format!("{} rustc, {} cargo processes", m.rustc_procs, m.cargo_procs),
         );
     }
+    if !m.top_cpu.is_empty() {
+        s.fact("top cpu", top_cpu_list(&m.top_cpu));
+    }
     if !m.unavailable.is_empty() {
         s.fact(
             "unavailable",
@@ -432,10 +533,15 @@ pub fn check(m: &Inputs) -> Section {
         } else {
             Severity::Medium
         };
+        let top = if m.top_cpu.is_empty() {
+            String::new()
+        } else {
+            format!(" Using the most CPU: {}.", top_cpu_list(&m.top_cpu))
+        };
         // A condition of the moment, not a fix for the project.
         s.conditions.push(
             Finding::new("busy-machine", sev, "The machine is busy: timings will be noisy and slower", "the-machine")
-                .saw(format!("Load average {:.1} on {} CPUs, with {} rustc and {} cargo processes running besides this one.", m.load1, m.cpus, m.rustc_procs, m.cargo_procs))
+                .saw(format!("Load average {:.1} on {} CPUs, with {} rustc and {} cargo processes running besides this one.{top}", m.load1, m.cpus, m.rustc_procs, m.cargo_procs))
                 .why("Builds compete for cores, memory bandwidth and disk. A build that takes 60 s on an idle machine can take twice that next to two others, so one-off timings say more about the neighbours than about your change.")
                 .fix("Measure on a quiet machine, or compare before and after back to back under similar load. Run long experiments under `nice -n 10` on shared boxes. If several agents build at once, a shared cache helps more than more jobs."),
         );
@@ -627,6 +733,62 @@ mod tests {
         // Busy is a condition of the moment, not a finding.
         let ids: Vec<_> = s.conditions.iter().map(|f| f.id).collect();
         assert_eq!(ids, ["busy-machine"]);
+    }
+
+    #[test]
+    fn names_the_top_cpu_consumers() {
+        assert_eq!(
+            parse_proc_stat(
+                "4242 (nix-daemon) R 1 4242 4242 0 -1 4194560 100 0 0 0 750 250 0 0 20 0 1 0 100 0 0"
+            ),
+            Some(("nix-daemon".into(), 1000))
+        );
+        // Names may hold spaces and parentheses.
+        assert_eq!(
+            parse_proc_stat("7 (tokio (rt) w) S 1 7 7 0 -1 0 0 0 0 0 5 6 0 0 20 0 1 0 1 0 0")
+                .unwrap(),
+            ("tokio (rt) w".into(), 11)
+        );
+        assert_eq!(parse_proc_stat("garbage"), None);
+        let snap = |v: &[(u32, &str, u64)]| -> BTreeMap<u32, (String, u64)> {
+            v.iter().map(|&(p, n, t)| (p, (n.to_owned(), t))).collect()
+        };
+        let before = snap(&[
+            (1, "nix-daemon", 1000),
+            (2, "rustc", 10),
+            (3, "rustc", 20),
+            (4, "bash", 5),
+        ]);
+        // 50 ticks = half a second: nix-daemon used 8 CPUs, the two rustcs
+        // 1 together, a new cc1plus 2, bash nothing, and pid 2 is now a
+        // different process.
+        let after = snap(&[
+            (1, "nix-daemon", 1400),
+            (2, "cc1plus", 100),
+            (3, "rustc", 70),
+            (4, "bash", 5),
+            (5, "rustc", 0),
+        ]);
+        let top = top_cpu(&before, &after, 50.0);
+        assert_eq!(
+            top,
+            [
+                ("nix-daemon".into(), 8.0),
+                ("cc1plus".into(), 2.0),
+                ("rustc".into(), 1.0)
+            ]
+        );
+        let m = Inputs {
+            cpus: 32,
+            load1: 26.0,
+            top_cpu: top,
+            ..Inputs::default()
+        };
+        let s = check(&m);
+        assert!(s.conditions[0].saw.ends_with(
+            "Using the most CPU: nix-daemon 8.0 CPUs, cc1plus 2.0 CPUs, rustc 1.0 CPUs."
+        ));
+        assert!(s.facts.iter().any(|f| f.key == "top cpu"));
     }
 
     #[test]
