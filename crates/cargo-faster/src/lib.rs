@@ -9,6 +9,7 @@
 
 extern crate alloc;
 
+pub mod asynctrait;
 pub mod cache;
 pub mod checkcost;
 pub mod context;

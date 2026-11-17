@@ -190,9 +190,11 @@ pub struct Analysis {
     pub heavy_types: Vec<HeavyType>,
     /// Bodies that did the most trait solving.
     pub proving_bodies: Vec<Cost>,
-    /// Time to prove obligations mentioning `'async_trait`, in seconds.
+    /// Time to prove obligations whose parameter environment has
+    /// lifetime-outlives bounds (`'life0: 'async_trait`), in seconds: the
+    /// shape `#[async_trait]` gives every method.
     pub async_trait_secs: f64,
-    /// Bodies whose names involve `async_trait`.
+    /// How many such obligations were evaluated.
     pub async_trait_obligations: usize,
     /// Proc macro expansion, inclusive time by macro.
     pub proc_macros: Vec<Cost>,
@@ -333,7 +335,12 @@ pub fn analyze(p: &Profile) -> Analysis {
     // same predicate).
     let mut by_pred: HashMap<(String, String), Pred> = HashMap::new();
     for (arg, (ns, count, bodies)) in preds {
-        let (ty, tr) = parse_predicate(&p.args[arg as usize]);
+        let raw = &p.args[arg as usize];
+        if lifetime_bound_env(raw) {
+            a.async_trait_secs += s(ns);
+            a.async_trait_obligations += count;
+        }
+        let (ty, tr) = parse_predicate(raw);
         let e = by_pred.entry((ty, tr)).or_insert(Pred {
             ns: 0,
             count: 0,
@@ -364,10 +371,6 @@ pub fn analyze(p: &Profile) -> Analysis {
             let e = proving.entry(*b).or_default();
             e.0 += t;
             e.1 += 1;
-        }
-        if ty.contains("'async_trait") || tr.contains("'async_trait") {
-            a.async_trait_secs += s(pred.ns);
-            a.async_trait_obligations += pred.count;
         }
         if is_auto_trait(tr) && !is_async_body(ty) {
             let root = root_type(ty);
@@ -484,6 +487,25 @@ fn is_auto_trait(tr: &str) -> bool {
 
 fn short_trait(tr: &str) -> &str {
     tr.rsplit("::").next().unwrap_or(tr)
+}
+
+/// Whether a canonical `evaluate_obligation` key was proven in a parameter
+/// environment with region-outlives bounds, or names `'async_trait`.
+///
+/// `#[async_trait]` gives each method `where 'life0: 'async_trait, ...`.
+/// Canonicalization renames those regions (`OutlivesPredicate('^c_1,
+/// '^c_0)`), so the printed predicate no longer says `'async_trait`, but
+/// the bounds stay in the key, and every method's key is different. That
+/// is why rustc can't reuse one method's answers in the next. Hand-written
+/// `'a: 'b` bounds match too; they are rare in async code.
+#[must_use]
+pub fn lifetime_bound_env(raw: &str) -> bool {
+    if raw.contains("'async_trait") {
+        return true;
+    }
+    raw.split(", value: Binder")
+        .next()
+        .is_some_and(|env| env.contains("caller_bounds") && env.contains("OutlivesPredicate('"))
 }
 
 fn is_async_body(ty: &str) -> bool {
@@ -671,11 +693,27 @@ pub fn findings(a: &Analysis, crate_name: &str) -> Vec<Finding> {
     }
 
     if a.async_trait_secs >= 0.3 {
+        let share = pct(a.async_trait_secs, total);
+        let sev = if share >= 10.0 || a.async_trait_secs >= 5.0 {
+            Severity::High
+        } else if share >= 3.0 || a.async_trait_secs >= 1.0 {
+            Severity::Medium
+        } else {
+            Severity::Low
+        };
         out.push(
-            Finding::new("async-trait-overhead", Severity::Low, "async-trait boxes cost trait solving", "the-cost-of-async-trait")
-                .saw(format!("{} obligations mentioning `'async_trait` took {}.", a.async_trait_obligations, secs(a.async_trait_secs)))
-                .why("#[async_trait] turns each method into a boxed `dyn Future + Send`, and rustc proves the body Send while building the box, in every impl.")
-                .fix("Since Rust 1.75, traits can have native `async fn`. If you don't need `dyn Trait`, drop #[async_trait]; if you do, keep it only on the traits you use as objects."),
+            Finding::new("async-trait-overhead", sev, format!("#[async_trait] futures cost {crate_name} {} of trait solving", secs(a.async_trait_secs)), "the-cost-of-async-trait")
+                .saw(format!(
+                    "{} obligations were proven in parameter environments with lifetime-outlives bounds (`where 'life0: 'async_trait`, the signature #[async_trait] gives every method) and took {} ({share:.0}% of the profile, {:.0}% of trait solving).",
+                    a.async_trait_obligations,
+                    secs(a.async_trait_secs),
+                    pct(a.async_trait_secs, a.trait_solving_secs.max(1e-9))
+                ))
+                .why("#[async_trait] rewrites each method to return `Pin<Box<dyn Future + Send + 'async_trait>>` with `'life0: 'async_trait` bounds. rustc caches trait-solving answers by predicate and parameter environment, and those bounds make every method's environment different, so each body proves the same Send facts about the same types again. Native async fn in traits has no such bounds, and the answers are shared. This is time spent on the macro's shape, not on your types.")
+                .fix(format!(
+                    "Replace #[async_trait] with native `async fn` in traits (Rust 1.75+); use `fn m(&self) -> impl Future<Output = T> + Send` where callers spawn; use dynosaur for traits held as `dyn`. Then ban the macro in clippy.toml:\n{}\nTradeoff: a mechanical diff across every impl.",
+                    crate::deps::CLIPPY_BAN
+                )),
         );
     }
 
@@ -989,6 +1027,67 @@ mod tests {
         assert_eq!(f[0].severity, Severity::High);
         assert!(f[0].saw.contains("`app::Bot`"), "{}", f[0].saw);
         assert!(f[0].saw.contains("60 times"), "{}", f[0].saw);
+    }
+
+    #[test]
+    fn async_trait_shaped_envs_are_attributed() {
+        // Shapes from a real rustc 1.98 profile, shortened.
+        let at = "CanonicalQueryInput { canonical: Canonical { value: ParamEnvAnd { param_env: ParamEnv { caller_bounds: [Binder { value: OutlivesPredicate('^c_1, '^c_0), bound_vars: [] }, Binder { value: OutlivesPredicate(Self/#0, '^c_0), bound_vars: [] }] }, value: Binder { value: TraitPredicate(<a::Bot as std::marker::Send>, polarity:Positive), bound_vars: [] } }, max_universe: U0, var_kinds: [Region(U0), Region(U0)] } }";
+        let plain = "CanonicalQueryInput { canonical: Canonical { value: ParamEnvAnd { param_env: ParamEnv { caller_bounds: [] }, value: Binder { value: OutlivesPredicate('^c_1, '^c_0) } } } }";
+        assert!(lifetime_bound_env(at));
+        assert!(!lifetime_bound_env(plain));
+        assert!(!lifetime_bound_env(&pred("a::Bot", "std::marker::Send")));
+        assert!(lifetime_bound_env(&pred(
+            "Pin<Box<dyn Future + Send + 'async_trait>>",
+            "std::marker::Send"
+        )));
+
+        let mut p = Profile::default();
+        p.push("evaluate_obligation", Some(at), 0, 2_000_000_000, 0);
+        p.push(
+            "evaluate_obligation",
+            Some(at),
+            2_000_000_000,
+            3_000_000_000,
+            0,
+        );
+        p.push(
+            "evaluate_obligation",
+            Some(plain),
+            3_000_000_000,
+            4_000_000_000,
+            0,
+        );
+        let a = analyze(&p);
+        assert_eq!(a.async_trait_obligations, 2);
+        assert!((a.async_trait_secs - 3.0).abs() < 1e-6);
+        assert!((a.trait_solving_secs - 4.0).abs() < 1e-6);
+        let f = findings(&a, "a");
+        assert!(
+            f.iter()
+                .any(|f| f.id == "async-trait-overhead" && f.severity == Severity::High)
+        );
+    }
+
+    #[test]
+    fn async_trait_severity_follows_measured_cost() {
+        let sev = |at: f64| {
+            let a = Analysis {
+                total_secs: 40.0,
+                trait_solving_secs: 30.0,
+                async_trait_secs: at,
+                async_trait_obligations: 100,
+                ..Analysis::default()
+            };
+            findings(&a, "a")
+                .into_iter()
+                .find(|f| f.id == "async-trait-overhead")
+                .map(|f| f.severity)
+        };
+        assert_eq!(sev(0.1), None);
+        assert_eq!(sev(0.5), Some(Severity::Low));
+        assert_eq!(sev(1.5), Some(Severity::Medium));
+        assert_eq!(sev(6.0), Some(Severity::High));
     }
 
     #[test]
