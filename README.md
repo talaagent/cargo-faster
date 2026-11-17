@@ -59,7 +59,7 @@ $ cargo faster check-cost -p tala-agent-bin
 | `setup` | Linker, debug info, codegen units, opt-levels, jobs, rustflags |
 | `cache` | sccache or kache hit rates, incremental, cold worktrees |
 | `machine` | Load, other builds, memory, disk, filesystems |
-| `deps` | Heavy features, duplicate versions, proc macros, async-trait |
+| `deps` | Heavy features, test features in normal builds, duplicate versions, proc macros, async-trait |
 | `tests` | nextest, target runners, thread limits, database-backed tests |
 | `rdeps` | What rebuilds when a crate changes, and which crates are worth splitting |
 
