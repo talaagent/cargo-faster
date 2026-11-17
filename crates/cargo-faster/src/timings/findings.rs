@@ -184,7 +184,7 @@ fn per_unit(a: &Analysis, out: &mut Vec<Finding>) {
 fn links(a: &Analysis, out: &mut Vec<Finding>) {
     let l = &a.linked;
     let busy: f64 = a.kinds.iter().map(|k| k.busy).sum();
-    let slowest = l.slowest.first().map_or(0.0, |s| s.1);
+    let slowest = l.slowest.first().map_or(0.0, |s| s.took);
     let tail_heavy = l.tail >= 10.0 && pct(l.tail, a.wall) >= 15.0;
     let busy_heavy = l.busy >= 30.0 && pct(l.busy, busy) >= 25.0;
     if l.units == 0 || !(tail_heavy || busy_heavy) {
@@ -198,7 +198,7 @@ fn links(a: &Analysis, out: &mut Vec<Finding>) {
     let list: Vec<String> = l
         .slowest
         .iter()
-        .map(|(u, d)| format!("{u} {}", secs(*d)))
+        .map(|s| format!("{} {}", s.unit, secs(s.took)))
         .collect();
     out.push(
         Finding::new("slow-links", severity, format!("{} binaries and tests took {} to build and link", l.units, secs(l.busy)), "linking")
@@ -222,10 +222,17 @@ fn contention(a: &Analysis, out: &mut Vec<Finding>) {
     let list: Vec<String> = s
         .top
         .iter()
-        .map(|(u, n, b)| format!("{u} {} vs {}", secs(*n), secs(*b)))
+        .map(|u| {
+            format!(
+                "{} {} vs {}",
+                u.unit,
+                secs(u.took),
+                secs(u.before.unwrap_or(0.0))
+            )
+        })
         .collect();
-    let jobs = a.jobs.map_or(String::new(), |(j, n)| {
-        format!(" Cargo ran with jobs={j} on {n} CPUs.")
+    let jobs = a.jobs.map_or(String::new(), |j| {
+        format!(" Cargo ran with jobs={} on {} CPUs.", j.jobs, j.ncpu)
     });
     out.push(
         Finding::new("contention", if pct(s.excess, a.wall * a.parallelism) >= 25.0 { Severity::High } else { Severity::Medium }, format!("Units ran {:.1}x slower than in {}", s.median, if s.baseline_check { "the check" } else { "the earlier build" }), "the-machine")
@@ -241,7 +248,7 @@ fn waits(a: &Analysis, out: &mut Vec<Finding>) {
     if waiting >= 10.0 && pct(waiting, a.wall) >= 20.0 {
         let jobs = a
             .jobs
-            .map_or(String::new(), |(j, _)| format!(" (jobs={j})"));
+            .map_or(String::new(), |j| format!(" (jobs={})", j.jobs));
         out.push(
             Finding::new("critical-path-waiting", if pct(waiting, a.wall) >= 40.0 { Severity::High } else { Severity::Medium }, format!("{} of the critical path is waiting", secs(waiting)), "compiles-cache-hits-and-waits")
                 .saw(format!("Of the {} wall time, the critical path spent {} waiting to start after what it needed was ready (no free job slot{jobs}) and {} inside the cache wrapper waiting for a permit or another build's compile.", secs(a.wall), secs(a.path_gaps), secs(a.path_waits)))

@@ -2,7 +2,7 @@
 //! each unit: a cache hit, a real compile, an incremental passthrough, and
 //! how long it waited for the wrapper's scheduler.
 
-use super::{Timings, Unit};
+use super::Timings;
 use crate::context::{Context, probe};
 use serde::Serialize;
 use serde_json::Value;
@@ -140,42 +140,27 @@ pub fn gather(ctx: &Context, start_unix_ms: f64) -> Vec<WrapperEvent> {
         .unwrap_or_default()
 }
 
-/// The rustc crate name a unit compiles: the binary's name for a `bin`,
-/// `test`, `example` or `bench` target, else the package name.
-#[must_use]
-pub fn crate_name(u: &Unit) -> String {
-    let t = u.target.trim_start();
-    let named = ["\"bin\"", "\"test\"", "\"example\"", "\"bench\""]
-        .iter()
-        .any(|k| t.contains(k));
-    let name = if named {
-        t.split(' ').next().unwrap_or(&u.name)
-    } else {
-        &u.name
-    };
-    name.replace('-', "_")
-}
-
 /// How far apart (ms) cargo starting a unit and the wrapper starting can
 /// be and still be the same invocation.
 const MATCH_MS: f64 = 5_000.0;
 
-/// Attach wrapper events to the report's units (by crate name and start
-/// time, nearest first). Returns how many units matched. Needs the
-/// report's start time.
-pub fn join(t: &mut Timings, events: &[WrapperEvent]) -> usize {
+/// Match wrapper events to the report's units (by crate name and start
+/// time, nearest first): the wrapper's record of each unit, indexed like
+/// `t.units`. Needs the report's start time.
+#[must_use]
+pub fn join(t: &Timings, events: &[WrapperEvent]) -> Vec<Option<WrapperRun>> {
+    let mut runs = vec![None; t.units.len()];
     let Some(t0) = t.start_unix_ms else {
-        return 0;
+        return runs;
     };
     let mut order: Vec<usize> = (0..t.units.len())
         .filter(|&i| t.units[i].duration > 0.0 && !t.units[i].is_build_script())
         .collect();
     order.sort_by(|&a, &b| t.units[a].start.total_cmp(&t.units[b].start));
     let mut used = vec![false; events.len()];
-    let mut matched = 0;
     for i in order {
         let u = &t.units[i];
-        let name = crate_name(u);
+        let name = u.crate_name();
         let at = t0 + u.start * 1000.0;
         let best = events
             .iter()
@@ -186,11 +171,10 @@ pub fn join(t: &mut Timings, events: &[WrapperEvent]) -> usize {
             .min_by(|a, b| a.1.total_cmp(&b.1));
         if let Some((j, _)) = best {
             used[j] = true;
-            t.units[i].wrapper = Some(events[j].run.clone());
-            matched += 1;
+            runs[i] = Some(events[j].run.clone());
         }
     }
-    matched
+    runs
 }
 
 #[cfg(test)]
@@ -213,20 +197,5 @@ mod tests {
         assert!((e[1].run.wait - 6.0).abs() < 1e-9);
         assert!((e[1].start_ms - 3000.0).abs() < 1e-9);
         assert_eq!(e[2].run.outcome, Outcome::Miss);
-    }
-
-    #[test]
-    fn crate_names() {
-        let u = |name: &str, target: &str| Unit {
-            name: name.into(),
-            target: target.into(),
-            ..Unit::default()
-        };
-        assert_eq!(crate_name(&u("tala-core", " (check)")), "tala_core");
-        assert_eq!(
-            crate_name(&u("tala-agent-bin", " tala-agent \"bin\"")),
-            "tala_agent"
-        );
-        assert_eq!(crate_name(&u("x", "")), "x");
     }
 }

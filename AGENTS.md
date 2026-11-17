@@ -42,6 +42,10 @@ repository under `tests/fixtures/cargo-faster/`.
   per-body/item/module typeck and borrowck time, repeated trait
   obligations, proc macros, profiler overhead (`load` via analyzeme is
   std-only).
+- `crates/cargo-timings-parse`: `cargo build --timings` HTML as typed
+  units, and their analysis: critical path, serial crates, codegen,
+  linking, slowdown against an earlier report, rebuilt workspace crates
+  (finding reports in a target directory is std-only).
 
 `crates/cargo-faster` is a library (`src/lib.rs`, unstable API, for tests)
 and the `cargo-faster` binary (`src/main.rs`, the bpaf CLI).
@@ -53,8 +57,9 @@ and the `cargo-faster` binary (`src/main.rs`, the bpaf CLI).
   worktrees, `kache stats --json`.
 - `machine.rs`: load, memory, competing cargo/rustc processes, disk space,
   filesystems.
-- `timings.rs`: `cargo build --timings` HTML: critical path, serial
-  crates, long codegen.
+- `timings.rs`: findings over a `cargo-timings-parse` analysis, joined
+  with the cache wrapper's records (`timings/wrapper.rs`, kache) and the
+  workspace; `timings/run.rs` drives `timings --run`.
 - `graph.rs`: workspace reverse dependencies and big crates, from
   `cargo metadata`.
 - `deps.rs`: heavy features, duplicate versions, proc macros.
