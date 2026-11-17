@@ -31,6 +31,8 @@ pub struct Inputs {
     pub kache_explain: Option<Value>,
     /// Whether `sccache` is on PATH (for the no-cache advice).
     pub sccache_on_path: bool,
+    /// Now, Unix milliseconds, for the age of what kache reports.
+    pub now_unix_ms: Option<f64>,
 }
 
 /// Parse `git worktree list --porcelain`, checking each tree's target
@@ -93,6 +95,10 @@ impl Inputs {
                 .then(|| json(&["explain", "--json", "--root", &root_s]))
                 .flatten(),
             sccache_on_path: on_path(&ctx.env, "sccache").is_some(),
+            now_unix_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_secs_f64() * 1000.0),
             worktrees,
         }
     }
@@ -116,10 +122,109 @@ fn f64_at(v: &Value, path: &[&str]) -> Option<f64> {
     path.iter().try_fold(v, |v, k| v.get(k))?.as_f64()
 }
 
+/// `10:07 UTC, 12 min ago` for a time kache recorded.
+fn when(iso: &str, now_ms: Option<f64>) -> String {
+    let clock = iso
+        .get(11..16)
+        .map_or_else(String::new, |c| format!("{c} UTC"));
+    let ago = crate::timings::unix_ms(iso)
+        .zip(now_ms)
+        .map(|(t, now)| ago((now - t) / 1000.0));
+    match ago {
+        Some(a) if clock.is_empty() => a,
+        Some(a) => format!("{clock}, {a}"),
+        None => clock,
+    }
+}
+
+fn ago(secs: f64) -> String {
+    if secs < 90.0 {
+        format!("{:.0} s ago", secs.max(0.0))
+    } else if secs < 90.0 * 60.0 {
+        format!("{:.0} min ago", secs / 60.0)
+    } else if secs < 48.0 * 3600.0 {
+        format!("{:.0} h ago", secs / 3600.0)
+    } else {
+        format!("{:.0} days ago", secs / 86_400.0)
+    }
+}
+
+/// The latest builds of a session that only passed through to rustc
+/// (incremental compiles), after its last cache lookup.
+#[derive(Debug, Clone, PartialEq)]
+struct UncachedTail {
+    /// Compiles in the tail.
+    crates: usize,
+    /// Of those, incremental passthroughs.
+    incremental: usize,
+    /// When the tail started, Unix milliseconds.
+    start_ms: f64,
+    /// Whether the session had cache lookups before it.
+    after_lookups: bool,
+}
+
+/// The session's compiles from `--full`'s trace events, latest last: the
+/// trailing run of passthroughs.
+fn uncached_tail(last: &Value) -> Option<UncachedTail> {
+    use crate::timings::wrapper::{Outcome, kache_events};
+    let mut ev = kache_events(last);
+    ev.sort_by(|a, b| a.start_ms.total_cmp(&b.start_ms));
+    let lookups = |o: Outcome| matches!(o, Outcome::Hit | Outcome::Miss);
+    let first = ev
+        .iter()
+        .rposition(|e| lookups(e.run.outcome))
+        .map_or(0, |i| i + 1);
+    let tail = &ev[first..];
+    // A handful of passthroughs after a cached build is just its tail.
+    if tail.is_empty() || (first > 0 && tail.len() < 3) {
+        return None;
+    }
+    Some(UncachedTail {
+        crates: tail.len(),
+        incremental: tail
+            .iter()
+            .filter(|e| e.run.outcome == Outcome::Incr)
+            .count(),
+        start_ms: tail[0].start_ms,
+        after_lookups: first > 0,
+    })
+}
+
+fn tail_fact(t: &UncachedTail, now_ms: Option<f64>) -> String {
+    let since = now_ms.map_or_else(String::new, |now| {
+        format!(", starting {}", ago((now - t.start_ms) / 1000.0))
+    });
+    let what = if t.incremental == t.crates {
+        "compiled incrementally".to_owned()
+    } else {
+        format!("passed through to rustc ({} incremental)", t.incremental)
+    };
+    format!(
+        "{} crates {what}{since}, with no cache lookups (kache passes incremental builds through){}",
+        t.crates,
+        if t.after_lookups {
+            "; the hit rate is from the session's earlier builds"
+        } else {
+            ""
+        }
+    )
+}
+
+/// What the latest session is: when it started and how long it ran.
+fn session_fact(last: &Value, now_ms: Option<f64>) -> Option<String> {
+    let tl = last.get("timeline")?;
+    let start = tl.get("start_time")?.as_str()?;
+    let dur = f64_at(tl, &["duration_ms"])
+        .map_or_else(String::new, |d| format!(", ran {}", secs(d / 1000.0)));
+    Some(format!("started {}{dur}", when(start, now_ms)))
+}
+
 fn last_build_fact(total: f64, pass: f64, hit: f64, weighted: f64) -> String {
     if total < 1.0 && pass < 1.0 {
         "no compiles in the latest session (only probes); run a build first for per-build numbers"
             .to_owned()
+    } else if total < 1.0 {
+        format!("no cache lookups, {pass:.0} passthroughs")
     } else {
         format!(
             "{hit:.0}% hits ({weighted:.0}% by time) over {total:.0} crates, {pass:.0} passthroughs"
@@ -276,10 +381,16 @@ pub fn check(ctx: &Context, inputs: &Inputs) -> Section {
         let pass = f64_at(sum, &["passthroughs"]).unwrap_or(0.0);
         let hit = f64_at(sum, &["hit_rate_pct"]).unwrap_or(0.0);
         let weighted = f64_at(sum, &["weighted_hit_rate_pct"]).unwrap_or(0.0);
+        if let Some(session) = session_fact(last, inputs.now_unix_ms) {
+            s.fact("kache session", session);
+        }
         s.fact(
             "kache last build",
             last_build_fact(total, pass, hit, weighted),
         );
+        if let Some(t) = uncached_tail(last) {
+            s.fact("kache latest", tail_fact(&t, inputs.now_unix_ms));
+        }
         let reasons: Vec<(String, f64)> = last
             .pointer("/bypass/reasons")
             .and_then(Value::as_array)
@@ -358,8 +469,14 @@ pub fn check(ctx: &Context, inputs: &Inputs) -> Section {
                     )
                 })
                 .collect();
+            let at = ex
+                .get("recorded_at")
+                .and_then(Value::as_str)
+                .map_or_else(String::new, |r| {
+                    format!(" (recorded {})", when(r, inputs.now_unix_ms))
+                });
             s.details.push(format!(
-                "why the last build missed the cache\n{}",
+                "why the last cached build missed{at}\n{}",
                 rows.join("\n")
             ));
         }
@@ -440,6 +557,7 @@ mod tests {
             kache_last: load("kache-last-build.json"),
             kache_explain: load("kache-explain.json"),
             sccache_on_path: false,
+            now_unix_ms: None,
         };
         let s = check(&ctx, &inputs);
         let ids: Vec<_> = s.findings.iter().map(|f| f.id).collect();
@@ -452,6 +570,67 @@ mod tests {
                 .any(|f| f.key == "kache last build" && f.value.contains("1375 passthroughs"))
         );
         assert!(s.details.iter().any(|d| d.contains("adaptive seed")));
+    }
+
+    fn event(ts_s: f64, result: &str, reason: &str) -> Value {
+        serde_json::json!({"ts": ts_s * 1e6, "args": {"crate_name": "c", "result": result, "reason": reason, "elapsed_ms": 1000, "compile_time_ms": 900}})
+    }
+
+    #[test]
+    fn labels_the_session_and_an_uncached_tail() {
+        // A cold build with hits and misses, then two edit builds kache
+        // passed through: the hit rate is the cold build's.
+        let mut ev: Vec<Value> = (0..5)
+            .map(|i| event(f64::from(i), "local_hit", ""))
+            .collect();
+        ev.push(event(5.0, "miss", ""));
+        ev.extend((0..4).map(|i| event(1200.0 + f64::from(i), "passthrough", "adaptive seed")));
+        ev.push(event(1300.0, "passthrough", "not-a-compile|probe"));
+        let last = serde_json::json!({
+            "summary": {"total_crates": 6, "passthroughs": 4, "hit_rate_pct": 83.3, "weighted_hit_rate_pct": 50.0},
+            "timeline": {"start_time": "1970-01-01T00:00:00.000+00:00", "duration_ms": 1_300_000},
+            "traceEvents": ev,
+        });
+        let explain = serde_json::json!({"recorded_at": "1970-01-01T00:00:05.000+00:00", "misses": 1, "unexplained": 0,
+            "causes": [{"count": 1, "compile_ms": 900, "why": "no earlier compile"}]});
+        let ctx = Context {
+            config: CargoConfig::from_strs(&[(
+                "/h/.cargo/config.toml",
+                "[build]\nrustc-wrapper = \"kache\"\n",
+            )]),
+            ..Context::default()
+        };
+        let inputs = Inputs {
+            kache_last: Some(last),
+            kache_explain: Some(explain),
+            now_unix_ms: Some(1_500_000.0),
+            ..Inputs::default()
+        };
+        let s = check(&ctx, &inputs);
+        let fact = |k: &str| s.facts.iter().find(|f| f.key == k).map(|f| f.value.clone());
+        assert_eq!(
+            fact("kache session").unwrap(),
+            "started 00:00 UTC, 25 min ago, ran 1300s"
+        );
+        assert_eq!(
+            fact("kache latest").unwrap(),
+            "4 crates compiled incrementally, starting 5 min ago, with no cache lookups (kache passes incremental builds through); the hit rate is from the session's earlier builds"
+        );
+        assert!(s.details.iter().any(|d| {
+            d.starts_with("why the last cached build missed (recorded 00:00 UTC, 25 min ago)")
+        }));
+    }
+
+    #[test]
+    fn a_cached_build_has_no_uncached_tail() {
+        let ev: Vec<Value> = vec![
+            event(0.0, "miss", ""),
+            event(1.0, "passthrough", "adaptive active"),
+        ];
+        assert_eq!(
+            uncached_tail(&serde_json::json!({ "traceEvents": ev })),
+            None
+        );
     }
 
     #[test]

@@ -312,12 +312,13 @@ Every one of these is a tradeoff, and the finding says what you give up. Turning
   worktrees          375 (82 without target/, 5 with incremental state)
   kache (24h)        72% hits, 54% by compile time, 59213s saved
   kache restores     102.9 GiB reflinked, 23.9 GiB copied
+  kache session      started 10:07 UTC, 12 min ago, ran 0.035s
   kache last build   no compiles in the latest session (only probes); run a build first for per-build numbers
 
   [info] 82 worktree(s) have no target directory yet
 ```
 
-It knows about `sccache` and `kache`. With kache, it reads `kache stats --json` for the last day and for the last build in this workspace, and `kache explain --json` for why the misses missed. It reports hit rates by count *and* by compile time. Those can differ a lot: a cache that hits 98% of crates but misses your three biggest ones still leaves you with most of the build.
+It knows about `sccache` and `kache`. With kache, it reads `kache stats --json` for the last day and for the last build in this workspace, and `kache explain --json` for why the misses missed. The last build is kache's latest *session* in this workspace, and a session can span several cargo commands, so `kache session` says when it started and how long it ran. When the latest builds in it were all incremental compiles that kache passed straight to rustc, a `kache latest` line says so ("94 crates compiled incrementally, starting 3 min ago, with no cache lookups"): the hit rate and the miss causes are from the session's earlier builds, and the miss causes are labeled with when kache recorded them. It reports hit rates by count *and* by compile time. Those can differ a lot: a cache that hits 98% of crates but misses your three biggest ones still leaves you with most of the build.
 
 It also looks at git worktrees, because they change the picture. Every worktree has its own target directory, so the first build in a new one is cold: nothing incremental, and whatever the cache can give you at best. A few things we learned the hard way, which `cache` points out when it sees the setup that causes them:
 
