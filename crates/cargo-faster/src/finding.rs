@@ -1,6 +1,6 @@
 //! Findings and reports: what a check saw, why it matters, how to fix it.
 
-use crate::GUIDE_URL;
+use crate::{GUIDE_URL, SCHEMA_VERSION};
 use core::fmt::Write as _;
 use serde::Serialize;
 
@@ -157,7 +157,29 @@ pub struct Report {
     pub skipped: Vec<Fact>,
 }
 
+/// The `--json` document: the report, with the schema and tool versions
+/// first.
+#[derive(Serialize)]
+struct Json<'a> {
+    schema_version: u32,
+    cargo_faster_version: &'static str,
+    #[serde(flatten)]
+    report: &'a Report,
+}
+
 impl Report {
+    /// The report as pretty-printed JSON, with `schema_version` and
+    /// `cargo_faster_version` fields, ending in a newline.
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        let doc = Json {
+            schema_version: SCHEMA_VERSION,
+            cargo_faster_version: env!("CARGO_PKG_VERSION"),
+            report: self,
+        };
+        serde_json::to_string_pretty(&doc).unwrap_or_default() + "\n"
+    }
+
     /// Every finding across sections, most severe first.
     #[must_use]
     pub fn findings(&self) -> Vec<&Finding> {
@@ -250,6 +272,30 @@ pub fn table(headers: &[&str], rows: &[Vec<String>]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn json_has_versions_first_and_pinned_guide_links() {
+        let mut s = Section::new("setup");
+        s.extend([Finding::new("x", Severity::Low, "t", "debug-info")]);
+        let r = Report {
+            workspace: Some("/w".into()),
+            sections: vec![s],
+            skipped: vec![],
+        };
+        let json = r.to_json();
+        assert!(json.starts_with("{\n  \"schema_version\": 1,\n  \"cargo_faster_version\": \""));
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["cargo_faster_version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(v["workspace"], "/w");
+        let guide = v["sections"][0]["findings"][0]["guide"].as_str().unwrap();
+        assert_eq!(
+            guide,
+            format!(
+                "https://github.com/talaagent/cargo-faster/blob/v{}/docs/guide.md#debug-info",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+    }
 
     #[test]
     fn renders_a_finding() {

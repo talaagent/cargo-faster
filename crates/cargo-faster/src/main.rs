@@ -29,7 +29,11 @@ macro_rules! global_help {
 #[bpaf(
     options("faster"),
     header(
-        "Every finding says what we saw, why it matters, the fix, and a link into the guide:\nhttps://github.com/talaagent/cargo-faster/blob/main/docs/guide.md"
+        concat!(
+            "Every finding says what we saw, why it matters, the fix, and a link into the guide:\nhttps://github.com/talaagent/cargo-faster/blob/v",
+            env!("CARGO_PKG_VERSION"),
+            "/docs/guide.md"
+        )
     ),
     footer(
         "Exit status: 0 on success, findings included; 1 on an error, a failed build, or a finding at or above --fail-on; 2 on a usage error."
@@ -237,7 +241,7 @@ fn main() -> ExitCode {
     match run(&opts) {
         Ok(report) => {
             let text = if opts.json {
-                serde_json::to_string_pretty(&report).unwrap_or_default() + "\n"
+                report.to_json() + "\n"
             } else {
                 report.render_text(bpaf_kit::color_enabled(&std::io::stdout()))
             };

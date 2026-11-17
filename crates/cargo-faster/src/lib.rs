@@ -25,8 +25,18 @@ pub mod testrun;
 pub mod tests;
 pub mod timings;
 
-/// The guide every finding links into.
-pub const GUIDE_URL: &str = "https://github.com/talaagent/cargo-faster/blob/main/docs/guide.md";
+/// The guide every finding links into, as of this release's tag, so a
+/// link keeps pointing at the text that matches the finding.
+pub const GUIDE_URL: &str = concat!(
+    "https://github.com/talaagent/cargo-faster/blob/v",
+    env!("CARGO_PKG_VERSION"),
+    "/docs/guide.md"
+);
+
+/// The version of the `--json` output's shape. It goes up when a stable
+/// field (see docs/cargo-faster.md) is removed, renamed or changes
+/// meaning; new fields don't change it.
+pub const SCHEMA_VERSION: u32 = 1;
 
 /// Every guide anchor a finding may link to. A test checks that each one
 /// exists in `docs/guide.md`.
