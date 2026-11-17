@@ -10,8 +10,10 @@ $ cargo faster
 ```
 
 ```text
+== conditions (results may be noisy)
+  The machine is busy: timings will be noisy and slower
+
 == summary
-  [high] The machine is busy: timings will be noisy and slower
   [medium] The target dir filesystem is 94% full
   [medium] 6 heavy crates are built in more than one version
   [medium] tala-agent has 108449 lines of Rust

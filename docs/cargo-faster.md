@@ -83,10 +83,12 @@ The exit status is:
 These fields are stable: `schema_version` goes up if one of them is removed, renamed or changes meaning, and a new field never changes it.
 
 - the top level: `schema_version`, `cargo_faster_version`, `workspace`, `sections`, `skipped` (absent when empty);
-- each section: `name`, `facts` (`key` and `value`), `findings`, `details` and `data` (absent when empty);
-- each finding: `id`, `severity` (`high`, `medium`, `low` or `info`), `title`, `saw`, `why`, `fix` and `guide`. The `id`s are stable; `guide` links into the guide at this release's tag.
+- each section: `name`, `facts` (`key` and `value`), `findings`, and `conditions`, `details` and `data` (absent when empty);
+- each finding and condition: `id`, `severity` (`high`, `medium`, `low` or `info`), `title`, `saw`, `why`, `fix` and `guide`. The `id`s are stable; `guide` links into the guide at this release's tag.
 
 Everything else is for people and may change in any release: the wording of `title`, `saw`, `why`, `fix`, facts' `value`s and `details`, the set of facts, and the contents of `data` (documented above per subcommand, but still growing).
+
+A *condition* is the state of the moment rather than something to fix in the project: today only `busy-machine`. Conditions print in a `== conditions` block above the summary, and the summary, `== next` and `--fail-on` leave them out, so a loaded machine doesn't fail CI or bury the real findings.
 
 Findings have one of four severities: `high`, `medium`, `low`, and `info`. A `high` finding probably costs you a lot of time right now. An `info` finding is something to know about, not necessarily something to change.
 
@@ -95,8 +97,10 @@ Findings have one of four severities: `high`, `medium`, `low`, and `info`. A `hi
 With no subcommand, `cargo faster` runs every check that's quick and doesn't build anything: `setup`, `cache`, `machine`, `deps`, `tests`, `rdeps`, and `timings` if there's a timings report lying around. It ends with a summary, sorted by severity:
 
 ```text
+== conditions (results may be noisy)
+  The machine is busy: timings will be noisy and slower
+
 == summary
-  [high] The machine is busy: timings will be noisy and slower
   [medium] The target dir filesystem is 94% full
   [medium] 6 heavy crates are built in more than one version
   [medium] tala-agent has 108449 lines of Rust
@@ -427,7 +431,7 @@ Before you believe any timing, know what else the machine was doing:
   cache fs       /home/me/.cache/kache-store on /home (btrfs), 221.9 GiB free
   tmp fs         /tmp on /tmp (tmpfs), 817.1 GiB free
 
-  [high] The machine is busy: timings will be noisy and slower
+  [condition] The machine is busy: timings will be noisy and slower
   [medium] The target dir filesystem is 94% full
 ```
 

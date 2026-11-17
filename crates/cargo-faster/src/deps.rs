@@ -503,7 +503,7 @@ pub fn section(a: &Analysis) -> Section {
         .collect();
     if !heavy_dups.is_empty() {
         f.push(
-            Finding::new("duplicate-heavy-crates", if heavy_dups.len() >= 4 { Severity::Medium } else { Severity::Low }, format!("{} heavy crates are built in more than one version", heavy_dups.len()), "dependencies-and-features")
+            Finding::new("duplicate-heavy-crates", if heavy_dups.len() >= 4 { Severity::Medium } else { Severity::Low }, if heavy_dups.len() == 1 { "1 heavy crate is built in more than one version".to_owned() } else { format!("{} heavy crates are built in more than one version", heavy_dups.len()) }, "dependencies-and-features")
                 .saw(format!("{}. {} crates are duplicated in total.", heavy_dups.join(", "), a.duplicates.len()))
                 .why("Each version is a separate crate to compile, and duplicates of big crates (syn, hyper, rustls) sit on the critical path of cold builds.")
                 .fix("Run `cargo tree -d -e normal,build` to see who pulls the old version, then upgrade or ask upstream. `cargo update -p <crate>` can sometimes unify semver-compatible ones."),
@@ -566,6 +566,10 @@ mod tests {
         let ids: Vec<_> = sec.findings.iter().map(|f| f.id).collect();
         // One crate: "depends", not "depend".
         assert!(sec.findings[0].saw.starts_with("app depends on tokio"));
+        assert_eq!(
+            sec.findings[1].title,
+            "1 heavy crate is built in more than one version"
+        );
         assert_eq!(
             sec.findings.last().map(|f| f.title.as_str()),
             Some("1 workspace crate depends on async-trait")
