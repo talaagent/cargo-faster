@@ -312,7 +312,12 @@ A load average of 74 on 32 cores means every number on this page could be twice 
     saw: base64 0.21.7 + 0.22.1 + 0.23.1, itertools 0.14.0 + 0.15.0, rand 0.8.8 + 0.9.5 +
          0.10.3, syn 2.0.119 + 3.0.7, thiserror-impl 1.0.69 + 2.0.21, windows-sys 0.52.0 +
          0.61.2. 32 crates are duplicated in total.
-  [info] 50 workspace crates use async-trait
+  [medium] #[async_trait] is used 62 times in 9 workspace crates
+    saw: 62 #[async_trait] attributes: tala-agent 29, tala-session-engine 9, tala-github-api
+         8, tala-delegate-runtime 5, tala-session-worker 4 and 4 more. They define 7 traits,
+         7 held as `dyn` (`CodexApi`, `GithubHttp`, `Hooks`, `ImageApi`, `OwnerGh`). 23 are
+         impls of traits defined outside the workspace, which stay until upstream drops the
+         macro.
 ```
 
 It finds:
@@ -320,7 +325,8 @@ It finds:
 - `tokio` with the `full` feature asked for by a workspace crate;
 - `syn` with `full`, and more than one major version of `syn`;
 - duplicate versions of heavy crates;
-- proc macros, and how many crates use `async-trait`.
+- proc macros;
+- `#[async_trait]` attributes counted in the workspace's sources (not its manifests), the traits they define, and how many of those are held as `dyn`. Ten or more uses is `[medium]`; `check-cost` then tells you what they actually cost.
 
 Features are unified across the whole graph. In this workspace, `full` shows up in tokio's features even though no workspace crate asks for it: a dependency does. `cargo tree -e features -i tokio` tells you which one.
 

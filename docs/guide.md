@@ -378,11 +378,29 @@ pub trait Adapter {
 
 and each implementation's body is wrapped in `Box::pin(async move { ... })`.
 
-So every `#[async_trait]` method already returns a boxed future. That's good: callers don't nest the method's state machine. But notice the `+ Send` on that box. Each method body has to prove its own future is `Send`, at the point of coercion. And each method has its own set of lifetime parameters and where-clauses, which means its own parameter environment, which means the trait solver's cache doesn't share results between methods. If fifty methods each hold a `&Bot` or an `Arc<Bot>` across an await, `Bot: Send + Sync` is proved fifty times.
+So every `#[async_trait]` method already returns a boxed future. That's good: callers don't nest the method's state machine. But look at the `where` clause. Every method gets lifetimes of its own, `'life0` and `'life1` and `'async_trait`, and bounds between them. Those bounds are part of the method's *parameter environment*: the set of facts rustc may assume while it checks the body.
 
-Native `async fn` in traits, stable since Rust 1.75, doesn't box, and doesn't require `Send` by default. That's a different problem: callers who need `Send` futures from a generic `T: Adapter` can't easily ask for it without return type notation, which is still unstable at the time of writing, or a helper like the `trait-variant` crate that rewrites the method to return `impl Future<Output = ...> + Send`. More importantly for build times, switching to native async traits doesn't remove the re-proving. Each method body is still its own body, with its own environment and its own opaque future type, and wherever `Send` is required, it's proved per body. Native async traits are also not dyn-compatible, so you lose `dyn Adapter`.
+Here's why that matters. When rustc proves `Bot: Send`, it caches the answer, and the cache key is the predicate *together with* the parameter environment it was proven in. Two bodies with the same environment share answers. Two bodies with different environments don't, even if the difference is a lifetime bound that has nothing to do with `Bot`. And `#[async_trait]` makes every method's environment different. So the boxed `+ Send` future of each method body proves its own `Send` facts about the same types, from scratch, in every impl. If fifty methods each hold an `Arc<Bot>` across an await, `Bot: Send + Sync` is proven fifty times.
 
-The lesson: if `async-trait` methods dominate your profile, switching macros won't fix it. Shrinking what they have to prove will: erase heavy fields of the types they touch, and box heavy futures they await.
+Native `async fn` in traits, stable since Rust 1.75, doesn't box, and doesn't add those bounds. The method's future is an opaque type, and where `Send` is required, it's proven in an environment that looks like everyone else's, so the answers are shared. That's the first lever, and it's a mechanical one:
+
+- In the trait, write `fn invite(&self, user: &UserId) -> impl Future<Output = Result<()>> + Send;` when callers spawn the future or otherwise need it to be `Send`. Plain `async fn` in the trait doesn't promise `Send`, and asking for it from a generic `T: Adapter` needs return type notation, which isn't stable yet.
+- In the impls, keep writing `async fn invite(...)`. It satisfies the `impl Future + Send` signature.
+- Native async traits aren't dyn-compatible. For traits you hold as `Arc<dyn Adapter>`, the `dynosaur` crate generates a `DynAdapter` wrapper (`#[dynosaur::dynosaur(DynAdapter)]`, then `DynAdapter::new_arc(v)`) that boxes the future only when you go through the `dyn`.
+- Then keep the macro from coming back, with clippy:
+
+```toml
+# clippy.toml
+disallowed-macros = [
+    { path = "async_trait::async_trait", reason = "native async fn in traits; dynosaur for dyn" },
+]
+```
+
+Clippy reports a disallowed attribute macro at the crate level, so an impl of someone else's `#[async_trait]` trait needs `#![allow(clippy::disallowed_macros)]` at the top of that crate until upstream moves.
+
+The second lever is the one from [Erasing a heavy type](#erasing-a-heavy-type), and it's independent. Even with shared answers, each distinct environment and each async body that holds `Bot` across an await still proves `Bot: Send` at least once, and the cost of one proof is the size of `Bot`'s type graph. Dropping the macro cuts the number of proofs; erasing `Bot`'s heavy fields cuts the cost of each one. A workspace with both problems needs both fixes.
+
+How do you tell which one you have? `cargo faster check-cost` counts the trait solving done in parameter environments with lifetime-outlives bounds, the shape `#[async_trait]` leaves behind, and reports it as `async-trait-overhead`. (The profile doesn't say `'async_trait`: rustc renames lifetimes when it builds cache keys. Hand-written `'a: 'b` bounds look the same, but they're rare in async code.) `send-proofs-per-async-body` is the other lever: one heavy type, proven over and over. [The case study](#dropping-async-trait) has numbers for the first; [the earlier fixes](#fix-1-erase-the-client) are the second.
 
 ## Generic code and monomorphization
 
@@ -878,7 +896,48 @@ These numbers come from a different situation than Fix 1's: a comment edited in 
 
 After both fixes, about 15.6 seconds of the binary crate's remaining `evaluate_obligation` time is still `Bot: Send + Sync`. `Bot`'s graph is about 1,366 types: `reqwest` and the `hyper` and `tower` stack under it, `sqlx`, and the application's own subsystems. It's re-proved in 54 async bodies, at about 0.29 seconds each.
 
-Would switching from `#[async_trait]` to native async functions in traits help? No. Each body would still be its own environment, and would still prove `Bot: Send` for itself. The only real lever left is a smaller auto-trait graph for `Bot`: erasing more of its heavy fields behind `Arc<dyn ... + Send + Sync>`. That's a redesign, not a thirty-line change, and it's a decision about whether another 15 seconds is worth it.
+Would switching from `#[async_trait]` to native async functions in traits help? We guessed no: each body would still be its own environment, and would still prove `Bot: Send` for itself. We were wrong, and the next section is how we found out.
+
+### Dropping async-trait
+
+Some months later, the workspace replaced all of its `#[async_trait]` uses with native async functions in traits, over three pull requests: 84 traits and 381 impls. Traits that callers spawned got `-> impl Future<Output = T> + Send` signatures; traits held as `Arc<dyn ...>` got `dynosaur` wrappers; and a `disallowed-macros` entry in `clippy.toml` keeps the macro out.
+
+The first measurement was crude. Append one new function to the library crate and one to the binary crate, then run `cargo clippy --workspace --all-targets`, so it's an incremental rebuild of the top of the graph. At a load average between 22 and 32 on the same 32-core machine:
+
+| Unit | Before | After |
+|---|---:|---:|
+| app library crate, check | 44.0 s | 15 to 16 s |
+| app binary crate, check | 25.7 s | 3 to 7 s |
+| **whole clippy run** | **1m16s** | **26 to 31 s** |
+
+That's a bigger win than the theory in [What's left](#whats-left) allowed for, and other changes landed in the same weeks, including more erasure inside `Bot`. So we went back and measured just the last of the three pull requests, the commit before it against the commit after, with `cargo faster check-cost`: a fresh, non-incremental self-profile of each crate, two runs each, back to back, under a load average of 50 to 77.
+
+| Measurement | Before | After |
+|---|---:|---:|
+| library crate: trait solving (`evaluate_obligation`) | 4.4 to 5.2 s | 0.85 to 1.0 s |
+| library crate: in lifetime-bounded environments | 3.4 to 3.7 s | 0 s |
+| library crate: proving async bodies `Send` | 1.5 to 1.6 s | 0.07 to 0.09 s |
+| library crate: `typeck` | 5.9 to 9.7 s | 4.7 to 5.5 s |
+| library crate: borrow checking | 5.2 to 6.3 s | 3.9 to 4.7 s |
+| library crate: whole check | 43 to 49 s | 26 to 38 s |
+| binary crate: trait solving | 1.1 to 1.5 s | 0.41 to 0.49 s |
+| binary crate: whole check | 9 to 10 s | 11 to 13 s |
+
+Two things stand out. First, trait solving dropped by about 80%, and nearly all of what went away was work done in parameter environments carrying `#[async_trait]`'s lifetime bounds: 14,500 evaluations in the library crate before, none after. Native async functions really do let rustc share its answers. Our guess in *What's left* had the right model of each body and the wrong model of the cache.
+
+Second, on a fresh check, trait solving was only about a tenth of the library crate's time to begin with, so the fresh numbers move less than the incremental ones, and the binary crate's fresh check didn't move outside the noise. The big change was in the incremental units, the ones you wait on after every edit:
+
+| Unit (incremental `cargo check`, load 67 to 87) | Before | After |
+|---|---:|---:|
+| app library crate, check | 55.5 s | 37.8 s |
+| app library crate, check (test) | 72.8 s | 53.0 s |
+| app binary crate, check | 37.2 s | 13.3 s |
+| app binary crate, check (test) | 36.7 s | 14.7 s |
+| whole check run | 105 s | 74 s |
+
+Incremental compilation can reuse a query's result only when its inputs, including the trait-solving results it depended on, come out the same. Fewer, shared proofs mean fewer things to recompute and fewer dependencies to check.
+
+So there are two levers, and this workspace needed both. Erasing heavy types made each `Send` proof cheap. Dropping `#[async_trait]` stopped the proofs from being repeated per method.
 
 ### Caching lessons
 
@@ -903,6 +962,7 @@ A few things to take away from this:
 1. **The obvious suspects were wrong.** Nobody guessed "trait solving" before profiling. The usual advice (split the crate, cut the derives, change the linker) would have been effort spent on the wrong thing.
 2. **Self-profiling with `args` turned a symptom into a cause.** The query totals said "trait solving". Grouping by predicate and by function body said "this one struct, proved `Send` over and over, by these methods".
 3. **Type erasure and boxing are compile-time tools.** We usually think of `dyn` and `Box` as runtime choices. In async code, they're also the way to tell the compiler "you don't need to look inside this".
+4. **Measure the advice, too.** We told ourselves, and this guide told you, that dropping `#[async_trait]` wouldn't help. A before/after profile of one commit said it cut trait solving by 80%. Theories about the compiler's caches are worth exactly as much as the profile that backs them.
 
 ## Using cargo faster
 

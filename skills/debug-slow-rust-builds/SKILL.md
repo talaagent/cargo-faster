@@ -80,7 +80,7 @@ If `cargo faster` isn't installed: `cargo install --locked cargo-faster`, or
 |---|---|---|
 | `send-proofs-per-async-body` | Hold the heavy type as `Arc<dyn Trait + Send + Sync>`, or put its heavy fields behind one | A vtable call |
 | `trait-solving-dominates`, `heavy-function-body` | Return `Pin<Box<dyn Future<Output = T> + Send + '_>>` from functions at module boundaries; split the top body | A box per call |
-| `async-trait-overhead` | Same as above. Native `async fn` in traits won't help by itself: each body still proves `Send` | |
+| `async-trait-overhead`, `uses-async-trait` | Replace `#[async_trait]` with native `async fn` in traits (`-> impl Future<Output = T> + Send` where callers spawn, `dynosaur` for `dyn`-held traits), and ban it with clippy `disallowed-macros`. Its per-method lifetime bounds split rustc's trait-solving cache; on one workspace this cut trait solving 80%. Erase heavy types too: that's the other lever | Signature churn |
 | `serial-crate`, `big-crate` | Profile it first (`check-cost`). Split only if it's actually just big | Refactor |
 | `target-runner-wraps-tests` | Remove or narrow `target.<triple>.runner`; use a once-per-run nextest setup script | |
 | `nextest-threads-env` | Unset `NEXTEST_TEST_THREADS`; put limits in `.config/nextest.toml` | |
