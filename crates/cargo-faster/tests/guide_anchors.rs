@@ -80,8 +80,19 @@ fn every_finding_links_to_a_guide_section() {
     let anchors = guide_anchors(&guide);
     let mut checked = 0;
     let mut missing = Vec::new();
-    for entry in std::fs::read_dir(root.join("src")).unwrap() {
-        let path = entry.unwrap().path();
+    let mut files = Vec::new();
+    let mut dirs = vec![root.join("src")];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    for path in files {
         if path.file_name().is_some_and(|n| n == "finding.rs") {
             continue; // its tests use made-up anchors
         }
