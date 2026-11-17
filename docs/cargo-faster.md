@@ -52,7 +52,6 @@ With no subcommand, `cargo faster` runs every check that's quick and doesn't bui
 ```text
 == summary
   [high] The machine is busy: timings will be noisy and slower
-  [high] Every test process runs under `scripts/kache-test-runner`
   [medium] The target dir filesystem is 94% full
   [medium] 6 heavy crates are built in more than one version
   [medium] NEXTEST_TEST_THREADS overrides your nextest profile
@@ -341,17 +340,18 @@ Slow tests are often not slow to compile at all. `tests` checks how they're run:
   nextest               installed, .config/nextest.toml present
   test binaries         198 (6 integration test files)
   target runner         scripts/kache-test-runner (target.x86_64-unknown-linux-gnu.runner in .cargo/config.toml)
+  runner override       scripts/gate:180 ("cargo nextest|$runner_var=$PWD/scripts/test-runner $cargo nextest run ...")
   NEXTEST_TEST_THREADS  4
   database crates       sqlx
 
-  [high] Every test process runs under `scripts/kache-test-runner`
   [medium] NEXTEST_TEST_THREADS overrides your nextest profile
+  [low] `scripts/kache-test-runner` steps aside under nextest
   [info] Database-backed tests: make each database cheap
 ```
 
-The first finding is the expensive one. A *target runner* wraps every execution of a test binary, and nextest runs every test in its own process. So the runner starts once per test. In this workspace, tests that took 0.00 seconds waited 3 to 8 seconds each in the runner, and the runner took about 44% of all test-seconds.
+A *target runner* wraps every execution of a test binary, and nextest runs every test in its own process, so a runner starts once per test. In the case study, tests that took 0.00 seconds waited 3 to 8 seconds each in the runner, and the runner took about 44% of all test-seconds. `tests` reads the runner: if it's a script that checks `NEXTEST_EXECUTION_MODE` and execs the test directly, it costs a millisecond per test and the finding is `info`; if it doesn't, it's `high` under nextest. It also finds scripts that set `CARGO_TARGET_<TRIPLE>_RUNNER` themselves, like the `scripts/gate` above, whose runner beats the configured one for those runs (here `low`: the gate's runner doesn't step aside).
 
-It also checks:
+Beyond runners, it checks:
 
 - whether you use nextest at all;
 - `NEXTEST_TEST_THREADS` in the environment, which silently beats `test-threads` in your profile;

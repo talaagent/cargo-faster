@@ -3,7 +3,8 @@
 
 use crate::context::{Context, Metadata, on_path};
 use crate::finding::{Finding, Section, Severity};
-use std::path::Path;
+use alloc::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 /// Inputs beyond the [`Context`].
 #[derive(Debug, Clone, Default)]
@@ -18,6 +19,135 @@ pub struct Inputs {
     pub test_binaries: usize,
     /// Integration test files (`tests/*.rs`) across members.
     pub integration_files: usize,
+    /// The text of each target runner that is a readable script, keyed by
+    /// the runner as configured.
+    pub runner_scripts: BTreeMap<String, String>,
+    /// Lines in the repository's scripts that mention a test setting (a
+    /// `CARGO_TARGET_<TRIPLE>_RUNNER` override, ...).
+    pub script_hits: Vec<ScriptHit>,
+}
+
+/// One line of a repository script (`scripts/`, a Makefile, a justfile, a
+/// CI workflow) that mentions a setting the checks care about.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScriptHit {
+    /// The file, relative to the workspace root.
+    pub file: String,
+    /// 1-based line number.
+    pub line: usize,
+    /// The line, trimmed.
+    pub text: String,
+    /// For a line that sets `CARGO_TARGET_<TRIPLE>_RUNNER` (directly or
+    /// through a variable holding that name), the runner it sets, with
+    /// `$PWD/` and quotes stripped; `None` when it can't be read.
+    pub runner: Option<String>,
+}
+
+impl ScriptHit {
+    /// `file:line`.
+    #[must_use]
+    pub fn location(&self) -> String {
+        format!("{}:{}", self.file, self.line)
+    }
+
+    /// Whether the line sets a target runner through the environment.
+    #[must_use]
+    pub fn sets_runner(&self) -> bool {
+        mentions_runner_var(&self.text) || self.runner.is_some()
+    }
+}
+
+fn mentions_runner_var(l: &str) -> bool {
+    l.find("CARGO_TARGET_")
+        .is_some_and(|i| l[i..].contains("_RUNNER"))
+}
+
+/// The value assigned after `key=` in a shell line, unquoted, with `$PWD/`
+/// stripped; `None` if it's empty or another variable.
+fn assigned_value(line: &str, key: &str) -> Option<String> {
+    let rest = &line[line.find(key)? + key.len()..];
+    let rest = rest.strip_prefix('=')?;
+    let v = rest
+        .trim_start_matches(['"', '\''])
+        .split(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+        .next()?;
+    let v = ["$PWD/", "${PWD}/", "$(pwd)/", "./"]
+        .iter()
+        .find_map(|p| v.strip_prefix(p))
+        .unwrap_or(v);
+    (!v.is_empty() && !v.starts_with('$')).then(|| v.to_owned())
+}
+
+/// The lines of a script that set a target runner through the environment:
+/// `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=...`, or a variable that
+/// holds that name (`runner_var=CARGO_TARGET_..._RUNNER` and later
+/// `$runner_var=...`, as in `env "$runner_var=..." cargo nextest run`).
+#[must_use]
+pub fn script_hits(file: &str, text: &str) -> Vec<ScriptHit> {
+    let lines: Vec<(usize, &str)> = text
+        .lines()
+        .enumerate()
+        .map(|(n, l)| (n + 1, l.trim()))
+        .filter(|(_, l)| !l.starts_with('#') && !l.is_empty())
+        .collect();
+    // Variables whose value is a runner variable's name.
+    let mut vars = Vec::new();
+    for (_, l) in &lines {
+        if mentions_runner_var(l)
+            && let Some((lhs, _)) = l.split_once('=')
+        {
+            let name = lhs.trim().trim_start_matches("export ").trim();
+            if !name.is_empty()
+                && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+                && !name.starts_with("CARGO_TARGET_")
+            {
+                vars.push(name.to_owned());
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for (n, l) in &lines {
+        let hit = |runner| ScriptHit {
+            file: file.to_owned(),
+            line: *n,
+            text: (*l).to_owned(),
+            runner,
+        };
+        let used = vars.iter().find_map(|v| {
+            [format!("${{{v}}}"), format!("${v}")]
+                .into_iter()
+                .find(|k| l.contains(&format!("{k}=")))
+        });
+        if let Some(k) = used {
+            out.push(hit(assigned_value(l, &k)));
+        } else if mentions_runner_var(l) && !vars.iter().any(|v| l.contains(&format!("{v}="))) {
+            let key = l.find("CARGO_TARGET_").and_then(|i| {
+                l[i..]
+                    .find("_RUNNER")
+                    .map(|j| &l[i..i + j + "_RUNNER".len()])
+            });
+            out.push(hit(key.and_then(|k| assigned_value(l, k))));
+        }
+    }
+    out
+}
+
+/// Whether a runner script steps aside under nextest: it checks
+/// `NEXTEST_EXECUTION_MODE` (or another `NEXTEST_*` variable nextest sets for
+/// each test) and execs the test directly.
+#[must_use]
+pub fn bypasses_nextest(script: &str) -> bool {
+    script.lines().any(|l| {
+        let l = l.trim();
+        !l.starts_with('#')
+            && [
+                "NEXTEST_EXECUTION_MODE",
+                "NEXTEST_RUN_ID",
+                "NEXTEST_TEST_NAME",
+            ]
+            .iter()
+            .any(|v| l.contains(v))
+    })
 }
 
 impl Inputs {
@@ -38,12 +168,102 @@ impl Inputs {
                 }
             }
         }
+        let mut runner_scripts = BTreeMap::new();
+        for (src, r) in runners(ctx) {
+            if let Some(path) = runner_program(ctx, &src, &r)
+                && let Some(text) = read_small(&path)
+            {
+                runner_scripts.insert(r, text);
+            }
+        }
+        let script_hits = gather_script_hits(root);
+        for h in &script_hits {
+            if let Some(v) = &h.runner
+                && let Some(text) = read_small(&root.join(v))
+            {
+                runner_scripts.insert(v.clone(), text);
+            }
+        }
         Self {
             nextest_config,
             nextest_installed: on_path(&ctx.env, "cargo-nextest").is_some(),
             sqlx_tests,
             test_binaries,
             integration_files,
+            runner_scripts,
+            script_hits,
+        }
+    }
+}
+
+/// A text file under 256 KiB.
+fn read_small(path: &Path) -> Option<String> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > 256 * 1024 {
+        return None;
+    }
+    std::fs::read_to_string(path).ok()
+}
+
+/// The runner's program on disk. Cargo resolves a config runner with a `/`
+/// relative to the directory holding `.cargo/`, an environment one relative
+/// to the current directory, and a bare name on `PATH`.
+fn runner_program(ctx: &Context, src: &str, runner: &str) -> Option<PathBuf> {
+    let prog = runner.split_whitespace().next()?;
+    if !prog.contains('/') {
+        return crate::context::on_path(&ctx.env, prog);
+    }
+    let base = src
+        .split_once(" in ")
+        .and_then(|(_, f)| Path::new(f).parent()?.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| ctx.cwd.clone());
+    Some(base.join(prog))
+}
+
+/// Scan the scripts that usually drive test runs: `scripts/` (two levels),
+/// `Makefile`, `justfile` and `.github/workflows`.
+fn gather_script_hits(root: &Path) -> Vec<ScriptHit> {
+    let mut files = Vec::new();
+    for name in [
+        "Makefile",
+        "makefile",
+        "GNUmakefile",
+        "justfile",
+        "Justfile",
+        ".justfile",
+    ] {
+        files.push(root.join(name));
+    }
+    for (dir, depth) in [("scripts", 2), (".github/workflows", 1)] {
+        list_files(&root.join(dir), depth, &mut files);
+    }
+    let mut out = Vec::new();
+    for f in files {
+        if let Some(text) = read_small(&f) {
+            let rel = f.strip_prefix(root).unwrap_or(&f).display().to_string();
+            out.extend(script_hits(&rel, &text));
+        }
+    }
+    out
+}
+
+fn list_files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+    paths.sort();
+    for p in paths {
+        if p.is_dir() {
+            if depth > 1
+                && !p
+                    .file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with(['.', '_']))
+            {
+                list_files(&p, depth - 1, out);
+            }
+        } else {
+            out.push(p);
         }
     }
 }
@@ -160,12 +380,69 @@ pub fn check(ctx: &Context, i: &Inputs) -> Section {
     for (src, r) in &runners {
         s.fact("target runner", format!("{r} ({src})"));
     }
+    let overrides: Vec<&ScriptHit> = i.script_hits.iter().filter(|h| h.sets_runner()).collect();
+    for h in &overrides {
+        s.fact("runner override", format!("{} ({})", h.location(), h.text));
+    }
+    // Runners the scripts set that don't step aside under nextest (or
+    // that we couldn't read).
+    let busy_overrides: Vec<String> = overrides
+        .iter()
+        .filter(|h| {
+            !h.runner
+                .as_ref()
+                .and_then(|v| i.runner_scripts.get(v))
+                .is_some_and(|t| bypasses_nextest(t))
+        })
+        .map(|h| {
+            h.runner
+                .as_ref()
+                .map_or_else(|| h.location(), |v| format!("`{v}` ({})", h.location()))
+        })
+        .collect();
+    let override_note = if overrides.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " Scripts also set a runner through the environment, which beats the config for those runs: {}.{}",
+            overrides
+                .iter()
+                .map(|h| h.location())
+                .collect::<Vec<_>>()
+                .join(", "),
+            if busy_overrides.is_empty() {
+                " Those runners step aside under nextest too.".to_owned()
+            } else {
+                format!(
+                    " These don't check NEXTEST_EXECUTION_MODE, so they run once per test in those runs: {}.",
+                    busy_overrides.join(", ")
+                )
+            }
+        )
+    };
     if let Some((src, r)) = runners.first() {
-        f.push(
-            Finding::new("target-runner-wraps-tests", if uses_nextest { Severity::High } else { Severity::Medium }, format!("Every test process runs under `{}`", r.split_whitespace().next().unwrap_or(r)), "test-runners-that-wrap-every-test")
-                .saw(format!("A target runner is configured ({src}): `{r}`.{}", if uses_nextest { " nextest starts one process per test, so the runner starts once per test." } else { "" }))
+        let prog = r.split_whitespace().next().unwrap_or(r);
+        let bypass = i.runner_scripts.get(r).is_some_and(|t| bypasses_nextest(t));
+        let finding = if bypass && uses_nextest {
+            Finding::new("target-runner-wraps-tests", if busy_overrides.is_empty() { Severity::Info } else { Severity::Low }, format!("`{prog}` steps aside under nextest"), "test-runners-that-wrap-every-test")
+                .saw(format!("A target runner is configured ({src}): `{r}`. It checks NEXTEST_EXECUTION_MODE and runs the test directly under nextest, so each test pays one extra exec (about a millisecond), not the runner's work.{override_note}"))
+                .why("A runner wraps every execution of a test binary, and nextest starts one process per test. A runner that execs the test straight away under nextest costs next to nothing; one that does real work (takes a slot, a lock, a fifo) is paid once per test.")
+                .fix(format!("Nothing for this runner.{} To see what any runner costs, run one quick test a few times through `cargo nextest run` with and without it, back to back.", if busy_overrides.is_empty() { "" } else { " Measure the runners the scripts set, or have them step aside under nextest too." }))
+        } else {
+            Finding::new("target-runner-wraps-tests", if uses_nextest { Severity::High } else { Severity::Medium }, format!("Every test process runs under `{prog}`"), "test-runners-that-wrap-every-test")
+                .saw(format!("A target runner is configured ({src}): `{r}`.{}{override_note}", if uses_nextest { " nextest starts one process per test, so the runner starts once per test." } else { "" }))
                 .why("A runner wraps every execution of a test binary. Under nextest that's every single test: its startup cost is paid thousands of times, and if it holds a slot or a lock, tests queue behind it. In one workspace, a cache's test runner made 0.00 s tests wait 3-8 s each and took about 44% of all test-seconds.")
-                .fix("Remove the runner for test runs, or scope it to the targets that need it (e.g. a cross-compilation triple). If you need a wrapper for nextest, use a nextest setup script or wrapper script that runs once per run, not per test. Measure `cargo nextest run` with and without it, back to back."),
+                .fix("Remove the runner for test runs, or scope it to the targets that need it (e.g. a cross-compilation triple). If the runner is a script, have it step aside under nextest: `[ \"$NEXTEST_EXECUTION_MODE\" = process-per-test ] && exec \"$@\"`. If you need a wrapper for nextest, use a nextest setup script or wrapper script that runs once per run, not per test. Measure `cargo nextest run` with and without it, back to back.")
+        };
+        f.push(finding);
+    } else if let Some(h) = overrides.first()
+        && !busy_overrides.is_empty()
+    {
+        f.push(
+            Finding::new("target-runner-in-scripts", Severity::Low, format!("{} sets a target runner for its test runs", h.file), "test-runners-that-wrap-every-test")
+                .saw(format!("No runner is configured, but scripts set one through the environment, and it doesn't check NEXTEST_EXECUTION_MODE: {}.", busy_overrides.join(", ")))
+                .why("A runner wraps every execution of a test binary, and nextest starts one process per test, so whatever the runner does is paid once per test in those runs.")
+                .fix("Make sure the runner execs the test straight away under nextest (`NEXTEST_EXECUTION_MODE=process-per-test`), or measure one quick test through `cargo nextest run` with and without it."),
         );
     }
     let profile_threads = i
@@ -269,6 +546,85 @@ mod unit {
             ]
         );
         assert!(s.findings[0].title.contains("`kache`"));
+    }
+
+    const KACHE_RUNNER: &str = "#!/bin/sh\nif [ \"${NEXTEST_EXECUTION_MODE:-}\" = process-per-test ]; then\n  exec \"$@\"\nfi\nexec kache test-runner \"$@\"\n";
+
+    fn runner_ctx() -> Context {
+        Context {
+            config: CargoConfig::from_strs(&[(
+                "/w/.cargo/config.toml",
+                "[target.x86_64-unknown-linux-gnu]\nrunner = \"scripts/kache-test-runner\"\n",
+            )]),
+            ..Context::default()
+        }
+    }
+
+    fn nextest_inputs() -> Inputs {
+        Inputs {
+            nextest_installed: true,
+            ..Inputs::default()
+        }
+    }
+
+    #[test]
+    fn runner_that_steps_aside_under_nextest_is_info() {
+        let mut i = nextest_inputs();
+        i.runner_scripts
+            .insert("scripts/kache-test-runner".into(), KACHE_RUNNER.into());
+        let s = check(&runner_ctx(), &i);
+        assert_eq!(s.findings[0].id, "target-runner-wraps-tests");
+        assert_eq!(s.findings[0].severity, Severity::Info);
+        assert!(s.findings[0].title.contains("steps aside"));
+    }
+
+    #[test]
+    fn runner_without_bypass_stays_high() {
+        let mut i = nextest_inputs();
+        i.runner_scripts.insert(
+            "scripts/kache-test-runner".into(),
+            "#!/bin/sh\n# NEXTEST_EXECUTION_MODE is ignored here\nexec kache test-runner \"$@\"\n"
+                .into(),
+        );
+        let s = check(&runner_ctx(), &i);
+        assert_eq!(s.findings[0].severity, Severity::High);
+    }
+
+    #[test]
+    fn script_runner_override() {
+        let gate = "host=$(rustc -vV | sed -n 's/host: //p')\nrunner_var=CARGO_TARGET_$(tr 'a-z-' 'A-Z_' <<<\"$host\")_RUNNER\n# CARGO_TARGET_X_RUNNER=no in a comment\n  \"cargo nextest|$runner_var=$PWD/scripts/test-runner $cargo nextest run --test-threads 8\"\n";
+        let hits = script_hits("scripts/gate", gate);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].line, 4);
+        assert_eq!(hits[0].runner.as_deref(), Some("scripts/test-runner"));
+        let direct = script_hits(
+            "Makefile",
+            "test:\n\tCARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=\"./ci/run\" cargo nextest run\n",
+        );
+        assert_eq!(direct[0].runner.as_deref(), Some("ci/run"));
+        let set = hits[0].clone();
+
+        // The config runner steps aside, the gate's doesn't: low, and named.
+        let mut i = nextest_inputs();
+        i.runner_scripts
+            .insert("scripts/kache-test-runner".into(), KACHE_RUNNER.into());
+        i.runner_scripts.insert(
+            "scripts/test-runner".into(),
+            "#!/bin/bash\nmkfifo \"$f\"\nsetsid \"$@\" &\n".into(),
+        );
+        i.script_hits = vec![set.clone()];
+        let s = check(&runner_ctx(), &i);
+        assert_eq!(s.findings[0].severity, Severity::Low);
+        assert!(
+            s.findings[0]
+                .saw
+                .contains("`scripts/test-runner` (scripts/gate:4)")
+        );
+        assert!(s.facts.iter().any(|f| f.key == "runner override"));
+
+        // No config runner: the script's runner alone is reported.
+        let s = check(&Context::default(), &i);
+        assert_eq!(s.findings[0].id, "target-runner-in-scripts");
     }
 
     #[test]

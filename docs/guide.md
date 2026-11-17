@@ -731,7 +731,19 @@ or the environment variable `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER`. This
 
 Under `cargo test`, the runner wraps each test *binary*, once. Under nextest, which runs one process per test, it wraps every *test*. A runner that takes a second to start, or that takes a lock, or that coordinates with some other service, now does that thousands of times. Each wrapped test also holds one of nextest's slots while it waits. In the case study, tests that ran in 0.00 seconds were each waiting 3 to 8 seconds in a runner, and that waiting was about 44% of all the test-seconds in the suite.
 
-If you have a runner configured, check whether it's needed for tests, and whether it's set somewhere you didn't expect: a global `~/.cargo/config.toml`, or an environment variable. `cargo faster tests` reports runners, nextest configuration, and relevant environment variables.
+If a runner is needed for `cargo test` but not under nextest, have it step aside. nextest sets `NEXTEST_EXECUTION_MODE=process-per-test` in every test process, so a shell runner can exec the test straight away:
+
+```sh
+#!/bin/sh
+if [ "${NEXTEST_EXECUTION_MODE:-}" = process-per-test ]; then
+  exec "$@"
+fi
+exec my-wrapper "$@"
+```
+
+That costs one extra `exec` per test, about a millisecond. `cargo faster tests` reads runner scripts and grades one that steps aside like this as `info`.
+
+If you have a runner configured, check whether it's needed for tests, and whether it's set somewhere you didn't expect: a global `~/.cargo/config.toml`, or an environment variable. `CARGO_TARGET_<TRIPLE>_RUNNER` set by a script (a CI or pre-merge script, a Makefile) beats the config's runner for that run, so the runner that wraps your CI tests may not be the one in `.cargo/config.toml`. `cargo faster tests` reports runners, the lines in `scripts/`, Makefiles, justfiles and CI workflows that override them, nextest configuration, and relevant environment variables. The surest way to know what a runner costs is to run one quick test a few times through `cargo nextest run` with and without it, back to back.
 
 ### Database-backed tests
 
