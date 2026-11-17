@@ -337,7 +337,7 @@ fn async_trait_finding(a: &Analysis) -> Option<Finding> {
             return None;
         }
         return Some(
-            Finding::new("uses-async-trait", Severity::Info, format!("{} workspace crates depend on async-trait", a.async_trait_in.len()), "the-cost-of-async-trait")
+            Finding::new("uses-async-trait", Severity::Info, format!("{} on async-trait", crates_depend(a.async_trait_in.len())), "the-cost-of-async-trait")
                 .saw(format!("Direct dependency in: {}.", a.async_trait_in.join(", ")))
                 .why("#[async_trait] gives every method a boxed `dyn Future + Send + 'async_trait` and its own lifetime, which keeps rustc from reusing trait-solving results across bodies.")
                 .fix(fix),
@@ -348,7 +348,7 @@ fn async_trait_finding(a: &Analysis) -> Option<Finding> {
             return None;
         }
         return Some(
-            Finding::new("unused-async-trait", Severity::Info, format!("{} workspace crates depend on async-trait without using it", a.async_trait_in.len()), "the-cost-of-async-trait")
+            Finding::new("unused-async-trait", Severity::Info, format!("{} on async-trait without using it", crates_depend(a.async_trait_in.len())), "the-cost-of-async-trait")
                 .saw(format!("async-trait is a dependency of {}, but no #[async_trait] attribute is in their sources.", a.async_trait_in.join(", ")))
                 .why("An unused dependency still has to be built (and its proc macro loaded) before these crates can start.")
                 .fix(format!("Drop async-trait from those manifests, and keep it out with clippy.toml:\n{CLIPPY_BAN}")),
@@ -490,8 +490,8 @@ pub fn section(a: &Analysis) -> Section {
     if !a.tokio_full_in.is_empty() {
         f.push(
             Finding::new("tokio-full", Severity::Low, "tokio's `full` feature is enabled", "dependencies-and-features")
-                .saw(format!("{} depend on tokio with features = [\"full\"].", a.tokio_full_in.join(", ")))
-                .why("`full` turns on every tokio module (fs, process, signal, io-std, test-util-free parts and more). Each one adds code to compile, and features are unified across the graph, so one crate asking for `full` makes everyone pay.")
+                .saw(format!("{} {} on tokio with features = [\"full\"].", a.tokio_full_in.join(", "), if a.tokio_full_in.len() == 1 { "depends" } else { "depend" }))
+                .why("`full` turns on every tokio module (fs, process, signal, io-std, net, macros and more, everything except test-util). Each one adds code to compile, and features are unified across the graph, so one crate asking for `full` makes everyone pay.")
                 .fix("List what you use, e.g. features = [\"rt-multi-thread\", \"macros\", \"net\", \"time\", \"sync\"]. The win is a few seconds of tokio build, mostly on cold builds; do it when you touch the manifest anyway."),
         );
     }
@@ -526,6 +526,15 @@ pub fn section(a: &Analysis) -> Section {
     s
 }
 
+/// `1 workspace crate depends`, `3 workspace crates depend`.
+fn crates_depend(n: usize) -> String {
+    if n == 1 {
+        "1 workspace crate depends".to_owned()
+    } else {
+        format!("{n} workspace crates depend")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -553,7 +562,14 @@ mod tests {
         assert_eq!(a.duplicates["syn"], ["1.0.109", "2.0.100"]);
         assert_eq!(a.proc_macros, ["serde_derive"]);
         assert!(a.syn_full);
-        let ids: Vec<_> = section(&a).findings.iter().map(|f| f.id).collect();
+        let sec = section(&a);
+        let ids: Vec<_> = sec.findings.iter().map(|f| f.id).collect();
+        // One crate: "depends", not "depend".
+        assert!(sec.findings[0].saw.starts_with("app depends on tokio"));
+        assert_eq!(
+            sec.findings.last().map(|f| f.title.as_str()),
+            Some("1 workspace crate depends on async-trait")
+        );
         assert_eq!(
             ids,
             [

@@ -716,7 +716,10 @@ fn category(ty: &str) -> String {
         .trim_start_matches(['(', '[', '&', '*'])
         .trim_start_matches("dyn ");
     let krate = root.split("::").next().unwrap_or(root);
-    if krate.contains(['<', ' ', '(']) || krate.is_empty() {
+    // `()`, `!` and tuples trim to punctuation: not a crate.
+    if krate.contains(['<', ' ', '('])
+        || !krate.starts_with(|c: char| c.is_alphanumeric() || c == '_')
+    {
         return "other".to_owned();
     }
     format!("types from {krate}")
@@ -1161,6 +1164,10 @@ mod tests {
             category("{coroutine witness@crates/bin/src/main.rs:3:1: 9:2}"),
             "async bodies in bin"
         );
+        // The unit type, never, and tuples aren't from a crate.
+        assert_eq!(category("()"), "other");
+        assert_eq!(category("!"), "other");
+        assert_eq!(category("(u8, a::B)"), "other");
     }
 
     /// 60 async bodies, each proving `Arc<Bot>: Send` and `Bot: Sync`.
