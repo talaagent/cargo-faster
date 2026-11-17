@@ -1,196 +1,127 @@
 //! `cargo faster`: find out why your Rust build is slow and how to make it
 //! faster.
 
-use bpaf::{Parser, construct, long, positional, pure};
+use bpaf::Bpaf;
 use bpaf_kit::log::LogArgs;
-use cargo_faster::context::{Context, capture_for, cargo_bin};
+use bpaf_kit::suggest::UnknownValue;
+use bpaf_kit::{Cli, cmd};
+use cargo_faster::context::{Context, build, cargo_bin};
+use cargo_faster::error::Error;
 use cargo_faster::finding::{Fact, Report, Section};
 use cargo_faster::{cache, checkcost, deps, graph, machine, profile, setup, tests, timings};
-use core::time::Duration;
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-#[derive(Debug, Clone)]
+/// Find out why your Rust build is slow and how to make it faster
+#[derive(Debug, Clone, Bpaf, Cli)]
+#[bpaf(
+    options("faster"),
+    header(
+        "Every finding says what we saw, why it matters, the fix, and a link into the guide:\nhttps://github.com/talaagent/cargo-faster/blob/main/docs/guide.md"
+    )
+)]
+#[cli(log = "warn")]
 struct Opts {
+    /// Print the report as JSON
     json: bool,
+    /// Path to the workspace Cargo.toml
+    #[bpaf(argument("PATH"))]
     manifest_path: Option<PathBuf>,
+    /// Print the builds `timings --run` and `check-cost` would start, without
+    /// starting them
+    dry_run: bool,
+    #[bpaf(external(bpaf_kit::log::log_args))]
+    #[cli(log_args)]
     log: LogArgs,
-    cmd: Cmd,
+    #[bpaf(external(command), fallback(Command::Report))]
+    cmd: Command,
 }
 
-#[derive(Debug, Clone)]
-enum Cmd {
+// Doc comments here are the help text, where backticks would show.
+#[expect(clippy::doc_markdown, reason = "doc comments are --help text")]
+#[derive(Debug, Clone, Bpaf)]
+enum Command {
+    /// A quick overall report: setup, cache, machine, deps, tests, crates (the default)
+    #[bpaf(command)]
     Report,
+    /// Audit profiles, linker, debuginfo, codegen units, jobs and rustflags
+    #[bpaf(command)]
     Setup,
+    /// Check the compiler cache (sccache, kache), incremental and cold worktrees
+    #[bpaf(command)]
     Cache,
+    /// Check load, concurrent builds, memory and disk
+    #[bpaf(command)]
     Machine,
+    /// Check heavy features, duplicate versions and proc macros
+    #[bpaf(command)]
     Deps,
+    /// Check nextest, target runners, thread limits and database-backed tests
+    #[bpaf(command)]
     Tests,
-    Rdeps(Option<String>),
+    /// What rebuilds when a crate changes, and which crates are worth splitting
+    #[bpaf(command)]
+    Rdeps {
+        /// Only this workspace crate
+        #[bpaf(positional("CRATE"))]
+        krate: Option<String>,
+    },
+    /// Read a --timings report: critical path, crates that serialize the build, long codegen
+    #[bpaf(command)]
     Timings {
-        file: Option<PathBuf>,
+        /// Run `cargo check --workspace --timings` first
         run: bool,
-        nice: i32,
+        #[bpaf(external(nice))]
+        nice: Nice,
+        /// A cargo-timing.html report (default: the newest in target/cargo-timings)
+        #[bpaf(positional("FILE"))]
+        file: Option<PathBuf>,
     },
-    CheckCost {
-        profile: Option<PathBuf>,
-        opts: checkcost::Options,
-    },
-}
-
-fn nice() -> impl Parser<i32> {
-    long("nice")
-        .help("Run builds under `nice -n N` (0 to not renice); the box may be shared")
-        .argument::<i32>("N")
-        .fallback(10)
-        .display_fallback()
-}
-
-fn simple(cmd: Cmd, name: &'static str, descr: &'static str) -> impl Parser<Cmd> {
-    pure(cmd).to_options().descr(descr).command(name)
-}
-
-fn command() -> impl Parser<Cmd> {
-    let report = simple(
-        Cmd::Report,
-        "report",
-        "A quick overall report: setup, cache, machine, deps, tests, crates (the default)",
-    );
-    let setup = simple(
-        Cmd::Setup,
-        "setup",
-        "Audit profiles, linker, debuginfo, codegen units, jobs and rustflags",
-    );
-    let cache = simple(
-        Cmd::Cache,
-        "cache",
-        "Check the compiler cache (sccache, kache), incremental and cold worktrees",
-    );
-    let machine = simple(
-        Cmd::Machine,
-        "machine",
-        "Check load, concurrent builds, memory and disk",
-    );
-    let deps = simple(
-        Cmd::Deps,
-        "deps",
-        "Check heavy features, duplicate versions and proc macros",
-    );
-    let tests = simple(
-        Cmd::Tests,
-        "tests",
-        "Check nextest, target runners, thread limits and database-backed tests",
-    );
-    let krate = positional::<String>("CRATE")
-        .help("Only this workspace crate")
-        .optional();
-    let rdeps = construct!(krate)
-        .map(Cmd::Rdeps)
-        .to_options()
-        .descr("What rebuilds when a crate changes, and which crates are worth splitting")
-        .command("rdeps");
-    let run = long("run")
-        .help("Run `cargo check --workspace --timings` first")
-        .switch();
-    let nice_t = nice();
-    let file = positional::<PathBuf>("FILE")
-        .help("A cargo-timing.html report (default: the newest in target/cargo-timings)")
-        .optional();
-    let timings = construct!(run, nice_t, file)
-        .map(|(run, nice, file)| Cmd::Timings { file, run, nice })
-        .to_options()
-        .descr(
-            "Read a --timings report: critical path, crates that serialize the build, long codegen",
+    /// Self-profile type checking of one crate: top queries, trait solving by type and body, proc macros
+    #[bpaf(
+        command,
+        footer(
+            "Uses RUSTC_BOOTSTRAP=1 so a stable rustc accepts -Zself-profile. `-p` picks the crate to profile; cargo itself always builds with --workspace so caches keyed on the package set (kache) stay warm."
         )
-        .command("timings");
-    let package = long("package")
-        .short('p')
-        .help("The workspace member to profile (default: the root package, else the biggest)")
-        .argument::<String>("NAME")
-        .optional();
-    let bin = long("bin")
-        .help("Profile this binary target instead of the library")
-        .argument::<String>("NAME")
-        .optional();
-    let keep = long("keep")
-        .help("Write the profile into DIR and keep it")
-        .argument::<PathBuf>("DIR")
-        .optional();
-    let nice_c = nice();
-    let profile = long("profile")
-        .help("Analyze an existing .mm_profdata file instead of building")
-        .argument::<PathBuf>("FILE")
-        .optional();
-    let cargo_args = positional::<String>("CARGO_ARGS")
-        .help("Extra `cargo check` arguments, after `--` (e.g. -- --features x)")
-        .strict()
-        .many();
-    let check_cost = construct!(package, bin, keep, nice_c, profile, cargo_args)
-        .map(|(package, bin, keep, nice, profile, cargo_args)| Cmd::CheckCost {
-            profile,
-            opts: checkcost::Options { package, bin, cargo_args, nice, keep },
-        })
-        .to_options()
-        .descr("Self-profile type checking of one crate: top queries, trait solving by type and body, proc macros")
-        .footer("Uses RUSTC_BOOTSTRAP=1 so a stable rustc accepts -Zself-profile. `-p` picks the crate to profile; cargo itself always builds with --workspace so caches keyed on the package set (kache) stay warm.")
-        .command("check-cost");
-    construct!([
-        report, setup, cache, machine, deps, tests, rdeps, timings, check_cost
-    ])
-    .fallback(Cmd::Report)
+    )]
+    CheckCost {
+        /// The workspace member to profile (default: the root package, else the biggest)
+        #[bpaf(short('p'), long, argument("NAME"))]
+        package: Option<String>,
+        /// Profile this binary target instead of the library
+        #[bpaf(argument("NAME"))]
+        bin: Option<String>,
+        /// Write the profile into DIR and keep it
+        #[bpaf(argument("DIR"))]
+        keep: Option<PathBuf>,
+        #[bpaf(external(nice))]
+        nice: Nice,
+        /// Analyze an existing .mm_profdata file instead of building
+        #[bpaf(argument("FILE"))]
+        profile: Option<PathBuf>,
+        /// Extra `cargo check` arguments, after `--` (e.g. -- --features x)
+        #[bpaf(positional("CARGO_ARGS"), strict, many)]
+        cargo_args: Vec<String>,
+    },
 }
 
-fn options() -> bpaf::OptionParser<Opts> {
-    let json = long("json").help("Print the report as JSON").switch();
-    let manifest_path = long("manifest-path")
-        .help("Path to the workspace Cargo.toml")
-        .argument::<PathBuf>("PATH")
-        .optional();
-    let log = bpaf_kit::log::log_args();
-    let cmd = command();
-    construct!(Opts { json, manifest_path, log, cmd })
-        .to_options()
-        .descr("Find out why your Rust build is slow and how to make it faster")
-        .header("Every finding says what we saw, why it matters, the fix, and a link into the guide:\nhttps://github.com/talaagent/cargo-faster/blob/main/docs/guide.md")
+// `--nice N`, for the subcommands that build. No doc comment: bpaf would
+// make it a help section of its own.
+#[derive(Debug, Clone, Copy, Bpaf)]
+struct Nice {
+    /// Run builds under `nice -n N` (0 to not renice); the box may be shared
+    #[bpaf(long("nice"), argument("N"), fallback(10), display_fallback)]
+    n: i32,
 }
 
 fn main() -> ExitCode {
-    let app = bpaf_kit::App::new(options(), bpaf_kit::build_info!());
-    let mut args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    // `cargo faster ...` runs us as `cargo-faster faster ...`.
-    if args.first().is_some_and(|a| a == "faster") {
-        args.remove(0);
+    answer_cargo_meta_flags();
+    let opts = Opts::cli();
+    if opts.dry_run {
+        cmd::set_dry_run(true);
     }
-    if args.len() == 1 && args[0] == "--man" {
-        return print(&bpaf_kit::man::render(app.parser(), app.info()));
-    }
-    if let Some(verbose) = bpaf_kit::version::version_request(&args) {
-        let info = app.info().clone().with_override();
-        return print(&if verbose {
-            info.verbose().to_string()
-        } else {
-            format!("{} {}\n", info.name, info.short())
-        });
-    }
-    let strs: Vec<String> = args
-        .iter()
-        .map(|a| a.to_string_lossy().into_owned())
-        .collect();
-    let refs: Vec<&str> = strs.iter().map(String::as_str).collect();
-    let opts = match app
-        .parser()
-        .run_inner(bpaf::Args::from(&refs[..]).set_name("cargo-faster"))
-    {
-        Ok(o) => o,
-        Err(e) => {
-            e.print_message(100);
-            let code = e.exit_code();
-            return ExitCode::from(u8::try_from(code).unwrap_or(1));
-        }
-    };
-    let _ = bpaf_kit::log::init("warn", &opts.log);
     match run(&opts) {
         Ok(report) => {
             let text = if opts.json {
@@ -200,11 +131,38 @@ fn main() -> ExitCode {
             };
             print(&text)
         }
+        Err(Error::DryRun(msg)) => {
+            eprintln!("cargo faster: {msg}");
+            ExitCode::SUCCESS
+        }
         Err(e) => {
-            eprintln!("cargo faster: {e}");
+            eprintln!("cargo faster: error[{}]: {e}", e.code());
             ExitCode::FAILURE
         }
     }
+}
+
+/// `cargo faster ...` runs us as `cargo-faster faster ...`. `Opts::cli()`
+/// answers `--man` and `--version [--verbose]` only as the first argument,
+/// so answer them here when they follow `faster`.
+fn answer_cargo_meta_flags() {
+    let args: Vec<OsString> = std::env::args_os().skip(1).take(4).collect();
+    let Some(rest) = args.strip_prefix(&[OsString::from("faster")]) else {
+        return;
+    };
+    let text = if rest.len() == 1 && rest[0] == bpaf_kit::man::FLAG {
+        bpaf_kit::man::render(&Opts::parser(), &bpaf_kit::build_info!())
+    } else if let Some(verbose) = bpaf_kit::version::version_request(rest) {
+        let info = bpaf_kit::build_info!().with_override();
+        if verbose {
+            info.verbose().to_string()
+        } else {
+            format!("{} {}\n", info.name, info.short())
+        }
+    } else {
+        return;
+    };
+    std::process::exit(i32::from(print(&text) != ExitCode::SUCCESS));
 }
 
 fn print(s: &str) -> ExitCode {
@@ -215,9 +173,9 @@ fn print(s: &str) -> ExitCode {
     }
 }
 
-fn run(opts: &Opts) -> Result<Report, String> {
+fn run(opts: &Opts) -> Result<Report, Error> {
     // An explicit profile file needs no workspace.
-    if let Cmd::CheckCost {
+    if let Command::CheckCost {
         profile: Some(file),
         ..
     } = &opts.cmd
@@ -229,7 +187,7 @@ fn run(opts: &Opts) -> Result<Report, String> {
         });
     }
     // So does an explicit timings report.
-    if let Cmd::Timings {
+    if let Command::Timings {
         file: Some(file),
         run: false,
         ..
@@ -248,58 +206,92 @@ fn run(opts: &Opts) -> Result<Report, String> {
     };
     let m = ctx.metadata.clone().unwrap_or_default();
     match &opts.cmd {
-        Cmd::Report => full_report(&ctx, &m, &mut report),
-        Cmd::Setup => report
+        Command::Report => full_report(&ctx, &m, &mut report),
+        Command::Setup => report
             .sections
             .push(setup::check(&ctx, &setup::Tools::detect(&ctx))),
-        Cmd::Cache => report
+        Command::Cache => report
             .sections
             .push(cache::check(&ctx, &cache::Inputs::gather(&ctx))),
-        Cmd::Machine => report
+        Command::Machine => report
             .sections
             .push(machine::check(&machine::Inputs::gather(
                 &ctx,
                 machine::cache_dir(&ctx),
             ))),
-        Cmd::Deps => report.sections.push(deps::section(&deps::analyze(&m))),
-        Cmd::Tests => report
+        Command::Deps => report.sections.push(deps::section(&deps::analyze(&m))),
+        Command::Tests => report
             .sections
             .push(tests::check(&ctx, &tests::Inputs::gather(&ctx))),
-        Cmd::Rdeps(only) => report
-            .sections
-            .push(graph::section(&graph::gather(&m), only.as_deref())),
-        Cmd::Timings { file, run, nice } => {
+        Command::Rdeps { krate } => report.sections.push(rdeps_section(&m, krate.as_deref())?),
+        Command::Timings { file, run, nice } => {
             report
                 .sections
-                .push(timings_section(&ctx, file.as_deref(), *run, *nice)?);
+                .push(timings_section(&ctx, file.as_deref(), *run, nice.n)?);
         }
-        Cmd::CheckCost { opts: o, .. } => {
-            let r = checkcost::run(&ctx, o)?;
-            let mut s = profile_section(&r.profile, Some(&r.crate_name))?;
-            s.facts.insert(
-                0,
-                Fact {
-                    key: "rustc wall time".into(),
-                    value: cargo_faster::fmt::secs(r.wall_secs),
-                },
-            );
-            if r.failed {
-                s.fact(
-                    "note",
-                    "rustc reported errors; the profile covers what it got through",
-                );
-            }
-            if o.keep.is_none()
-                && let Some(dir) = r.profile.parent()
-            {
-                let _ = std::fs::remove_dir_all(dir);
-            } else {
-                s.fact("profile", r.profile.display().to_string());
-            }
-            report.sections.push(s);
+        Command::CheckCost {
+            package,
+            bin,
+            keep,
+            nice,
+            profile: _,
+            cargo_args,
+        } => {
+            let o = checkcost::Options {
+                package: package.clone(),
+                bin: bin.clone(),
+                cargo_args: cargo_args.clone(),
+                nice: nice.n,
+                keep: keep.clone(),
+            };
+            report.sections.push(check_cost_section(&ctx, &o)?);
         }
     }
     Ok(report)
+}
+
+fn rdeps_section(
+    m: &cargo_faster::context::Metadata,
+    krate: Option<&str>,
+) -> Result<Section, Error> {
+    let crates = graph::gather(m);
+    if let Some(k) = krate
+        && !crates.iter().any(|c| graph::is_named(c, k))
+    {
+        return Err(UnknownValue::new(
+            "workspace crate",
+            k,
+            crates.iter().map(|c| c.name.as_str()),
+        )
+        .into());
+    }
+    Ok(graph::section(&crates, krate))
+}
+
+fn check_cost_section(ctx: &Context, o: &checkcost::Options) -> Result<Section, Error> {
+    let r = checkcost::run(ctx, o)?;
+    let mut s = profile_section(&r.profile, Some(&r.crate_name))?;
+    s.facts.insert(
+        0,
+        Fact {
+            key: "rustc wall time".into(),
+            value: cargo_faster::fmt::secs(r.wall_secs),
+        },
+    );
+    if r.failed {
+        s.fact(
+            "note",
+            "rustc reported errors; the profile covers what it got through",
+        );
+    }
+    if o.keep.is_none()
+        && let Some(dir) = r.profile.parent()
+    {
+        let _ = std::fs::remove_dir_all(dir);
+    } else {
+        s.fact("profile", r.profile.display().to_string());
+    }
+    Ok(s)
 }
 
 fn full_report(ctx: &Context, m: &cargo_faster::context::Metadata, report: &mut Report) {
@@ -326,7 +318,7 @@ fn full_report(ctx: &Context, m: &cargo_faster::context::Metadata, report: &mut 
         Ok(s) => report.sections.push(s),
         Err(e) => report.skipped.push(Fact {
             key: "timings".into(),
-            value: e,
+            value: e.to_string(),
         }),
     }
     report.skipped.push(Fact {
@@ -335,7 +327,7 @@ fn full_report(ctx: &Context, m: &cargo_faster::context::Metadata, report: &mut 
     });
 }
 
-fn profile_section(file: &Path, crate_name: Option<&str>) -> Result<Section, String> {
+fn profile_section(file: &Path, crate_name: Option<&str>) -> Result<Section, Error> {
     let name = crate_name.map_or_else(|| checkcost::crate_from_file(file), str::to_owned);
     eprintln!("cargo faster: analyzing {}", file.display());
     let p = checkcost::load(file)?;
@@ -349,24 +341,12 @@ fn timings_section(
     file: Option<&Path>,
     run: bool,
     nice: i32,
-) -> Result<Section, String> {
+) -> Result<Section, Error> {
     if run {
-        let mut args: Vec<String> = Vec::new();
-        let cargo = cargo_bin(&ctx.env);
-        let prog = if nice > 0 {
-            args.extend(["-n".to_owned(), nice.to_string(), cargo]);
-            "nice".to_owned()
-        } else {
-            cargo
-        };
-        args.extend(["check", "--workspace", "--timings"].map(String::from));
-        eprintln!("cargo faster: running `{prog} {}`", args.join(" "));
-        let out = capture_for(
-            &prog,
-            &args,
-            Some(ctx.root()),
-            Duration::from_secs(4 * 3600),
-        )?;
+        let out = build(ctx, nice, cargo_bin(&ctx.env))
+            .args(["check", "--workspace", "--timings"])
+            .current_dir(ctx.root())
+            .output()?;
         if !out.success() {
             eprintln!(
                 "cargo faster: the build failed; reading whatever timings it wrote\n{}",
@@ -376,13 +356,12 @@ fn timings_section(
     }
     let path = match file {
         Some(f) => f.to_path_buf(),
-        None => timings::newest_report(&ctx.target_dir())
-            .ok_or("no cargo-timing.html in target/cargo-timings; run `cargo build --timings` or `cargo faster timings --run`")?,
+        None => timings::newest_report(&ctx.target_dir()).ok_or(Error::NoTimings)?,
     };
     timings_file_section(&path)
 }
 
-fn timings_file_section(path: &Path) -> Result<Section, String> {
+fn timings_file_section(path: &Path) -> Result<Section, Error> {
     let html =
         std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
     let t = timings::Timings::parse_html(&html)?;
