@@ -142,6 +142,8 @@ Here's what it does, so you know what you're running:
 
 `-Z` flags are normally nightly-only. `cargo faster` sets `RUSTC_BOOTSTRAP=1` so your stable compiler accepts them. That's an unstable escape hatch, and the report says so on a `measured with` line, so that nobody mistakes these numbers for an ordinary build. Profiling your crate with the same compiler you normally use matters: a nightly might have a different trait solver.
 
+The profiler costs time of its own: at the end of the run it turns every recorded query key into a string (`self_profile_alloc_query_strings`), which takes seconds with `args` on a big crate. That isn't compile time, so it's left out of the query table, the profiled time and every percentage, and shown once on a `profiler overhead` line. The `rustc wall time` line is the replay as measured from outside, overhead included.
+
 Incremental compilation is off so the profile shows the full cost of checking the crate, not whatever happened to be cached. The wrapper is off so a cache can't hand back a stored result instead of compiling.
 
 Options:
