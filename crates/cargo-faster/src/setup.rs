@@ -27,7 +27,18 @@ impl Tools {
     }
 }
 
-/// All rustflags in effect, from the environment or config, and where.
+/// `CARGO_TARGET_<TRIPLE>_<KEY>`, the environment form of
+/// `target.<triple>.<key>`.
+fn target_env(host: &str, key: &str) -> String {
+    format!(
+        "CARGO_TARGET_{}_{key}",
+        host.to_uppercase().replace(['-', '.'], "_")
+    )
+}
+
+/// All rustflags in effect and where they came from, in cargo's order:
+/// `CARGO_ENCODED_RUSTFLAGS`, `RUSTFLAGS`, then target rustflags, then
+/// build rustflags.
 fn rustflags(ctx: &Context) -> (Vec<String>, String) {
     if let Some(enc) = ctx.var("CARGO_ENCODED_RUSTFLAGS") {
         return (
@@ -41,17 +52,42 @@ fn rustflags(ctx: &Context) -> (Vec<String>, String) {
             "RUSTFLAGS".into(),
         );
     }
-    if let Some(f) = ctx.var("CARGO_BUILD_RUSTFLAGS") {
-        return (
-            f.split_whitespace().map(str::to_owned).collect(),
-            "CARGO_BUILD_RUSTFLAGS".into(),
+    config_rustflags(ctx)
+}
+
+/// The rustflags from cargo config and its `CARGO_*` environment forms:
+/// `target.<triple>.rustflags` (and `CARGO_TARGET_<TRIPLE>_RUSTFLAGS`,
+/// merged after the config's) if any, else `build.rustflags` (and
+/// `CARGO_BUILD_RUSTFLAGS`). Sources are listed in order, comma-separated.
+fn config_rustflags(ctx: &Context) -> (Vec<String>, String) {
+    let host = &ctx.rustc.host;
+    let with_env = |cfg: Vec<(String, std::path::PathBuf)>, var: String| {
+        let mut out: Vec<(String, String)> = cfg
+            .into_iter()
+            .map(|(f, p)| (f, p.display().to_string()))
+            .collect();
+        if let Some(v) = ctx.var(&var) {
+            out.extend(v.split_whitespace().map(|f| (f.to_owned(), var.clone())));
+        }
+        out
+    };
+    let mut flags = with_env(
+        ctx.config.target_rustflags(host),
+        target_env(host, "RUSTFLAGS"),
+    );
+    if flags.is_empty() {
+        flags = with_env(
+            ctx.config.build_rustflags(),
+            "CARGO_BUILD_RUSTFLAGS".to_owned(),
         );
     }
-    let flags = ctx.config.rustflags(&ctx.rustc.host);
-    let src = flags
-        .first()
-        .map(|(_, f)| f.display().to_string())
-        .unwrap_or_default();
+    let mut srcs: Vec<&str> = Vec::new();
+    for (_, src) in &flags {
+        if !srcs.contains(&src.as_str()) {
+            srcs.push(src);
+        }
+    }
+    let src = srcs.join(", ");
     (flags.into_iter().map(|(f, _)| f).collect(), src)
 }
 
@@ -86,33 +122,36 @@ fn debug_level(v: &toml::Value) -> String {
 }
 
 /// Which linker is in use, and how we know.
-fn linker(ctx: &Context, opts: &[String]) -> (String, String) {
+fn linker(ctx: &Context, opts: &[String], flags_src: &str) -> (String, String) {
     for o in opts {
         if let Some(l) = o.strip_prefix("Clink-arg=-fuse-ld=") {
-            return (l.into(), "rustflags".into());
+            return (l.into(), flags_src.into());
         }
         if let Some(p) = o.strip_prefix("Clink-arg=--ld-path=") {
-            return (p.rsplit('/').next().unwrap_or(p).into(), "rustflags".into());
+            return (p.rsplit('/').next().unwrap_or(p).into(), flags_src.into());
         }
         if let Some(l) = o.strip_prefix("Clinker-flavor=") {
-            return (l.into(), "rustflags".into());
+            return (l.into(), flags_src.into());
         }
         if o.starts_with("Clink-self-contained") || o.starts_with("Zlinker-features") {
-            return ("rust-lld".into(), "rustflags".into());
+            return ("rust-lld".into(), flags_src.into());
         }
     }
     let host = &ctx.rustc.host;
-    if let Some((l, f)) = ctx.config.get_str(&format!("target.{host}.linker")) {
+    let linker_env = target_env(host, "LINKER");
+    let configured = ctx.var(&linker_env).map_or_else(
+        || {
+            ctx.config
+                .get_str(&format!("target.{host}.linker"))
+                .map(|(l, f)| (l, f.display().to_string()))
+        },
+        |l| Some((l, linker_env.clone())),
+    );
+    if let Some((l, src)) = configured {
         if l.contains("mold") || l.contains("wild") {
-            return (
-                l.rsplit('/').next().unwrap_or(l).into(),
-                f.display().to_string(),
-            );
+            return (l.rsplit('/').next().unwrap_or(l).into(), src);
         }
-        return (
-            format!("{l} (default ld unless it passes -fuse-ld)"),
-            f.display().to_string(),
-        );
+        return (format!("{l} (default ld unless it passes -fuse-ld)"), src);
     }
     if host == "x86_64-unknown-linux-gnu" && ctx.rustc.version() >= (1, 90) {
         return (
@@ -186,7 +225,7 @@ pub fn check(ctx: &Context, tools: &Tools) -> Section {
     }
 
     // Linker.
-    let (link, link_src) = linker(ctx, &opts);
+    let (link, link_src) = linker(ctx, &opts, &flags_src);
     s.fact("linker", format!("{link} ({link_src})"));
     let fast = ["mold", "wild", "lld", "rust-lld", "ld.lld"]
         .iter()
@@ -255,10 +294,11 @@ pub fn check(ctx: &Context, tools: &Tools) -> Section {
     if !flags.is_empty() {
         s.fact("rustflags", format!("{} ({flags_src})", flags.join(" ")));
     }
-    if ctx.var("RUSTFLAGS").is_some() && !ctx.config.rustflags(&ctx.rustc.host).is_empty() {
+    let (shadowed, shadowed_src) = config_rustflags(ctx);
+    if ctx.var("RUSTFLAGS").is_some() && !shadowed.is_empty() {
         f.push(
             Finding::new("rustflags-env-overrides-config", Severity::Medium, "RUSTFLAGS overrides the rustflags in your cargo config", "linking")
-                .saw("RUSTFLAGS is set in the environment, and cargo config also sets rustflags. Cargo uses only one source: the environment wins, and the config flags are ignored.")
+                .saw(format!("RUSTFLAGS is set in the environment, and rustflags are also set in {shadowed_src} (`{}`). Cargo uses only one source: RUSTFLAGS wins, and those are ignored.", shadowed.join(" ")))
                 .why("Changing rustflags changes every crate's fingerprint. Builds with and without the variable (a terminal vs your editor, CI vs local) rebuild the whole dependency graph each time they alternate.")
                 .fix("Put the flags in .cargo/config.toml only, and unset RUSTFLAGS. Make sure rust-analyzer and your shell see the same environment."),
         );
@@ -394,5 +434,75 @@ mod tests {
         );
         c.env.insert("RUSTFLAGS".into(), "-C debuginfo=0".into());
         assert!(ids(&check(&c, &Tools::default())).contains(&"rustflags-env-overrides-config"));
+    }
+
+    fn linker_fact(s: &Section) -> String {
+        s.facts
+            .iter()
+            .find(|f| f.key == "linker")
+            .map(|f| f.value.clone())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn target_rustflags_from_env() {
+        let mut c = ctx("[profile.dev]\ndebug = 0\n", "");
+        c.env.insert(
+            "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS".into(),
+            "-C link-arg=-fuse-ld=mold".into(),
+        );
+        let s = check(
+            &c,
+            &Tools {
+                linkers: vec!["mold".into()],
+                cpus: 32,
+            },
+        );
+        assert!(ids(&s).is_empty(), "{:?}", ids(&s));
+        assert_eq!(
+            linker_fact(&s),
+            "mold (CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS)"
+        );
+    }
+
+    #[test]
+    fn build_rustflags_ignored_when_target_sets_them() {
+        let mut c = ctx(
+            "[profile.dev]\ndebug = 0\n",
+            "[build]\nrustflags = [\"-C\", \"link-arg=-fuse-ld=lld\"]\n",
+        );
+        c.env.insert(
+            "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS".into(),
+            "-C link-arg=-fuse-ld=mold".into(),
+        );
+        assert_eq!(
+            linker_fact(&check(&c, &Tools::default())),
+            "mold (CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS)"
+        );
+        // Without target rustflags, CARGO_BUILD_RUSTFLAGS joins build.rustflags.
+        c.env.clear();
+        c.env.insert(
+            "CARGO_BUILD_RUSTFLAGS".into(),
+            "-C target-cpu=native".into(),
+        );
+        let s = check(&c, &Tools::default());
+        assert_eq!(
+            linker_fact(&s),
+            "lld (/w/.cargo/config.toml, CARGO_BUILD_RUSTFLAGS)"
+        );
+        assert!(ids(&s).contains(&"target-cpu-native"));
+    }
+
+    #[test]
+    fn target_linker_from_env() {
+        let mut c = ctx("[profile.dev]\ndebug = 0\n", "");
+        c.env.insert(
+            "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER".into(),
+            "/nix/store/x/bin/wild".into(),
+        );
+        assert_eq!(
+            linker_fact(&check(&c, &Tools::default())),
+            "wild (CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER)"
+        );
     }
 }
