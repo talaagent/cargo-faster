@@ -235,32 +235,16 @@ impl Report {
 }
 
 /// Render a borderless table for the text output and `details`
-/// ([`bpaf_kit::table::plain`]): two spaces between columns, numbers lined
-/// up on the right, text on the left, the last column left as is.
+/// ([`bpaf_kit::table::compact`]): two spaces between columns, numbers
+/// lined up on the right, text on the left, the last column left as is,
+/// each line ending in a newline.
 #[must_use]
 pub fn table(headers: &[&str], rows: &[Vec<String>]) -> String {
-    use bpaf_kit::table::comfy_table::{Cell, CellAlignment};
-    let last = headers.len().saturating_sub(1);
-    let mut t = bpaf_kit::table::plain(headers.iter().copied());
+    let mut t = bpaf_kit::table::compact(headers.iter().copied());
     for row in rows {
-        t.add_row(row.iter().enumerate().map(|(i, cell)| {
-            let c = Cell::new(cell);
-            if i < last && cell.starts_with(|c: char| c.is_ascii_digit()) {
-                c.set_alignment(CellAlignment::Right)
-            } else {
-                c
-            }
-        }));
+        t.add_row(row);
     }
-    for (i, column) in t.column_iter_mut().enumerate() {
-        column.set_padding((0, if i == last { 0 } else { 2 }));
-    }
-    let mut out = String::new();
-    for line in t.lines() {
-        out.push_str(line.trim_end());
-        out.push('\n');
-    }
-    out
+    t.to_string() + "\n"
 }
 
 #[cfg(test)]
