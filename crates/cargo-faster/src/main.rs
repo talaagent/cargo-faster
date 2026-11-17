@@ -154,7 +154,7 @@ fn run(opts: &Opts) -> Result<Report, Error> {
     {
         return Ok(Report {
             workspace: None,
-            sections: vec![profile_section(file, None)?],
+            sections: vec![profile_section(file, None, &[])?],
             skipped: Vec::new(),
         });
     }
@@ -244,7 +244,8 @@ fn rdeps_section(
 
 fn check_cost_section(ctx: &Context, o: &checkcost::Options) -> Result<Section, Error> {
     let r = checkcost::run(ctx, o)?;
-    let mut s = profile_section(&r.profile, Some(&r.crate_name))?;
+    let (_, module_lines) = graph::count_lines(&r.src_dir);
+    let mut s = profile_section(&r.profile, Some(&r.crate_name), &module_lines)?;
     s.facts.insert(
         0,
         Fact {
@@ -303,11 +304,15 @@ fn full_report(ctx: &Context, m: &cargo_faster::context::Metadata, report: &mut 
     });
 }
 
-fn profile_section(file: &Path, crate_name: Option<&str>) -> Result<Section, Error> {
+fn profile_section(
+    file: &Path,
+    crate_name: Option<&str>,
+    module_lines: &[(String, usize)],
+) -> Result<Section, Error> {
     let name = crate_name.map_or_else(|| checkcost::crate_from_file(file), str::to_owned);
     eprintln!("cargo faster: analyzing {}", file.display());
     let p = checkcost::load(file)?;
-    let mut s = profile::section(&profile::analyze(&p), &name);
+    let mut s = profile::section(&profile::analyze(&p), &name, module_lines);
     s.fact("measured with", "RUSTC_BOOTSTRAP=1 -Zself-profile -Zself-profile-events=default,args, CARGO_INCREMENTAL=0, no RUSTC_WRAPPER");
     Ok(s)
 }

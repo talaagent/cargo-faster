@@ -491,6 +491,8 @@ It doesn't help when the pieces end up depending on each other in a chain. If `b
 
 So before splitting, profile. If the time is spread fairly evenly across many functions and modules, and you can draw a line through the crate where the two sides don't need each other, a split is likely to pay off. If the time is concentrated, fix the concentration.
 
+`cargo faster check-cost` answers this directly. Its details have two tables: **time by module**, which adds up each body's type checking, borrow checking and MIR building (closures and async blocks count towards the function they're in) by top-level module, and **bodies by total frontend time**, which lists the most expensive items. When trait solving is small, no single body stands out, and most of the profile is many ordinary bodies, it reports `check-time-is-crate-size` and names the top modules with their share, item count and line count. Those modules are where to draw the first line. Times are self time, so a module's share is what moving it out would take off this crate's check, as long as nothing else in the crate needs to be re-checked because of the move.
+
 ## Dependencies and features
 
 Most of the code you compile on a cold build isn't yours. A few habits keep that under control.

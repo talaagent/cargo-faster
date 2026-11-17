@@ -206,6 +206,7 @@ Here's how to read it, from the top:
 - **trait solving by what is being proved** groups the solver's time by the crate that defines the type in each predicate. Here, proofs about `matrix_sdk` types are 4 seconds of a crate that doesn't define any of them. That's the sign of a heavy type from a dependency leaking into your async code.
 - **most expensive obligations** lists single predicates. The `count` and `bodies` columns are the ones to look at: `Bot: Send` was proved 54 times, in 47 different function bodies. Each proof costs little, but the compiler doesn't share the answer between bodies, so you pay it again and again.
 - **bodies doing the most trait solving** attributes the solver's time to the function that asked for it. This is where you start editing. In this case, one `invite` method is a fifth of the crate.
+- **time by module** adds up the self time of every body query (`typeck_root`, `mir_borrowck`, `mir_built` and friends) by top-level module, with closures and async blocks counted towards the item they're in. **bodies by total frontend time** is the same per item. When no table has a hot spot and these two show the time spread over many items, the crate is slow because it is big: the `check-time-is-crate-size` finding names the modules to [split out](guide.md#splitting-a-big-crate) first, with their line counts when the profile came from a live run.
 
 The findings then put it together:
 
