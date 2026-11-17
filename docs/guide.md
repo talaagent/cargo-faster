@@ -168,7 +168,7 @@ Some query names you'll see often, and what they mean:
 
 `crox` converts a profile into the Chrome trace format, which you can open in `chrome://tracing` or in [Perfetto](https://ui.perfetto.dev) to see the nesting on a timeline. `flamegraph` produces a flame graph SVG. Both are useful for seeing which function bodies dominate, especially with `args` recorded, because each event carries the name of the function (or the predicate) it was working on. With a few lines of `jq` over the `crox` output you can group `evaluate_obligation` events by predicate, or group `check_coroutine_obligations` by the function they were checking. That's exactly how the case study found its cause.
 
-`cargo faster check-cost <crate>` runs this whole procedure for one crate, prints the top queries, and attributes trait-solving time to the function bodies and types involved.
+`cargo faster check-cost <crate>` runs this whole procedure for one crate, prints the top queries, and attributes trait-solving time to the function bodies and types involved. `--tests` profiles the crate's `--test` build instead: the unit-test crate with its `#[cfg(test)]` modules, which is what `cargo test` rebuilds after an edit and is often much bigger than the library. `--test NAME` profiles an integration test.
 
 ### Counting LLVM lines
 

@@ -57,6 +57,8 @@ If `cargo faster` isn't installed: `cargo install --locked cargo-faster`, or
    It runs on stable via `RUSTC_BOOTSTRAP=1`, with incremental off and no wrapper; tell the
    user that's how the numbers were measured. On a big crate under load it can take minutes:
    run it once, keep the profile, re-analyze it as often as you like.
+   When the slow part is `cargo test` rebuilding after an edit, add `--tests`: that profiles the
+   library's `--test` build (the header says `(lib, --test)`), which can be twice the plain lib.
 
 5. **Fix the top item, then measure again** the same way, back to back, under similar load.
    Report before and after numbers for the same unit, not just the wall time.
