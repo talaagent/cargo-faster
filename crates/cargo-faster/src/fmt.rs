@@ -1,8 +1,10 @@
 //! Small formatting helpers shared by the checks.
 
 /// Seconds with a precision that suits the size: `0.004s`, `1.23s`, `312s`.
+/// A value that rounds to zero prints as `0.000s`, never `-0.000s`.
 #[must_use]
 pub fn secs(s: f64) -> String {
+    let s = if s.abs() < 0.0005 { 0.0 } else { s };
     if s >= 100.0 {
         format!("{s:.0}s")
     } else if s >= 10.0 {
@@ -31,14 +33,16 @@ pub fn bytes(b: u64) -> String {
     }
 }
 
-/// A percentage of `part` in `whole`, `0` when `whole` is zero.
+/// A percentage of `part` in `whole`, `0` when `whole` is zero. A result
+/// that would print as `-0` (rounding noise in a sum of self times) is 0.
 #[must_use]
 pub fn pct(part: f64, whole: f64) -> f64 {
-    if whole > 0.0 {
+    let p = if whole > 0.0 {
         100.0 * part / whole
     } else {
         0.0
-    }
+    };
+    if p < 0.0 && p > -0.5 { 0.0 } else { p }
 }
 
 /// Shorten `s` to at most `max` characters, keeping both ends.
@@ -90,6 +94,10 @@ mod tests {
         assert_eq!(secs(12.34), "12.3s");
         assert_eq!(secs(1.234), "1.23s");
         assert_eq!(secs(0.0042), "0.004s");
+        // Rounding noise in a difference of sums is zero, not -0.
+        assert_eq!(secs(-0.0001), "0.000s");
+        assert_eq!(format!("{:.0}%", pct(-0.0001, 10.0)), "0%");
+        assert_eq!(format!("{:.0}%", pct(-5.0, 10.0)), "-50%");
         assert_eq!(bytes(512), "512 B");
         assert_eq!(bytes(3 * 1024 * 1024 * 1024 / 2), "1.5 GiB");
         assert_eq!(ellipsize("abcdefghijklmnopqrstuvwxyz", 13), "abcdef...wxyz");
