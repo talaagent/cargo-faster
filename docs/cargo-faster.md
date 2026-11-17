@@ -325,6 +325,7 @@ It finds:
 - `tokio` with the `full` feature asked for by a workspace crate;
 - `syn` with `full`, and more than one major version of `syn`;
 - duplicate versions of heavy crates;
+- test-only features (`testing`, `test-util`, `mock*`, `fake*`) enabled from `[dependencies]` instead of `[dev-dependencies]`, which compile test helpers into every normal build ([Keep test features out of normal builds](guide.md#keep-test-features-out-of-normal-builds));
 - proc macros;
 - `#[async_trait]` attributes counted in the workspace's sources (not its manifests), the traits they define, and how many of those are held as `dyn`. Ten or more uses is `[medium]`; `check-cost` then tells you what they actually cost.
 

@@ -538,6 +538,25 @@ You can't always fix duplicates, since you don't control your dependencies' requ
 
 `cargo faster deps` reports heavy features, duplicate versions, and proc macros in your graph. Duplicate versions are listed in semver order, oldest first, since the oldest copy is usually the one to chase.
 
+### Keep test features out of normal builds
+
+Workspaces often give a crate a `testing` (or `test-util`, `mock`, `fake`) feature that compiles in test helpers: fake servers, recorded fixtures, builders for test data. Enable it from `[dependencies]` and, since features are unified across the build, every normal build of that crate gets the helpers, and so does everything that depends on it. An edit to a test helper then rebuilds libraries and the binary on top instead of only test targets. tokio's `test-util` in `[dependencies]` is the same mistake, and it also lets production code pause time.
+
+Ask for the feature where the tests are:
+
+```toml
+# crates/app/Cargo.toml
+[dependencies]
+app-core = { workspace = true }
+
+[dev-dependencies]
+app-core = { workspace = true, features = ["testing"] }
+```
+
+cargo enables dev-dependency features only when it builds that crate's tests, examples and benches. If one crate's tests need another crate's helpers transitively, give the middle crate its own `testing = ["app-core/testing"]` feature and turn it on from `[dev-dependencies]` too. The tradeoff: `cargo build` and `cargo test` now resolve different feature sets for those crates, so each is compiled once per set. That's one extra build of a few crates, against rebuilding the whole stack whenever a helper changes.
+
+`cargo faster deps` flags non-optional normal and build dependencies that enable features named `testing`, `test-*`, `mock*` or `fake*`, and skips workspace crates that are themselves test support (`*-test-utils`, `*-testing`). A test feature in the root's `[workspace.dependencies]` is reported once, with the number of crates that inherit it: every one of them gets it in normal builds, so take it out there and add it to the `[dev-dependencies]` entries that need it. If a feature with such a name is needed at runtime, it isn't test-only; leave it.
+
 ## Caching
 
 The fastest compilation is the one that doesn't happen. Rust has several layers of caching, and they behave in ways that aren't always obvious.
@@ -993,7 +1012,7 @@ Everything in this guide can be done by hand with Cargo, `rustc`, and the tools 
 - `cargo faster setup` audits [linking](#linking) and [profile settings](#profile-settings).
 - `cargo faster cache` checks [caching](#caching) and cold worktrees.
 - `cargo faster machine` checks [the machine](#the-machine) before you believe any timing.
-- `cargo faster deps` looks for [heavy features and duplicate versions](#dependencies-and-features).
+- `cargo faster deps` looks for [heavy features and duplicate versions](#dependencies-and-features), and [test features in normal builds](#keep-test-features-out-of-normal-builds).
 - `cargo faster tests` checks how your [test suite](#test-suites) runs.
 - `cargo faster rdeps` shows [rebuild fan-out](#rebuild-fan-out) and crates worth [splitting](#splitting-a-big-crate).
 
