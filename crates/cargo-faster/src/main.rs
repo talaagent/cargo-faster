@@ -8,10 +8,13 @@ use bpaf_kit::{Cli, cmd};
 use cargo_faster::context::{Context, build, cargo_bin};
 use cargo_faster::error::Error;
 use cargo_faster::finding::{Fact, Report, Section};
-use cargo_faster::{cache, checkcost, deps, graph, machine, profile, setup, tests, timings};
+use cargo_faster::{
+    cache, checkcost, deps, graph, machine, profile, setup, testrun, tests, timings,
+};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::{Instant, SystemTime};
 
 /// Find out why your Rust build is slow and how to make it faster
 #[derive(Debug, Clone, Bpaf, Cli)]
@@ -28,7 +31,7 @@ struct Opts {
     /// Path to the workspace Cargo.toml
     #[bpaf(argument("PATH"))]
     manifest_path: Option<PathBuf>,
-    /// Print the builds `timings --run` and `check-cost` would start, without
+    /// Print the builds `timings --run`, `tests --run` and `check-cost` would start, without
     /// starting them
     dry_run: bool,
     #[bpaf(external(bpaf_kit::log::log_args))]
@@ -58,8 +61,21 @@ enum Command {
     #[bpaf(command)]
     Deps,
     /// Check nextest, target runners, thread limits and database-backed tests
-    #[bpaf(command)]
-    Tests,
+    #[bpaf(
+        command,
+        footer(
+            "With --run: times `cargo nextest run --workspace --no-run --timings`, then runs the tests with NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 and `--message-format libtest-json-plus`, and reports build vs run time, the slowest tests and binaries, and how busy the test threads were."
+        )
+    )]
+    Tests {
+        /// Build and run the tests with nextest and report where the time goes
+        run: bool,
+        #[bpaf(external(nice))]
+        nice: Nice,
+        /// Extra `cargo nextest run` arguments, after `--` (e.g. -- --profile ci)
+        #[bpaf(positional("NEXTEST_ARGS"), strict, many)]
+        nextest_args: Vec<String>,
+    },
     /// What rebuilds when a crate changes, and which crates are worth splitting
     #[bpaf(command)]
     Rdeps {
@@ -229,9 +245,11 @@ fn run(opts: &Opts) -> Result<Report, Error> {
         Command::Deps => report
             .sections
             .push(deps::section(&deps::analyze_with_sources(&m))),
-        Command::Tests => report
-            .sections
-            .push(tests::check(&ctx, &tests::Inputs::gather(&ctx))),
+        Command::Tests {
+            run,
+            nice,
+            nextest_args,
+        } => tests_sections(&ctx, *run, nice.n, nextest_args, &mut report)?,
         Command::Rdeps { krate } => report.sections.push(rdeps_section(&m, krate.as_deref())?),
         Command::Timings {
             file,
@@ -411,6 +429,94 @@ fn timings_section(
         None => timings::newest_report(&ctx.target_dir()).ok_or(Error::NoTimings)?,
     };
     timings_file_section(Some(ctx), &path, baseline)
+}
+
+/// `tests`: the configuration checks; with `--run`, also time the test
+/// build, run the tests, report both, then the build's timings.
+fn tests_sections(
+    ctx: &Context,
+    run: bool,
+    nice: i32,
+    args: &[String],
+    report: &mut Report,
+) -> Result<(), Error> {
+    let inputs = tests::Inputs::gather(ctx);
+    report.sections.push(tests::check(ctx, &inputs));
+    if !run {
+        return Ok(());
+    }
+    let build_start = SystemTime::now();
+    let started = Instant::now();
+    let built = build(ctx, nice, cargo_bin(&ctx.env))
+        .args(["nextest", "run", "--workspace", "--no-run", "--timings"])
+        .args(args)
+        .current_dir(ctx.root())
+        .output()?;
+    let build_secs = started.elapsed().as_secs_f64();
+    if !built.success() {
+        return Err(format!("building the tests failed\n{}", built.stderr_lossy().trim()).into());
+    }
+    let started = Instant::now();
+    let ran = build(ctx, nice, cargo_bin(&ctx.env))
+        .env("NEXTEST_EXPERIMENTAL_LIBTEST_JSON", "1")
+        .args(["nextest", "run", "--workspace", "--no-fail-fast"])
+        .args(["--message-format", "libtest-json-plus"])
+        .args(args)
+        .current_dir(ctx.root())
+        .output()?;
+    let run_secs = started.elapsed().as_secs_f64();
+    if cmd::dry_run_enabled() {
+        return Err(Error::DryRun(
+            "--dry-run: nothing was built or run, so there is nothing to time".into(),
+        ));
+    }
+    let run = testrun::parse(&ran.stdout_lossy());
+    if run.tests.is_empty() && !ran.success() {
+        return Err(format!(
+            "the test run failed before any test finished\n{}",
+            ran.stderr_lossy().trim()
+        )
+        .into());
+    }
+    let config = inputs.nextest_config.as_ref();
+    let profile = testrun::profile(args, ctx.var("NEXTEST_PROFILE"));
+    let mut s = testrun::section(&testrun::Inputs {
+        build_secs: Some(build_secs),
+        run_secs,
+        threads: testrun::threads(
+            args,
+            ctx.var("NEXTEST_TEST_THREADS"),
+            config,
+            &profile,
+            ctx.cpus(),
+        ),
+        slow_timeout: testrun::slow_timeout(config, &profile),
+        run,
+    });
+    s.facts.insert(
+        0,
+        Fact {
+            key: "nextest profile".into(),
+            value: profile,
+        },
+    );
+    report.sections.push(s);
+    // Only the report this build wrote, not an older one.
+    let fresh = timings::newest_report(&ctx.target_dir()).filter(|p| {
+        std::fs::metadata(p)
+            .and_then(|m| m.modified())
+            .is_ok_and(|t| t >= build_start)
+    });
+    match fresh {
+        Some(path) => report
+            .sections
+            .push(timings_file_section(Some(ctx), &path, None)?),
+        None => report.skipped.push(Fact {
+            key: "timings".into(),
+            value: "the test build wrote no cargo-timing.html".into(),
+        }),
+    }
+    Ok(())
 }
 
 /// Read a report; with a workspace, join the cache wrapper's records,

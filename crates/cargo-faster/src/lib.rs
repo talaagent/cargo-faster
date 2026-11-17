@@ -21,6 +21,7 @@ pub mod graph;
 pub mod machine;
 pub mod profile;
 pub mod setup;
+pub mod testrun;
 pub mod tests;
 pub mod timings;
 
@@ -53,6 +54,7 @@ pub const GUIDE_ANCHORS: &[&str] = &[
     "test-runners-that-wrap-every-test",
     "database-backed-tests",
     "fewer-test-binaries",
+    "measuring-a-test-run",
     "the-machine",
     "procedural-macros",
     "generic-code-and-monomorphization",

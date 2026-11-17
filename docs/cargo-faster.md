@@ -7,7 +7,7 @@
 - **fix**: what to change, and what the change costs;
 - **more**: a link to the section of [the guide](guide.md) that explains it.
 
-It doesn't change your code or your configuration. Most subcommands only read things: your manifests, `cargo metadata`, Cargo's config, your cache's statistics, and `/proc`. Two of them build: `timings --run` and `check-cost`. Both run under `nice -n 10` by default, because a build machine is often shared.
+It doesn't change your code or your configuration. Most subcommands only read things: your manifests, `cargo metadata`, Cargo's config, your cache's statistics, and `/proc`. Three of them build: `timings --run`, `tests --run` and `check-cost`. They run under `nice -n 10` by default, because a build machine is often shared.
 
 This page goes through the subcommands one at a time. The example output comes from a real workspace of 183 crates on a busy 32-core machine; it's the workspace from [the case study](guide.md#case-study-a-312-second-check).
 
@@ -38,7 +38,7 @@ Every subcommand takes these:
 
 - `--json` prints the report as JSON instead of text, for scripts and agents. Findings keep their `id`, `severity`, `title`, `saw`, `why`, `fix`, and `guide` fields.
 - `--manifest-path PATH` points at a workspace other than the current directory's.
-- `--dry-run` prints the builds that `timings --run` and `check-cost` would start, and stops before starting them. The quick checks still run, because they only read things.
+- `--dry-run` prints the builds that `timings --run`, `tests --run` and `check-cost` would start, and stops before starting them. The quick checks still run, because they only read things.
 - `-v` and `-q` change how much it logs to stderr.
 
 The builds it starts are echoed to stderr before they run. Errors go to stderr as `cargo faster: error[CODE]: message` and exit non-zero. The codes are stable: `no_workspace`, `no_timings`, `unknown_value`, `failed`, and `cmd_spawn`, `cmd_exit`, `cmd_timeout`, `cmd_io`, `cmd_utf8` when a command it runs goes wrong. A misspelled crate name for `rdeps`, or a wrong `-p` or `--bin` for `check-cost`, gets a "did you mean" suggestion.
@@ -414,7 +414,43 @@ Beyond runners, it checks:
 - database-backed tests, and how to make each test database cheap: Postgres on tmpfs, and cloning a template database instead of running migrations for every test. It looks for what the workspace already does first (here all three, so there's no finding);
 - many integration test files, each of which is its own binary to link.
 
-See [Test suites](guide.md#test-suites).
+All of that is read from configuration. To measure, add `--run`:
+
+```console
+$ cargo faster tests --run -- --profile gate --test-threads 8
+```
+
+It times `cargo nextest run --workspace --no-run --timings`, runs the tests (`--no-fail-fast`, with nextest's libtest-json output), and adds a `test run` section and the build's `timings` section:
+
+```text
+== test run
+  nextest profile   gate
+  build (--no-run)  28.4s
+  run               661s
+  tests             3953 run, 1 failed, 11 skipped
+  test threads      8 (--test-threads)
+  test-seconds      1191s over 661s × 8 threads (23% busy)
+
+  slowest tests
+  took   binary                          test
+   600s  tala-runner::cli                session_worker_reports_invalid_request_as_json
+  8.49s  tala-client::tala_client        files::tests::a_big_image_is_scaled_to_fit
+  ...
+  test binaries by total test time (fastest ≈ the binary's per-test startup)
+  total  tests  slowest  fastest  binary
+   600s      5     600s   0.052s  tala-runner::cli
+   139s    754    3.87s   0.009s  tala-agent::tala_agent
+  ...
+
+  [medium] 1 test(s) ran into the slow-timeout (60.0s)
+  [info] Test threads were busy 23% of the run
+```
+
+Here one hung test, killed by the profile's terminate-after at 600s, is most of the 11-minute run; without it the suite needs about a minute on 8 threads.
+
+Its findings: `test-build-dominates` (the build takes over a minute and more than twice the run), `tests-near-slow-timeout` (tests at half the profile's `slow-timeout` or more), and `test-threads-idle` (the threads were busy less than half the run). Arguments after `--` go to both nextest commands; never pass `-p` there if you use a caching wrapper, as it changes feature resolution and the cache keys.
+
+See [Test suites](guide.md#test-suites) and [Measuring a test run](guide.md#measuring-a-test-run).
 
 ## `cargo faster rdeps`
 

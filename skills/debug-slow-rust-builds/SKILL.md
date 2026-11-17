@@ -40,6 +40,7 @@ If `cargo faster` isn't installed: `cargo install --locked cargo-faster`, or
    ```sh
    cargo faster timings --run          # runs `cargo check --workspace --timings` under nice
    cargo faster timings path/to/cargo-timing.html   # or read an existing report
+   cargo faster tests --run            # slow tests? times the test build and the run separately
    ```
 
    Look at the critical path. `check` units are the frontend (type checking, trait solving):
@@ -93,6 +94,7 @@ If `cargo faster` isn't installed: `cargo install --locked cargo-faster`, or
 | `serial-crate`, `big-crate` | Profile it first (`check-cost`). Split only if it's actually just big | Refactor |
 | `target-runner-wraps-tests`, `target-runner-in-scripts` | Remove or narrow `target.<triple>.runner`, or have it `exec "$@"` when `NEXTEST_EXECUTION_MODE=process-per-test`; use a once-per-run nextest setup script | |
 | `nextest-threads-env` | Unset `NEXTEST_TEST_THREADS`, or pass `--test-threads` in the scripts that run each profile; put limits in `.config/nextest.toml` | |
+| `test-build-dominates`, `tests-near-slow-timeout`, `test-threads-idle` (`tests --run`) | Build-bound: work on the test build's timings (fewer test binaries, debuginfo, linker). Run-bound: split or speed up the slowest tests, check test groups | |
 | `database-tests` | Add what the finding lists as missing: Postgres on tmpfs, fsync off, a template database cloned per test | |
 | `full-debuginfo` | `debug = "line-tables-only"` in `[profile.dev]` | Fewer variables in a debugger |
 | `slow-linker` | `rust-lld` (default on x86_64 Linux since 1.90), `mold` or `wild` | |
