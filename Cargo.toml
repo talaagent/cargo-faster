@@ -14,6 +14,8 @@ authors = ["Ian Macalinao <github@igm.pub>"]
 
 [workspace.dependencies]
 nextest-libtest-json = { version = "0.1.0", path = "crates/nextest-libtest-json" }
+rustc-self-profile = { version = "0.1.0", path = "crates/rustc-self-profile" }
+hashbrown = { version = "0.17", default-features = false, features = ["default-hasher"] }
 analyzeme = "12.0.3"
 bpaf = { version = "0.9.20", features = ["derive", "autocomplete"] }
 bpaf-kit = { version = "0.2.1", features = ["man", "log", "table"] }

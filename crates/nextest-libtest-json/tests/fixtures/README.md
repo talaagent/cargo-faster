@@ -1,7 +1,7 @@
 # Fixtures
 
 `cargo-faster/` holds real output, captured on 2026-11-17 with
-cargo-nextest 0.9.149, cargo and rustc 1.98.1, and
+cargo-nextest 0.9.149, cargo 1.99.0, rustc 1.99.1 and
 `NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1`:
 
 - `nextest-libtest-json-plus.jsonl`: `cargo nextest run --workspace

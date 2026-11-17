@@ -21,10 +21,17 @@ release_always = false
 [[package]]
 name = "cargo-faster"
 version_group = "cargo-faster"
-changelog_include = ["nextest-libtest-json"]
+changelog_include = ["nextest-libtest-json", "rustc-self-profile"]
 
 [[package]]
 name = "nextest-libtest-json"
+version_group = "cargo-faster"
+changelog_update = false
+git_tag_enable = false
+git_release_enable = false
+
+[[package]]
+name = "rustc-self-profile"
 version_group = "cargo-faster"
 changelog_update = false
 git_tag_enable = false

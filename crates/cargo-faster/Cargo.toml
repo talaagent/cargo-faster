@@ -19,10 +19,10 @@ name = "cargo-faster"
 path = "src/main.rs"
 
 [dependencies]
-analyzeme.workspace = true
 bpaf.workspace = true
 bpaf-kit.workspace = true
 nextest-libtest-json.workspace = true
+rustc-self-profile.workspace = true
 serde = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
 shlex.workspace = true

@@ -34,7 +34,7 @@ adds `parse_reader` for `std::io::BufRead`; build with
 
 ## Fixtures
 
-The tests parse real output from cargo-nextest 0.9.149 (rustc 1.98.1);
+The tests parse real output from cargo-nextest 0.9.149 (cargo 1.99.0, rustc 1.99.1);
 see `tests/fixtures/README.md`.
 
 ## License

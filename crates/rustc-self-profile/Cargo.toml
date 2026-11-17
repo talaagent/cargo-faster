@@ -1,0 +1,39 @@
+[package]
+name = "rustc-self-profile"
+description = "Analyze rustc -Zself-profile data: self time by query, per-item and per-module type checking, repeated trait obligations, profiler overhead"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+readme = "README.md"
+keywords = ["rustc", "self-profile", "measureme", "compile-time", "profiling"]
+categories = ["development-tools::profiling", "development-tools", "no-std"]
+include = ["src/**/*.rs", "examples/**", "tests/**", "README.md", "LICENSE", "NOTICE"]
+
+[features]
+default = ["std"]
+## `Profile::load`: read a `.mm_profdata` file with analyzeme (needs std).
+## The analysis works without it.
+std = ["dep:analyzeme", "serde/std"]
+
+[dependencies]
+analyzeme = { workspace = true, optional = true }
+hashbrown.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json = { workspace = true, features = ["std"] }
+
+[lints]
+workspace = true
+
+[[test]]
+name = "fixtures"
+required-features = ["std"]
+
+[[example]]
+name = "analyze"
+required-features = ["std"]
