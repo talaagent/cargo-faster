@@ -59,7 +59,9 @@ If `cargo faster` isn't installed: `cargo install --locked cargo-faster`, or
 
    When an edit rebuilds too much, `cargo faster rdeps CRATE` lists what each dependent uses
    from CRATE. `cheap-to-cut-edge` (from `rdeps` and `timings`) names a dependent that uses only
-   a few items from a big crate, with the rebuild count before and after cutting that edge.
+   a few items from a crate, with the rebuild count before and after cutting that edge;
+   `unused-dependency` one that uses nothing (delete the line), and `reexported-dependency` one
+   that only re-exports it (import from the owning crate directly).
 
 4. **Profile the slow crate.**
 
@@ -99,6 +101,8 @@ If `cargo faster` isn't installed: `cargo install --locked cargo-faster`, or
 | `trait-solving-dominates`, `heavy-function-body` | Return `Pin<Box<dyn Future<Output = T> + Send + '_>>` from functions at module boundaries; split the top body | A box per call |
 | `async-trait-overhead`, `uses-async-trait` | Replace `#[async_trait]` with native `async fn` in traits (`-> impl Future<Output = T> + Send` where callers spawn, `dynosaur` for `dyn`-held traits), and ban it with clippy `disallowed-macros`. Its per-method lifetime bounds split rustc's trait-solving cache; on one workspace this cut trait solving 80%. Erase heavy types too: that's the other lever | Signature churn |
 | `cheap-to-cut-edge` | Move the few items the dependent uses into a small crate lower down (or one it already depends on), then drop the big crate from its `[dependencies]`. Check the saw line's rebuild counts before and after | One more crate |
+| `unused-dependency` | Delete the line from `[dependencies]` and build (`cargo machete` confirms) | |
+| `reexported-dependency` | Have the crates using the re-export depend on and import from the owning crate, then drop the `pub use` | A dependency line per user |
 | `serial-crate`, `big-crate` | Profile it first (`check-cost`). Split only if it's actually just big | Refactor |
 | `target-runner-wraps-tests`, `target-runner-in-scripts` | Remove or narrow `target.<triple>.runner`, or have it `exec "$@"` when `NEXTEST_EXECUTION_MODE=process-per-test`; use a once-per-run nextest setup script | |
 | `nextest-threads-env` | Unset `NEXTEST_TEST_THREADS`, or pass `--test-threads` in the scripts that run each profile; put limits in `.config/nextest.toml` | |

@@ -273,7 +273,8 @@ pub fn section(crates: &[CrateInfo], only: Option<&str>) -> Section {
 }
 
 /// Add the edges into the crates shown that are cheap to cut: every direct
-/// dependent of `only`, or of the big crates whose edits rebuild the most.
+/// dependent of `only`, or of the crates whose edits rebuild the most,
+/// whatever their size.
 /// Reads the dependents' sources.
 pub fn add_edges(m: &Metadata, crates: &[CrateInfo], only: Option<&str>, s: &mut Section) {
     let targets: Vec<&str> = match only {
@@ -285,7 +286,7 @@ pub fn add_edges(m: &Metadata, crates: &[CrateInfo], only: Option<&str>, s: &mut
         None => crates
             .iter()
             .take(15)
-            .filter(|c| c.lines >= edges::CUT_LINES)
+            .filter(|c| c.rebuilds.len() >= edges::MIN_SAVED)
             .map(|c| c.name.as_str())
             .collect(),
     };

@@ -49,6 +49,8 @@ pub const GUIDE_ANCHORS: &[&str] = &[
     "the-build-timeline",
     "the-critical-path",
     "rebuild-fan-out",
+    "cutting-a-dependency-edge",
+    "unused-dependencies",
     "splitting-a-big-crate",
     "dependencies-and-features",
     "incremental-compilation",
