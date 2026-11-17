@@ -570,7 +570,8 @@ fn rebuilds(e: &Edge) -> String {
 }
 
 /// Findings for the edges worth cutting: unused dependencies, re-exports
-/// and cheap edges, each kind ranked by [`rank`], at most `limit` of each.
+/// and cheap edges, each kind ranked by rebuilds saved, then fewest items
+/// used, at most `limit` of each.
 #[must_use]
 pub fn findings(edges: &[Edge], limit: usize) -> Vec<Finding> {
     let pick = |keep: fn(&Edge) -> bool| {
@@ -874,7 +875,7 @@ mod tests {
             opaque: true,
             ..edge(&[], 900, 12, 11)
         };
-        assert!(findings(&[opaque], 5).is_empty());
+        assert_eq!(findings(&[opaque], 5), []);
     }
 
     /// tala-integrations' `pub use tala_email::{email, mailer}` (#53).
@@ -1001,6 +1002,6 @@ mod tests {
         assert_eq!(e[0].reexports, ["Store", "mail"]);
         assert_eq!(e[0].reexport_users, ["app"]);
         assert_eq!((e[0].before, e[0].after), (3, 1));
-        assert!(findings(&e, 5).is_empty());
+        assert_eq!(findings(&e, 5), []);
     }
 }

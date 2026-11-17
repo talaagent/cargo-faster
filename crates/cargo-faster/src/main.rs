@@ -715,13 +715,7 @@ fn timings_run(
             ),
         });
     }
-    let members: Vec<&str> = ctx
-        .metadata
-        .as_ref()
-        .map(|m| m.members().map(|p| p.name.as_str()).collect())
-        .unwrap_or_default();
-    let fingerprinted = || timings::run::has_fingerprints(&ctx.target_dir(), &members);
-    let fingerprints_before = fingerprinted();
+    let fingerprints_before = fingerprinted(ctx);
     let start = SystemTime::now();
     let out = build(ctx, r.nice, &cargo)
         .args(&args)
@@ -762,9 +756,19 @@ fn timings_run(
     let first_build = if target.is_some() {
         Some(false)
     } else {
-        (!fingerprints_before && fingerprinted()).then_some(true)
+        (!fingerprints_before && fingerprinted(ctx)).then_some(true)
     };
     Ok((path, facts, failed, first_build))
+}
+
+/// Whether the target directory has fingerprints for a workspace member.
+fn fingerprinted(ctx: &Context) -> bool {
+    let members: Vec<&str> = ctx
+        .metadata
+        .as_ref()
+        .map(|m| m.members().map(|p| p.name.as_str()).collect())
+        .unwrap_or_default();
+    timings::run::has_fingerprints(&ctx.target_dir(), &members)
 }
 
 /// The newest report in the target directory, if it was written after
