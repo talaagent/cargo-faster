@@ -863,10 +863,7 @@ mod tests {
         let f = findings(&[e], 5);
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].id, "unused-dependency");
-        assert_eq!(
-            f[0].title,
-            "app-mx depends on app-spool but doesn't use it"
-        );
+        assert_eq!(f[0].title, "app-mx depends on app-spool but doesn't use it");
         assert!(f[0].fix.contains("cargo machete"));
         assert!(detail(&[edge(&[], 900, 12, 11)], false).is_some());
         // A glob or `extern crate` hides what's used: not unused.

@@ -334,10 +334,8 @@ mod tests {
         assert!(!has_fingerprints(t, &["app-core"]));
         std::fs::create_dir_all(t.join("debug/.fingerprint/serde-0123abcd")).unwrap();
         assert!(!has_fingerprints(t, &["app-core"]));
-        std::fs::create_dir_all(
-            t.join("x86_64-unknown-linux-gnu/gate/.fingerprint/app-core-9f8e"),
-        )
-        .unwrap();
+        std::fs::create_dir_all(t.join("x86_64-unknown-linux-gnu/gate/.fingerprint/app-core-9f8e"))
+            .unwrap();
         assert!(has_fingerprints(t, &["app-core"]));
     }
 

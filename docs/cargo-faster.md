@@ -527,8 +527,8 @@ It times `cargo nextest run --workspace --no-run --timings`, runs the tests (`--
 
   slowest tests
   took   binary                          test
-   600s  app-runner::cli                session_worker_reports_invalid_request_as_json
-  8.49s  app-client::app_client        files::tests::a_big_image_is_scaled_to_fit
+   600s  app-runner::cli                 session_worker_reports_invalid_request_as_json
+  8.49s  app-client::app_client          files::tests::a_big_image_is_scaled_to_fit
   ...
   test binaries by total test time (fastest ≈ the binary's per-test startup)
   total  tests  slowest  fastest  binary
