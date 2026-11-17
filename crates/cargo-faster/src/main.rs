@@ -130,6 +130,8 @@ enum Command {
         edit: Option<String>,
         /// With --edit, change a private function's body instead of the crate's API
         body: bool,
+        /// Exit 0 when the timed build fails (the report covers what it compiled); without it, exit 3
+        allow_failed_build: bool,
         #[bpaf(external(nice))]
         nice: Nice,
         /// An earlier report to compare unit times with (default for a build: the newest earlier check report)
@@ -241,13 +243,28 @@ fn main() -> ExitCode {
     match run(&opts) {
         Ok(report) => {
             let text = if opts.json {
-                report.to_json() + "\n"
+                report.to_json()
             } else {
                 report.render_text(bpaf_kit::color_enabled(&std::io::stdout()))
             };
             let printed = print(&text);
             if printed != ExitCode::SUCCESS {
                 return printed;
+            }
+            if let Some(f) = report.findings().iter().find(|f| f.id == "build-failed")
+                && !matches!(
+                    opts.cmd,
+                    Command::Timings {
+                        allow_failed_build: true,
+                        ..
+                    }
+                )
+            {
+                let e = Error::BuildFailed(format!(
+                    "{}; the report above covers only what it compiled (pass --allow-failed-build to exit 0)",
+                    f.title.to_lowercase()
+                ));
+                return bpaf_kit::report::report_as("cargo faster", &e);
             }
             match opts.fail_on {
                 Some(FailOn(level)) if report.findings().iter().any(|f| f.severity >= level) => {
@@ -393,6 +410,7 @@ fn run(opts: &Opts) -> Result<Report, Error> {
             nice,
             baseline,
             cargo_args,
+            allow_failed_build: _,
         } => {
             let run =
                 (*run || cmd.is_some() || edit.is_some() || !cargo_args.is_empty()).then(|| {
@@ -577,19 +595,61 @@ fn timings_section(
             Some(f) => f.to_path_buf(),
             None => timings::newest_report(&ctx.target_dir()).ok_or(Error::NoTimings)?,
         };
-        return timings_file_section(Some(ctx), &path, baseline);
+        let mut s = timings_file_section(Some(ctx), &path, baseline)?;
+        let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+        if let Some(written) = modified(&path) {
+            let age = SystemTime::now()
+                .duration_since(written)
+                .map_or(0.0, |d| d.as_secs_f64());
+            let lock = modified(&ctx.root().join("Cargo.lock"));
+            let (age, stale) = timings::report_age(age, lock.is_some_and(|l| l > written));
+            s.facts.insert(
+                1,
+                Fact {
+                    key: "age".into(),
+                    value: age,
+                },
+            );
+            if let Some(w) = stale {
+                s.facts.insert(
+                    2,
+                    Fact {
+                        key: "stale".into(),
+                        value: w,
+                    },
+                );
+            }
+        }
+        return Ok(s);
     };
-    let (path, facts) = timings_run(ctx, r)?;
+    let (path, facts, failed) = timings_run(ctx, r)?;
     let mut s = timings_file_section(Some(ctx), &path, baseline)?;
     for (i, f) in facts.into_iter().enumerate() {
         s.facts.insert(i, f);
     }
+    if let Some((code, stderr)) = failed {
+        s.facts.insert(
+            1,
+            Fact {
+                key: "result".into(),
+                value: format!("build failed (exit {code})"),
+            },
+        );
+        // The unit that failed has no time, so a build that failed on
+        // its first unit looks like one with nothing to do.
+        s.findings.retain(|f| f.id != "nothing-rebuilt");
+        s.extend([timings::build_failed(code, &stderr)]);
+    }
     Ok(s)
 }
 
+/// What a failed build exited with, and the end of its stderr.
+type Failed = Option<(i32, String)>;
+
 /// Run the build with `--timings` (after the probe edit, for `--edit`)
-/// and return the report it wrote, with facts saying what was measured.
-fn timings_run(ctx: &Context, r: &TimingsRun) -> Result<(PathBuf, Vec<Fact>), Error> {
+/// and return the report it wrote, with facts saying what was measured,
+/// and how the build failed if it did.
+fn timings_run(ctx: &Context, r: &TimingsRun) -> Result<(PathBuf, Vec<Fact>, Failed), Error> {
     use timings::run::{Edit, Probe, edit_target, probe_text};
     let nextest = tests::Inputs::gather(ctx).nextest_installed;
     let args = r.build.args(nextest);
@@ -667,29 +727,38 @@ fn timings_run(ctx: &Context, r: &TimingsRun) -> Result<(PathBuf, Vec<Fact>), Er
             "--dry-run: nothing was built, so there is nothing to time".into(),
         ));
     }
-    if !out.success() {
-        eprintln!(
-            "cargo faster: the build failed; reading whatever timings it wrote\n{}",
-            out.stderr_lossy().trim()
-        );
-    }
-    let path = fresh_report(ctx, start).ok_or_else(|| {
-        Error::from(format!(
-            "the build wrote no cargo-timing.html\n{}",
-            out.stderr_lossy().trim()
-        ))
-    })?;
-    Ok((path, facts))
+    let failed = (!out.success()).then(|| {
+        (
+            out.status.code().unwrap_or(-1),
+            out.stderr_lossy().trim().to_owned(),
+        )
+    });
+    let Some(path) = fresh_report(ctx, start) else {
+        return Err(match failed {
+            Some((code, stderr)) => Error::BuildFailed(format!(
+                "the build failed (exit {code}) before writing a cargo-timing.html\n{stderr}"
+            )),
+            None => format!(
+                "the build wrote no cargo-timing.html\n{}",
+                out.stderr_lossy().trim()
+            )
+            .into(),
+        });
+    };
+    Ok((path, facts, failed))
 }
 
 /// The newest report in the target directory, if it was written after
 /// `since` (by the build we just ran, not an older one).
 fn fresh_report(ctx: &Context, since: SystemTime) -> Option<PathBuf> {
-    timings::newest_report(&ctx.target_dir()).filter(|p| {
-        std::fs::metadata(p)
-            .and_then(|m| m.modified())
-            .is_ok_and(|t| t >= since)
-    })
+    timings::reports(&ctx.target_dir())
+        .into_iter()
+        .next()
+        .filter(|p| {
+            std::fs::metadata(p)
+                .and_then(|m| m.modified())
+                .is_ok_and(|t| t >= since)
+        })
 }
 
 /// `tests`: the configuration checks; with `--run`, also time the test

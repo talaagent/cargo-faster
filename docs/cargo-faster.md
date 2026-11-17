@@ -42,13 +42,14 @@ Every subcommand takes these, before or after the subcommand's name (`cargo fast
 - `--dry-run` prints the builds that `timings --run`, `tests --run` and `check-cost` would start, and stops before starting them. The quick checks still run, because they only read things.
 - `-v` and `-q` change how much it logs to stderr.
 
-The builds it starts are echoed to stderr before they run. Errors go to stderr as `cargo faster: error[CODE]: message`. The codes are stable: `usage`, `no_workspace`, `no_timings`, `unknown_value`, `failed`, and `cmd_spawn`, `cmd_exit`, `cmd_timeout`, `cmd_io`, `cmd_utf8` when a command it runs goes wrong. A misspelled crate name for `rdeps`, `timings --edit`, or a wrong `-p` or `--bin` for `check-cost`, lists the three closest names.
+The builds it starts are echoed to stderr before they run. Errors go to stderr as `cargo faster: error[CODE]: message`. The codes are stable: `usage`, `build_failed`, `no_workspace`, `no_timings`, `unknown_value`, `failed`, and `cmd_spawn`, `cmd_exit`, `cmd_timeout`, `cmd_io`, `cmd_utf8` when a command it runs goes wrong. A misspelled crate name for `rdeps`, `timings --edit`, or a wrong `-p` or `--bin` for `check-cost`, lists the three closest names.
 
 The exit status is:
 
 - `0`: the report was printed, findings or not;
 - `1`: an error, or a finding at or above `--fail-on`;
-- `2`: a usage error: an unknown option, a bad value, or options that don't go together (`timings --body` without `--edit`).
+- `2`: a usage error: an unknown option, a bad value, or options that don't go together (`timings --body` without `--edit`);
+- `3`: the build `timings --run` or `timings --edit` timed failed. The report of what it compiled is printed first, with a `build-failed` finding; `--allow-failed-build` exits 0 instead.
 
 ### JSON output
 
@@ -109,6 +110,8 @@ With no subcommand, `cargo faster` runs every check that's quick and doesn't bui
          rebuilds 74 workspace crates; without this edge it would rebuild 69.
 ```
 
+When there is more than one section, a `== next` line after the summary names the command to run next: the first concrete command in the worst finding's fix, or `cargo faster timings --run` when there's no timings report yet.
+
 It took about three seconds on that workspace. Start here. Then use the subcommands for the parts you care about.
 
 Notice what's missing from that summary: the trait-solving problem that was actually making this workspace slow. The quick checks can't see inside the compiler. For that, you need `timings` to find the slow crate and `check-cost` to find out why it's slow.
@@ -128,7 +131,9 @@ Or, to run the build and read the report in one step:
 $ cargo faster timings --run
 ```
 
-That runs `cargo check --workspace --timings` under `nice -n 10`. Use `--nice 0` to run it at normal priority. You can also pass a report file to read, including one from another machine. `--baseline FILE` names an earlier report to compare with (see below).
+That runs `cargo check --workspace --timings` under `nice -n 10`. Use `--nice 0` to run it at normal priority. If the build fails, the report covers only what it compiled: it gets a `result` fact (`build failed (exit N)`), a `[high] build-failed` finding with the end of cargo's errors, and `cargo faster` exits 3 (pass `--allow-failed-build` to exit 0).
+
+Without `--run`, it reads the newest report in `target/cargo-timings/` that has units in it, and shows its `age`. A report older than a day, or older than `Cargo.lock`, gets a `stale` fact: run `--run` again for a current one. A build that compiled nothing (everything was fresh) says so with a `nothing-rebuilt` finding; `--edit CRATE` measures a rebuild without editing anything yourself. You can also pass a report file to read, including one from another machine. `--baseline FILE` names an earlier report to compare with (see below).
 
 `--cmd` picks the build to time, and anything after `--` goes to cargo:
 
@@ -205,7 +210,11 @@ The timings check also finds:
 - `wrapper-wait`: a lot of time spent waiting for the rustc wrapper's scheduler or for another build compiling the same thing;
 - `edit-rebuilt-many`: an edit that recompiled many workspace crates, and which crates it started from;
 - `cheap-to-cut-edge`: a step on the critical path that waited for a big workspace crate it uses only a few items from (the same check as `rdeps`, with the seconds that crate took on the path);
-- `slow-build`: a slow build that none of the above explains, with what was measured and what to try next.
+- `slow-build`: a slow build that none of the above explains, with what was measured and what to try next;
+- `nothing-rebuilt`: the build compiled nothing, so there's no timeline to read;
+- `build-failed`: the timed build failed, so the report is partial.
+
+The advice to look inside a slow crate depends on what it is: a workspace crate gets `cargo faster check-cost -p CRATE`, and a dependency (which `check-cost` can't profile) gets `cargo faster deps`, to see which features and versions you pull in.
 
 ### Where a build's time went
 
