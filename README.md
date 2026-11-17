@@ -63,6 +63,10 @@ $ cargo faster check-cost -p tala-agent-bin
 
 Every command takes `--json`, and `--fail-on high|medium|low` to exit 1 on a finding that severe (for CI). See [Using cargo faster](docs/cargo-faster.md) for details and real output.
 
+## Platforms
+
+cargo faster is Linux-first. Every check works on Linux. On macOS the machine check reads load, memory and processes from `sysctl`, `vm_stat` and `ps`, and filesystems from `df -P` and `mount`. Anything it can't measure is listed as `unavailable` rather than guessed. Everything else (setup, cache, deps, tests, rdeps, timings, check-cost) is the same on both. Windows is untested.
+
 ## Docs
 
 - [Why is my Rust build slow?](docs/guide.md): how `rustc` spends its time, how to measure it, and what to do about it, with a case study of a 312-second check.

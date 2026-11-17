@@ -46,13 +46,86 @@ pub struct Inputs {
     pub cargo_procs: usize,
     /// Filesystems of the build directories.
     pub mounts: Vec<Mount>,
+    /// What couldn't be measured on this platform (`load`, `memory`,
+    /// `other builds`, `filesystems`).
+    pub unavailable: Vec<&'static str>,
 }
 
-/// Parse `/proc/loadavg`.
+/// Parse `/proc/loadavg`, or macOS's `sysctl -n vm.loadavg`
+/// (`{ 1.20 1.31 1.40 }`).
 #[must_use]
 pub fn parse_loadavg(s: &str) -> (f64, f64) {
-    let mut it = s.split_whitespace().map(|x| x.parse().unwrap_or(0.0));
+    let mut it = s
+        .split_whitespace()
+        .filter(|x| *x != "{")
+        .map(|x| x.parse().unwrap_or(0.0));
     (it.next().unwrap_or(0.0), it.next().unwrap_or(0.0))
+}
+
+/// Available bytes from macOS's `vm_stat`: free, inactive and speculative
+/// pages, which the kernel hands out without swapping.
+#[must_use]
+pub fn parse_vm_stat(s: &str) -> Option<u64> {
+    let page: u64 = s
+        .lines()
+        .next()?
+        .split("page size of ")
+        .nth(1)?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()?;
+    let pages = |k: &str| {
+        s.lines()
+            .find_map(|l| l.strip_prefix(k))
+            .and_then(|v| v.trim().trim_end_matches('.').parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    Some((pages("Pages free:") + pages("Pages inactive:") + pages("Pages speculative:")) * page)
+}
+
+/// Swap in use from macOS's `sysctl -n vm.swapusage`
+/// (`total = 2048.00M  used = 1024.50M  free = ...`).
+#[must_use]
+pub fn parse_swapusage(s: &str) -> u64 {
+    let used = s
+        .split("used = ")
+        .nth(1)
+        .and_then(|r| r.split_whitespace().next())
+        .unwrap_or("0");
+    let (n, unit) = used.split_at(used.len().saturating_sub(1));
+    let mult: f64 = match unit {
+        "K" => 1024.0,
+        "M" => 1024.0 * 1024.0,
+        "G" => 1024.0 * 1024.0 * 1024.0,
+        _ => return 0,
+    };
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let b = (n.parse::<f64>().unwrap_or(0.0) * mult) as u64;
+    b
+}
+
+/// The filesystem type of the mount at `mount`, from `/proc/self/mounts`
+/// (`dev /mnt type opts 0 0`) or macOS's `mount` (`dev on /mnt (apfs, local)`).
+#[must_use]
+pub fn fstype_from_mounts(mounts: &str, mount: &str) -> Option<String> {
+    mounts
+        .lines()
+        .find_map(|l| {
+            if let Some((_, rest)) = l.split_once(" on ") {
+                let (point, opts) = rest.rsplit_once(" (")?;
+                return (point == mount).then(|| {
+                    opts.split([',', ')'])
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_owned()
+                });
+            }
+            let cols: Vec<&str> = l.split_whitespace().collect();
+            (cols.len() >= 3 && cols[1] == mount).then(|| cols[2].to_owned())
+        })
+        .filter(|t| !t.is_empty())
 }
 
 /// Parse `/proc/meminfo` into (total, available, swap used) bytes.
@@ -72,21 +145,29 @@ pub fn parse_meminfo(s: &str) -> (u64, u64, u64) {
     )
 }
 
-/// Parse `df -PT DIR` output (one data line).
+/// Parse `df -PT DIR` (GNU) or `df -P DIR` (macOS and the BSDs, where
+/// `-T` means something else) output: one data line. Without a type
+/// column, or when df prints `-` (bind mounts, some sandboxes), the type
+/// is `unknown`.
 #[must_use]
 pub fn parse_df(s: &str) -> Option<(String, u64, u64, String)> {
+    let typed = s.lines().next()?.split_whitespace().nth(1) == Some("Type");
     let line = s.lines().nth(1)?;
     let cols: Vec<&str> = line.split_whitespace().collect();
-    if cols.len() < 7 {
+    let (fstype, rest) = if typed {
+        (*cols.get(1)?, cols.get(2..)?)
+    } else {
+        ("-", cols.get(1..)?)
+    };
+    if rest.len() < 5 {
         return None;
     }
-    // df prints `-` when it can't tell (bind mounts, some sandboxes).
-    let fstype = if cols[1] == "-" { "unknown" } else { cols[1] };
+    let fstype = if fstype == "-" { "unknown" } else { fstype };
     Some((
         fstype.to_owned(),
-        cols[2].parse::<u64>().ok()? * 1024,
-        cols[4].parse::<u64>().ok()? * 1024,
-        cols[6].to_owned(),
+        rest[0].parse::<u64>().ok()? * 1024,
+        rest[2].parse::<u64>().ok()? * 1024,
+        rest[4..].join(" "),
     ))
 }
 
@@ -105,34 +186,133 @@ fn dev_of(_: &Path) -> u64 {
     0
 }
 
-impl Inputs {
-    /// Measure the real machine (Linux; elsewhere most fields stay empty).
-    #[must_use]
-    pub fn gather(ctx: &Context, cache_dir: Option<PathBuf>) -> Self {
-        let read = |p: &str| std::fs::read_to_string(p).unwrap_or_default();
-        let (load1, load5) = parse_loadavg(&read("/proc/loadavg"));
-        let (mem_total, mem_avail, swap_used) = parse_meminfo(&read("/proc/meminfo"));
-        let me = std::process::id();
-        let (mut rustc_procs, mut cargo_procs) = (0_usize, 0_usize);
-        if let Ok(dir) = std::fs::read_dir("/proc") {
-            for e in dir.flatten() {
-                let name = e.file_name();
-                let Some(pid) = name.to_str().and_then(|n| n.parse::<u32>().ok()) else {
-                    continue;
-                };
-                if pid == me {
-                    continue;
-                }
-                match std::fs::read_to_string(e.path().join("comm"))
-                    .unwrap_or_default()
-                    .trim()
-                {
-                    "rustc" => rustc_procs += 1,
-                    "cargo" => cargo_procs += 1,
-                    _ => {}
-                }
+fn read(p: &str) -> Option<String> {
+    std::fs::read_to_string(p).ok()
+}
+
+/// A probe's stdout, if it ran and succeeded.
+fn run(prog: &str, args: &[&str]) -> Option<String> {
+    probe(prog)
+        .args(args)
+        .output()
+        .ok()
+        .filter(bpaf_kit::cmd::Output::success)
+        .map(|o| o.stdout_lossy().into_owned())
+}
+
+/// (total, available, swap used) bytes: `/proc/meminfo`, else macOS's
+/// `sysctl` and `vm_stat`.
+fn memory() -> Option<(u64, u64, u64)> {
+    if let Some(m) = read("/proc/meminfo") {
+        return Some(parse_meminfo(&m));
+    }
+    let total = run("sysctl", &["-n", "hw.memsize"])?
+        .trim()
+        .parse::<u64>()
+        .ok()?;
+    let avail = parse_vm_stat(&run("vm_stat", &[])?)?;
+    let swap = run("sysctl", &["-n", "vm.swapusage"]).map_or(0, |s| parse_swapusage(&s));
+    Some((total, avail, swap))
+}
+
+/// Other (rustc, cargo) processes: `/proc/*/comm`, else `ps`.
+fn processes() -> Option<(usize, usize)> {
+    let me = std::process::id();
+    let (mut rustc, mut cargo) = (0_usize, 0_usize);
+    let mut count = |pid: Option<u32>, comm: &str| {
+        if pid == Some(me) {
+            return;
+        }
+        match comm.trim().rsplit('/').next().unwrap_or(comm) {
+            "rustc" => rustc += 1,
+            "cargo" => cargo += 1,
+            _ => {}
+        }
+    };
+    if Path::new("/proc/self/comm").exists() {
+        for e in std::fs::read_dir("/proc").ok()?.flatten() {
+            let pid = e.file_name().to_str().and_then(|n| n.parse::<u32>().ok());
+            if pid.is_some() {
+                count(
+                    pid,
+                    &read(&e.path().join("comm").to_string_lossy()).unwrap_or_default(),
+                );
             }
         }
+    } else {
+        for l in run("ps", &["-A", "-o", "pid=,comm="])?.lines() {
+            let (pid, comm) = l.trim().split_once(' ').unwrap_or(("", ""));
+            count(pid.parse().ok(), comm);
+        }
+    }
+    Some((rustc, cargo))
+}
+
+/// The filesystem each directory is on. GNU df takes -T for the type
+/// column; on macOS and the BSDs -T filters by type, so they get plain -P
+/// and the type comes from the mount table, as it does when df prints `-`.
+fn mounts(dirs: Vec<(String, PathBuf)>) -> Vec<Mount> {
+    let gnu = cfg!(target_os = "linux");
+    let table = read("/proc/self/mounts").or_else(|| run("mount", &[]));
+    dirs.into_iter()
+        .filter_map(|(role, path)| {
+            let dir = existing_ancestor(&path)?.to_path_buf();
+            let df = |flags: &str| {
+                let out = probe("df").arg(flags).arg(&dir).output().ok()?;
+                parse_df(&out.stdout_lossy())
+            };
+            let (mut fstype, total, avail, mount) = if gnu {
+                df("-PT").or_else(|| df("-P"))?
+            } else {
+                df("-P")?
+            };
+            if fstype == "unknown"
+                && let Some(t) = table.as_deref().and_then(|t| fstype_from_mounts(t, &mount))
+            {
+                fstype = t;
+            }
+            // A bind mount (a sandbox's /tmp) may be in no mount table;
+            // GNU stat asks the kernel.
+            if fstype == "unknown"
+                && gnu
+                && let Some(t) = run("stat", &["-f", "-c", "%T", &dir.to_string_lossy()])
+                && !t.trim().is_empty()
+            {
+                t.trim().clone_into(&mut fstype);
+            }
+            Some(Mount {
+                role,
+                dev: dev_of(&dir),
+                path,
+                fstype,
+                mount,
+                total,
+                avail,
+            })
+        })
+        .collect()
+}
+
+impl Inputs {
+    /// Measure the real machine: from `/proc` on Linux, from `sysctl`,
+    /// `vm_stat`, `ps` and `mount` on macOS. What it can't measure is
+    /// listed in [`Inputs::unavailable`].
+    #[must_use]
+    pub fn gather(ctx: &Context, cache_dir: Option<PathBuf>) -> Self {
+        let mut unavailable = Vec::new();
+        let load = read("/proc/loadavg").or_else(|| run("sysctl", &["-n", "vm.loadavg"]));
+        if load.is_none() {
+            unavailable.push("load");
+        }
+        let (load1, load5) = parse_loadavg(load.as_deref().unwrap_or_default());
+        let (mem_total, mem_avail, swap_used) = memory().unwrap_or_else(|| {
+            unavailable.push("memory");
+            (0, 0, 0)
+        });
+        let (rustc_procs, mut cargo_procs) = processes().unwrap_or_else(|| {
+            unavailable.push("other builds");
+            (0, 0)
+        });
         // We are run by one cargo ourselves.
         if ctx.var("CARGO").is_some() {
             cargo_procs = cargo_procs.saturating_sub(1);
@@ -142,23 +322,11 @@ impl Inputs {
             dirs.push(("cache".to_owned(), c));
         }
         dirs.push(("tmp".to_owned(), std::env::temp_dir()));
-        let mounts = dirs
-            .into_iter()
-            .filter_map(|(role, path)| {
-                let dir = existing_ancestor(&path)?.to_path_buf();
-                let out = probe("df").arg("-PT").arg(&dir).output().ok()?;
-                let (fstype, total, avail, mount) = parse_df(&out.stdout_lossy())?;
-                Some(Mount {
-                    role,
-                    dev: dev_of(&dir),
-                    path,
-                    fstype,
-                    mount,
-                    total,
-                    avail,
-                })
-            })
-            .collect();
+        let ndirs = dirs.len();
+        let mounts = mounts(dirs);
+        if mounts.len() < ndirs {
+            unavailable.push("filesystems");
+        }
         Self {
             cpus: ctx.cpus(),
             load1,
@@ -169,6 +337,7 @@ impl Inputs {
             rustc_procs,
             cargo_procs,
             mounts,
+            unavailable,
         }
     }
 }
@@ -185,15 +354,68 @@ pub fn cache_dir(ctx: &Context) -> Option<PathBuf> {
         );
     }
     if w.contains("sccache") {
-        return Some(
-            ctx.var("SCCACHE_DIR")
-                .map_or_else(|| home.join(".cache/sccache"), PathBuf::from),
-        );
+        return Some(ctx.var("SCCACHE_DIR").map_or_else(
+            || sccache_default_dir(&home, ctx.var("XDG_CACHE_HOME"), cfg!(target_os = "macos")),
+            PathBuf::from,
+        ));
     }
     None
 }
 
+/// sccache's local cache without `SCCACHE_DIR`: the platform's cache
+/// directory plus its app name.
+#[must_use]
+pub fn sccache_default_dir(home: &Path, xdg_cache: Option<&str>, macos: bool) -> PathBuf {
+    if macos {
+        return home.join("Library/Caches/Mozilla.sccache");
+    }
+    xdg_cache
+        .filter(|x| !x.is_empty())
+        .map_or_else(|| home.join(".cache"), PathBuf::from)
+        .join("sccache")
+}
+
 const REFLINK_FS: &[&str] = &["btrfs", "xfs", "bcachefs", "apfs", "zfs"];
+
+/// The load, other builds, memory and what couldn't be measured.
+fn facts(m: &Inputs, s: &mut Section) {
+    #[allow(clippy::cast_precision_loss)]
+    let cpus = m.cpus.max(1) as f64;
+    let has = |what: &str| !m.unavailable.contains(&what);
+    s.fact("cpus", m.cpus.to_string());
+    if has("load") {
+        s.fact(
+            "load",
+            format!(
+                "{:.1} (1 min), {:.1} (5 min) = {:.0}% of the CPUs",
+                m.load1,
+                m.load5,
+                100.0 * m.load1 / cpus
+            ),
+        );
+    }
+    if has("other builds") {
+        s.fact(
+            "other builds",
+            format!("{} rustc, {} cargo processes", m.rustc_procs, m.cargo_procs),
+        );
+    }
+    if !m.unavailable.is_empty() {
+        s.fact(
+            "unavailable",
+            format!(
+                "{} (not measurable on this platform; cargo faster is Linux-first)",
+                m.unavailable.join(", ")
+            ),
+        );
+    }
+    if m.mem_total > 0 {
+        s.fact(
+            "memory",
+            format!("{} available of {}", bytes(m.mem_avail), bytes(m.mem_total)),
+        );
+    }
+}
 
 /// Run the check.
 #[must_use]
@@ -202,27 +424,9 @@ pub fn check(m: &Inputs) -> Section {
     let mut f = Vec::new();
     #[allow(clippy::cast_precision_loss)]
     let cpus = m.cpus.max(1) as f64;
-    s.fact("cpus", m.cpus.to_string());
-    s.fact(
-        "load",
-        format!(
-            "{:.1} (1 min), {:.1} (5 min) = {:.0}% of the CPUs",
-            m.load1,
-            m.load5,
-            100.0 * m.load1 / cpus
-        ),
-    );
-    s.fact(
-        "other builds",
-        format!("{} rustc, {} cargo processes", m.rustc_procs, m.cargo_procs),
-    );
-    if m.mem_total > 0 {
-        s.fact(
-            "memory",
-            format!("{} available of {}", bytes(m.mem_avail), bytes(m.mem_total)),
-        );
-    }
-    if m.load1 >= cpus * 0.5 || m.rustc_procs >= 4 {
+    let has = |what: &str| !m.unavailable.contains(&what);
+    facts(m, &mut s);
+    if (has("load") || has("other builds")) && (m.load1 >= cpus * 0.5 || m.rustc_procs >= 4) {
         let sev = if m.load1 >= cpus {
             Severity::High
         } else {
@@ -313,6 +517,7 @@ mod tests {
     #[test]
     fn parsers() {
         assert_eq!(parse_loadavg("14.20 18.03 20.11 9/2000 123"), (14.2, 18.03));
+        assert_eq!(parse_loadavg("{ 2.50 1.75 1.60 }\n"), (2.5, 1.75));
         let (t, a, s) = parse_meminfo(
             "MemTotal:       1024 kB\nMemAvailable:    512 kB\nSwapTotal: 100 kB\nSwapFree: 40 kB\n",
         );
@@ -326,6 +531,76 @@ mod tests {
                 308_443_996 * 1024,
                 "/home".into()
             )
+        );
+    }
+
+    #[test]
+    fn macos_and_sandbox_parsers() {
+        // macOS `df -P`: no type column; a mount point with a space.
+        let df = "Filesystem     1024-blocks      Used Available Capacity  Mounted on\n/dev/disk3s5    971350180 600000000 300000000    67%    /System/Volumes/Data\n";
+        assert_eq!(
+            parse_df(df).unwrap(),
+            (
+                "unknown".into(),
+                971_350_180 * 1024,
+                300_000_000 * 1024,
+                "/System/Volumes/Data".into()
+            )
+        );
+        // GNU df in a sandbox prints `-` for the type: the mount table has it.
+        let df = "Filesystem Type 1024-blocks Used Available Capacity Mounted on\ntmpfs - 1000 10 990 1% /tmp\n";
+        assert_eq!(parse_df(df).unwrap().0, "unknown");
+        let proc_mounts = "/dev/nvme0n1p2 / btrfs rw 0 0\ntmpfs /tmp tmpfs rw,nosuid 0 0\n";
+        assert_eq!(
+            fstype_from_mounts(proc_mounts, "/tmp").as_deref(),
+            Some("tmpfs")
+        );
+        assert_eq!(fstype_from_mounts(proc_mounts, "/home"), None);
+        let mac = "/dev/disk3s1s1 on / (apfs, sealed, local, read-only, journaled)\n/dev/disk3s5 on /System/Volumes/Data (apfs, local, journaled, nobrowse)\n";
+        assert_eq!(
+            fstype_from_mounts(mac, "/System/Volumes/Data").as_deref(),
+            Some("apfs")
+        );
+        let vm = "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                               10000.\nPages active:                             50000.\nPages inactive:                           20000.\nPages speculative:                         1000.\n";
+        assert_eq!(parse_vm_stat(vm), Some(31_000 * 16384));
+        assert_eq!(
+            parse_swapusage("total = 2048.00M  used = 1024.00M  free = 1024.00M  (encrypted)"),
+            1 << 30
+        );
+        assert_eq!(
+            parse_swapusage("total = 0.00M  used = 0.00M  free = 0.00M"),
+            0
+        );
+        let home = Path::new("/Users/u");
+        assert_eq!(
+            sccache_default_dir(home, None, true),
+            Path::new("/Users/u/Library/Caches/Mozilla.sccache")
+        );
+        assert_eq!(
+            sccache_default_dir(Path::new("/home/u"), None, false),
+            Path::new("/home/u/.cache/sccache")
+        );
+        assert_eq!(
+            sccache_default_dir(Path::new("/home/u"), Some("/xdg"), false),
+            Path::new("/xdg/sccache")
+        );
+    }
+
+    #[test]
+    fn says_what_it_cant_measure() {
+        let m = Inputs {
+            cpus: 8,
+            rustc_procs: 9,
+            unavailable: vec!["load", "memory", "other builds"],
+            ..Inputs::default()
+        };
+        let s = check(&m);
+        assert_eq!(s.findings.len(), 0);
+        assert!(s.facts.iter().all(|f| f.key != "load"));
+        let f = s.facts.iter().find(|f| f.key == "unavailable").unwrap();
+        assert!(
+            f.value
+                .starts_with("load, memory, other builds (not measurable on this platform")
         );
     }
 
