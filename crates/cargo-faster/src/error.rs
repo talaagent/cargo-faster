@@ -17,6 +17,9 @@ pub enum Error {
     /// The command line doesn't parse, or asks for something contradictory.
     #[error("{0}")]
     Usage(String),
+    /// `tests --run` needs cargo-nextest, and it isn't on `PATH`.
+    #[error("tests --run needs cargo-nextest: cargo install --locked cargo-nextest")]
+    NoNextest,
     /// The build being measured failed: no report, or only a partial one.
     #[error("{0}")]
     BuildFailed(String),
@@ -46,6 +49,7 @@ impl Error {
             Self::Unknown(e) => e.code(),
             Self::UnknownName(_) => "unknown_value",
             Self::Usage(_) => "usage",
+            Self::NoNextest => "no_nextest",
             Self::BuildFailed(_) => "build_failed",
             Self::NoWorkspace(_) => "no_workspace",
             Self::NoTimings => "no_timings",
@@ -219,5 +223,10 @@ mod tests {
         assert_eq!(Error::Usage("x".into()).exit_code(), 2);
         assert_eq!(Error::NoTimings.exit_code(), 1);
         assert_eq!(Error::BuildFailed("x".into()).exit_code(), 3);
+        assert_eq!(Error::NoNextest.code(), "no_nextest");
+        assert_eq!(
+            Error::NoNextest.to_string(),
+            "tests --run needs cargo-nextest: cargo install --locked cargo-nextest"
+        );
     }
 }

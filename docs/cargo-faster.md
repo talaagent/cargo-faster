@@ -42,7 +42,7 @@ Every subcommand takes these, before or after the subcommand's name (`cargo fast
 - `--dry-run` prints the builds that `timings --run`, `tests --run` and `check-cost` would start, and stops before starting them. The quick checks still run, because they only read things.
 - `-v` and `-q` change how much it logs to stderr.
 
-The builds it starts are echoed to stderr before they run. Errors go to stderr as `cargo faster: error[CODE]: message`. The codes are stable: `usage`, `build_failed`, `no_workspace`, `no_timings`, `unknown_value`, `failed`, and `cmd_spawn`, `cmd_exit`, `cmd_timeout`, `cmd_io`, `cmd_utf8` when a command it runs goes wrong. A misspelled crate name for `rdeps`, `timings --edit`, or a wrong `-p` or `--bin` for `check-cost`, lists the three closest names.
+The builds it starts are echoed to stderr before they run. Errors go to stderr as `cargo faster: error[CODE]: message`. The codes are stable: `usage`, `build_failed`, `no_nextest`, `no_workspace`, `no_timings`, `unknown_value`, `failed`, and `cmd_spawn`, `cmd_exit`, `cmd_timeout`, `cmd_io`, `cmd_utf8` when a command it runs goes wrong. A misspelled crate name for `rdeps`, `timings --edit`, or a wrong `-p` or `--bin` for `check-cost`, lists the three closest names.
 
 The exit status is:
 
@@ -506,7 +506,7 @@ All of that is read from configuration. To measure, add `--run`:
 $ cargo faster tests --run -- --profile gate --test-threads 8
 ```
 
-It times `cargo nextest run --workspace --no-run --timings`, runs the tests (`--no-fail-fast`, with nextest's libtest-json output), and adds a `test run` section and the build's `timings` section:
+It times `cargo nextest run --workspace --no-run --timings`, runs the tests (`--no-fail-fast`, `--no-tests=warn`, with nextest's libtest-json output), and adds a `test run` section and the build's `timings` section:
 
 ```text
 == test run
@@ -534,7 +534,7 @@ It times `cargo nextest run --workspace --no-run --timings`, runs the tests (`--
 
 Here one hung test, killed by the profile's terminate-after at 600s, is most of the 11-minute run; without it the suite needs about a minute on 8 threads.
 
-Its findings: `test-build-dominates` (the build takes over a minute and more than twice the run), `tests-near-slow-timeout` (tests at half the profile's `slow-timeout` or more), and `test-threads-idle` (the threads were busy less than half the run). Arguments after `--` go to both nextest commands; never pass `-p` there if you use a caching wrapper, as it changes feature resolution and the cache keys.
+Its findings: `test-build-dominates` (the build takes over a minute and more than twice the run), `tests-near-slow-timeout` (tests at half the profile's `slow-timeout` or more), `test-threads-idle` (the threads were busy less than half the run), and `no-tests-ran` (nextest found no tests, and the `tests` fact says `0 tests`). It needs cargo-nextest, on `PATH` or in `~/.cargo/bin`; without it, it stops with `error[no_nextest]` and the install command. Arguments after `--` go to both nextest commands; never pass `-p` there if you use a caching wrapper, as it changes feature resolution and the cache keys.
 
 See [Test suites](guide.md#test-suites) and [Measuring a test run](guide.md#measuring-a-test-run).
 

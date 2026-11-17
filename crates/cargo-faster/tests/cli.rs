@@ -106,6 +106,48 @@ fn fail_on() {
 }
 
 #[test]
+#[allow(clippy::unwrap_used, reason = "a test")]
+fn tests_run_without_nextest_says_how_to_install_it() {
+    // A PATH with only cargo and rustc, and a CARGO_HOME with no bin/.
+    let bin = tempfile::tempdir().unwrap();
+    let which = |p: &str| {
+        let out = Command::new("sh")
+            .args(["-c", &format!("command -v {p}")])
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    };
+    for p in ["cargo", "rustc"] {
+        std::os::unix::fs::symlink(which(p), bin.path().join(p)).unwrap();
+    }
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"tiny\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/lib.rs"), "").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_cargo-faster"))
+        .args(["faster", "tests", "--run"])
+        .current_dir(dir.path())
+        .env("PATH", bin.path())
+        .env("CARGO", bin.path().join("cargo"))
+        .env("CARGO_HOME", dir.path().join("cargo-home"))
+        .env("CARGO_TARGET_DIR", dir.path().join("target"))
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains(
+            "error[no_nextest]: tests --run needs cargo-nextest: cargo install --locked cargo-nextest"
+        ),
+        "{err}"
+    );
+}
+
+#[test]
 fn a_failed_build_exits_3() {
     // `cargo check` of a one-file crate that doesn't compile: quick.
     let lib = "pub fn x() -> u32 { \"no\" }\n";

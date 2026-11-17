@@ -1,7 +1,7 @@
 //! Tests: nextest, target runners, thread limits, database-backed tests,
 //! and the number of test binaries.
 
-use crate::context::{Context, Metadata, on_path};
+use crate::context::{Context, Metadata, has_subcommand};
 use crate::finding::{Finding, Section, Severity};
 use alloc::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -304,7 +304,7 @@ impl Inputs {
         }
         Self {
             nextest_config,
-            nextest_installed: on_path(&ctx.env, "cargo-nextest").is_some(),
+            nextest_installed: has_subcommand(&ctx.env, "nextest"),
             sqlx_tests,
             test_binaries,
             integration_files,
