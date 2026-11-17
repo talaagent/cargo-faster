@@ -43,6 +43,12 @@ impl Error {
     }
 }
 
+impl bpaf_kit::report::Coded for Error {
+    fn code(&self) -> &str {
+        Self::code(self)
+    }
+}
+
 impl From<String> for Error {
     fn from(message: String) -> Self {
         Self::Other(message)

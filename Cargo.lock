@@ -52,9 +52,9 @@ dependencies = [
 
 [[package]]
 name = "bpaf-kit"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d578031120a9e351c3b625ef8c83117eebcd4589915d670c544e5f0bb6aa9a0e"
+checksum = "55ae49361ae5cbe5d434dda0b48e6f4d6c51cf6c10465422298b107cc005342c"
 dependencies = [
  "bpaf",
  "bpaf-kit-macros",
@@ -68,15 +68,15 @@ dependencies = [
 
 [[package]]
 name = "bpaf-kit-build"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08fde3af8c3ddf50ce03c477fae0202de0a21722400109cbfa465858827aacb7"
+checksum = "a4a7d22ae60b2d4d1f7ac99432ee8b9402233d56bc9e7783a16f7cdf0d7cb0c4"
 
 [[package]]
 name = "bpaf-kit-macros"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ca36f24ef0b0494040468c065d019fb0d717d23a2953f8b24856a814766ab08"
+checksum = "b8116abc655ca4a6873f6d5a2ebb0289b56328c202d3f6a86a45eed28f987754"
 dependencies = [
  "proc-macro2",
  "quote",

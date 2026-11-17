@@ -9,7 +9,6 @@ use cargo_faster::context::{Context, build, cargo_bin};
 use cargo_faster::error::Error;
 use cargo_faster::finding::{Fact, Report, Section};
 use cargo_faster::{cache, checkcost, deps, graph, machine, profile, setup, tests, timings};
-use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -117,7 +116,6 @@ struct Nice {
 }
 
 fn main() -> ExitCode {
-    answer_cargo_meta_flags();
     let opts = Opts::cli();
     if opts.dry_run {
         cmd::set_dry_run(true);
@@ -135,34 +133,8 @@ fn main() -> ExitCode {
             eprintln!("cargo faster: {msg}");
             ExitCode::SUCCESS
         }
-        Err(e) => {
-            eprintln!("cargo faster: error[{}]: {e}", e.code());
-            ExitCode::FAILURE
-        }
+        Err(e) => bpaf_kit::report::report_as("cargo faster", &e),
     }
-}
-
-/// `cargo faster ...` runs us as `cargo-faster faster ...`. `Opts::cli()`
-/// answers `--man` and `--version [--verbose]` only as the first argument,
-/// so answer them here when they follow `faster`.
-fn answer_cargo_meta_flags() {
-    let args: Vec<OsString> = std::env::args_os().skip(1).take(4).collect();
-    let Some(rest) = args.strip_prefix(&[OsString::from("faster")]) else {
-        return;
-    };
-    let text = if rest.len() == 1 && rest[0] == bpaf_kit::man::FLAG {
-        bpaf_kit::man::render(&Opts::parser(), &bpaf_kit::build_info!())
-    } else if let Some(verbose) = bpaf_kit::version::version_request(rest) {
-        let info = bpaf_kit::build_info!().with_override();
-        if verbose {
-            info.verbose().to_string()
-        } else {
-            format!("{} {}\n", info.name, info.short())
-        }
-    } else {
-        return;
-    };
-    std::process::exit(i32::from(print(&text) != ExitCode::SUCCESS));
 }
 
 fn print(s: &str) -> ExitCode {
