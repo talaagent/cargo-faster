@@ -10,9 +10,10 @@ pub mod wrapper;
 
 use crate::finding::{Section, table};
 use crate::fmt::{ellipsize, pct, secs};
+use alloc::collections::BTreeSet;
 pub use breakdown::Workspace;
 use breakdown::{KindTime, Linked, Rebuilt, Slowdown, WrapperSummary};
-pub use findings::findings;
+pub use findings::{build_failed, findings};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -271,20 +272,64 @@ pub(crate) fn unix_ms(ts: &str) -> Option<f64> {
     Some((whole * 60.0 + sec) * 1000.0)
 }
 
-/// The newest report in a target directory.
+/// The `cargo-timing-*.html` reports in a target directory, newest first.
 #[must_use]
-pub fn newest_report(target_dir: &Path) -> Option<PathBuf> {
-    let dir = target_dir.join("cargo-timings");
-    std::fs::read_dir(dir)
-        .ok()?
+pub fn reports(target_dir: &Path) -> Vec<PathBuf> {
+    let Ok(dir) = std::fs::read_dir(target_dir.join("cargo-timings")) else {
+        return Vec::new();
+    };
+    let mut all: Vec<PathBuf> = dir
         .flatten()
         .filter(|e| {
             let n = e.file_name();
             let n = n.to_string_lossy();
             n.starts_with("cargo-timing-") && n.ends_with(".html")
         })
-        .max_by_key(std::fs::DirEntry::file_name)
         .map(|e| e.path())
+        .collect();
+    all.sort();
+    all.reverse();
+    all
+}
+
+/// The newest report in a target directory that has units in it: a build
+/// that failed before compiling anything, or one cargo had nothing to do
+/// for, writes a report with none, and that says nothing about the build.
+#[must_use]
+pub fn newest_report(target_dir: &Path) -> Option<PathBuf> {
+    reports(target_dir).into_iter().take(50).find(|p| {
+        std::fs::read_to_string(p)
+            .ok()
+            .and_then(|h| Timings::parse_html(&h).ok())
+            .is_some_and(|t| !t.units.is_empty())
+    })
+}
+
+/// How old a reused report is, for its fact, and a warning when it's
+/// stale: more than a day old, or older than the last change to
+/// `Cargo.lock` (so the dependencies may have changed since).
+#[must_use]
+pub fn report_age(age_s: f64, older_than_lock: bool) -> (String, Option<String>) {
+    let age = if age_s < 120.0 {
+        format!("{age_s:.0} s ago")
+    } else if age_s < 2.0 * 3600.0 {
+        format!("{:.0} min ago", age_s / 60.0)
+    } else if age_s < 2.0 * 86_400.0 {
+        format!("{:.0} h ago", age_s / 3600.0)
+    } else {
+        format!("{:.0} days ago", age_s / 86_400.0)
+    };
+    let why = if age_s > 86_400.0 {
+        Some("more than a day old")
+    } else if older_than_lock {
+        Some("older than Cargo.lock, so dependencies may have changed since")
+    } else {
+        None
+    };
+    let warn = why.map(|w| {
+        format!("this report is {w}: `cargo faster timings --run` times the build as it is now")
+    });
+    (age, warn)
 }
 
 /// What a report says.
@@ -340,6 +385,10 @@ pub struct Analysis {
     pub slowdown: Option<Slowdown>,
     /// Workspace crates recompiled, when the workspace is known.
     pub rebuilt: Option<Rebuilt>,
+    /// The workspace members' package names, when the workspace is known:
+    /// only those can be profiled with `check-cost -p`.
+    #[serde(skip)]
+    pub members: Option<BTreeSet<String>>,
 }
 
 /// What a unit is: its package, target and mode, as in the report.
@@ -470,6 +519,7 @@ pub fn analyze_with(t: &Timings, extra: Extra<'_>) -> Analysis {
         compiled: ran.len(),
         units_fresh: t.units.len() - ran.len(),
         jobs: t.jobs,
+        members: extra.workspace.map(|w| w.deps.keys().cloned().collect()),
         ..Analysis::default()
     };
     if ran.is_empty() {
@@ -907,6 +957,107 @@ mod tests {
         assert_eq!(a.compiled, 4);
         let ids: Vec<_> = findings(&a).iter().map(|f| f.id).collect();
         assert_eq!(ids, ["serial-crate"]);
+    }
+
+    #[test]
+    fn advice_depends_on_whether_a_crate_is_a_member() {
+        let fix = |members: Option<&[&str]>| {
+            let ws = members.map(|m| Workspace {
+                deps: m
+                    .iter()
+                    .map(|n| ((*n).to_owned(), BTreeSet::new()))
+                    .collect(),
+            });
+            let a = analyze_with(
+                &fixture(),
+                Extra {
+                    baseline: None,
+                    workspace: ws.as_ref(),
+                },
+            );
+            let f = findings(&a)
+                .into_iter()
+                .find(|f| f.id == "serial-crate")
+                .unwrap();
+            f.fix
+        };
+        // `big` is a member: profile it, or split it.
+        let member = fix(Some(&["big", "a"]));
+        assert!(
+            member.contains("`cargo faster check-cost -p big`"),
+            "{member}"
+        );
+        assert!(member.contains("split it"), "{member}");
+        // A dependency: no check-cost, which can't profile it.
+        let dep = fix(Some(&["a"]));
+        assert!(!dep.contains("check-cost"), "{dep}");
+        assert!(
+            dep.contains("big is a dependency") && dep.contains("`cargo faster deps`"),
+            "{dep}"
+        );
+        // No workspace (a report read on its own): both, conditionally.
+        let unknown = fix(None);
+        assert!(unknown.contains("If big is a workspace crate"), "{unknown}");
+        assert!(unknown.contains("If it's a dependency"), "{unknown}");
+    }
+
+    #[test]
+    fn nothing_rebuilt_and_failed_builds() {
+        let t = Timings {
+            units: vec![unit(1, "a", 0.0, 0.0, &[], &[])],
+            ..Timings::default()
+        };
+        let f = findings(&analyze(&t));
+        assert_eq!(
+            f.iter().map(|f| f.id).collect::<Vec<_>>(),
+            ["nothing-rebuilt"]
+        );
+        assert!(f[0].fix.contains("--edit CRATE"));
+        let f = build_failed(
+            101,
+            "warning: x\n\nerror[E0308]: mismatched types\nerror: could not compile `app`\n    Timing report saved to /t/x.html\n",
+        );
+        assert_eq!(
+            (f.id, f.severity),
+            ("build-failed", crate::finding::Severity::High)
+        );
+        assert_eq!(f.title, "The build failed (exit 101)");
+        assert!(
+            f.saw.ends_with("error: could not compile `app`"),
+            "{}",
+            f.saw
+        );
+    }
+
+    #[test]
+    fn report_ages() {
+        assert_eq!(report_age(30.0, false), ("30 s ago".into(), None));
+        assert_eq!(report_age(600.0, false).0, "10 min ago");
+        assert!(
+            report_age(600.0, true)
+                .1
+                .unwrap()
+                .contains("older than Cargo.lock")
+        );
+        let (age, warn) = report_age(3.0 * 86_400.0, false);
+        assert_eq!(age, "3 days ago");
+        assert!(warn.unwrap().contains("more than a day old"));
+    }
+
+    #[test]
+    fn newest_report_skips_empty_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = dir.path().join("cargo-timings");
+        std::fs::create_dir(&t).unwrap();
+        let one = "<script>\nconst UNIT_DATA = [\n  {\"i\": 0, \"name\": \"x\", \"version\": \"1\", \"mode\": \"todo\", \"target\": \"\", \"start\": 0.5, \"duration\": 10.0, \"rmeta_time\": 2.0, \"unlocked_units\": []}\n];\n</script>";
+        let none = "<script>\nconst UNIT_DATA = [\n];\n</script>";
+        let old = t.join("cargo-timing-20260101T000000.000Z.html");
+        let new = t.join("cargo-timing-20260102T000000.000Z.html");
+        std::fs::write(&old, one).unwrap();
+        std::fs::write(&new, none).unwrap();
+        assert_eq!(reports(dir.path()), [new.clone(), old.clone()]);
+        assert_eq!(newest_report(dir.path()), Some(old));
+        assert_eq!(reports(&dir.path().join("nope")).len(), 0);
     }
 
     #[test]

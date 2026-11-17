@@ -490,7 +490,10 @@ not json
         let ids: Vec<_> = s.findings.iter().map(|f| f.id).collect();
         assert_eq!(ids, ["no-tests-ran"]);
         let args = |a: &[&str]| a.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
-        assert_eq!(no_tests_arg(&args(&["--profile", "ci"])), Some("--no-tests=warn"));
+        assert_eq!(
+            no_tests_arg(&args(&["--profile", "ci"])),
+            Some("--no-tests=warn")
+        );
         assert_eq!(no_tests_arg(&args(&["--no-tests=fail"])), None);
     }
 
