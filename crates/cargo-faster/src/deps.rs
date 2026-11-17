@@ -53,7 +53,11 @@ pub fn analyze(m: &Metadata) -> Analysis {
     a.duplicates = versions
         .into_iter()
         .filter(|(_, v)| v.len() > 1)
-        .map(|(k, v)| (k.to_owned(), v.into_iter().map(str::to_owned).collect()))
+        .map(|(k, v)| {
+            let mut v: Vec<String> = v.into_iter().map(str::to_owned).collect();
+            v.sort_by_key(|s| version_key(s));
+            (k.to_owned(), v)
+        })
         .collect();
     a.proc_macros.sort();
     a.proc_macros.dedup();
@@ -89,6 +93,13 @@ pub fn analyze(m: &Metadata) -> Analysis {
     a.tokio_full_in.dedup();
     a.async_trait_in.dedup();
     a
+}
+
+/// Sort key for `1.2.3`-style versions: numeric parts compare as numbers.
+fn version_key(v: &str) -> Vec<u64> {
+    v.split(['.', '-', '+'])
+        .map(|p| p.parse().unwrap_or(0))
+        .collect()
 }
 
 /// Crates whose duplicates are expensive enough to mention.
@@ -170,7 +181,7 @@ pub fn section(a: &Analysis) -> Section {
             Finding::new("uses-async-trait", Severity::Info, format!("{} workspace crates use async-trait", a.async_trait_in.len()), "the-cost-of-async-trait")
                 .saw(format!("Direct dependency in: {}.", a.async_trait_in.join(", ")))
                 .why("#[async_trait] expands every method into a boxed future plus a Send proof. That's cheap per method but can add up in crates with many impls.")
-                .fix("`cargo faster check-cost -p <crate>` shows how much time 'async_trait obligations take. Native `async fn` in traits works without the macro when you don't need `dyn Trait`."),
+                .fix("`cargo faster check-cost -p <crate>` shows how much time the async-trait methods' Send proofs take. Native `async fn` in traits works without the macro when you don't need `dyn Trait`."),
         );
     }
     s.extend(f);

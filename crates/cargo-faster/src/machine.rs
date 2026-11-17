@@ -80,8 +80,10 @@ pub fn parse_df(s: &str) -> Option<(String, u64, u64, String)> {
     if cols.len() < 7 {
         return None;
     }
+    // df prints `-` when it can't tell (bind mounts, some sandboxes).
+    let fstype = if cols[1] == "-" { "unknown" } else { cols[1] };
     Some((
-        cols[1].to_owned(),
+        fstype.to_owned(),
         cols[2].parse::<u64>().ok()? * 1024,
         cols[4].parse::<u64>().ok()? * 1024,
         cols[6].to_owned(),
