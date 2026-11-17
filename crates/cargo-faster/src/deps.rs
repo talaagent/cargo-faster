@@ -899,7 +899,7 @@ mod tests {
         ] {
             assert!(!is_test_feature(f), "{f}");
         }
-        for c in ["core-test-utils", "tala_testing", "mock-server", "fixtures"] {
+        for c in ["core-test-utils", "app_testing", "mock-server", "fixtures"] {
             assert!(is_test_crate(c), "{c}");
         }
         for c in ["core", "attestation", "contest", "testnet-node"] {

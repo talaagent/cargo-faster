@@ -16,35 +16,35 @@ $ cargo faster
 == summary
   [medium] The target dir filesystem is 94% full
   [medium] 6 heavy crates are built in more than one version
-  [medium] tala-agent has 108449 lines of Rust
+  [medium] app-agent has 108449 lines of Rust
   [low] cargo is limited to 16 jobs on 32 CPUs
-  [low] Editing tala-spool rebuilds 98 of 183 workspace crates
+  [low] Editing app-spool rebuilds 98 of 183 workspace crates
 ```
 
 The quick report reads your configuration, caches, test setup, dependency graph, and machine, and builds nothing. To see inside the compiler, find the slow crate with `cargo faster timings --run` (`--cmd build|clippy|test` for other builds, `--edit CRATE` to time the rebuild after an edit to one crate), then self-profile it:
 
 ```console
-$ cargo faster check-cost -p tala-agent-bin
+$ cargo faster check-cost -p app-agent-bin
 ```
 
 ```text
-== check-cost: tala_agent_bin (bin)
+== check-cost: app_agent_bin (bin)
   profiled time  38.7s wall, 38.6s across threads
   trait solving  32.1s (83%)
   measured with  rustc with RUSTC_BOOTSTRAP=1 -Zself-profile -Zself-profile-events=default,args, CARGO_INCREMENTAL=0, no RUSTC_WRAPPER
 
   most expensive obligations
   self    count  bodies  predicate
-   0.47s     54      47  tala_agent::bot::Bot: Sync
-   0.46s     54      47  tala_agent::bot::Bot: Send
+   0.47s     54      47  app_agent::bot::Bot: Sync
+   0.46s     54      47  app_agent::bot::Bot: Send
 
   bodies doing the most trait solving
   self   %      preds  body
-  8.06s  20.9%   2977  tala_agent_bin::canonical_persona::{{impl}}::invite
-  3.14s   8.1%   1291  tala_agent_bin::host::{{impl}}[2]::invite
+  8.06s  20.9%   2977  app_agent_bin::canonical_persona::{{impl}}::invite
+  3.14s   8.1%   1291  app_agent_bin::host::{{impl}}[2]::invite
 
-  [high] Trait solving is 83% of tala_agent_bin's check time
-  [medium] Send/Sync proofs for `tala_agent::bot::Bot` are repeated in every async body
+  [high] Trait solving is 83% of app_agent_bin's check time
+  [medium] Send/Sync proofs for `app_agent::bot::Bot` are repeated in every async body
 ```
 
 `--lib`, `--bin`, `--test`, `--example` and `--bench` pick the target, and `--tests` profiles the unit-test (`--test`) build, which is what `cargo test` rebuilds after an edit. `check-cost` runs on the stable toolchain. It sets `RUSTC_BOOTSTRAP=1` so that stable `rustc` accepts `-Zself-profile`, and it says so in the output.

@@ -498,7 +498,7 @@ A timeline from a first build in a new target directory compiles every workspace
 
 ### Cutting a dependency edge
 
-A dependency is all or nothing. If `tala-config` uses one type from a 24,000-line `tala-session-store`, it still waits for all of `tala-session-store` to compile. Every edit to `tala-session-store` also rebuilds `tala-config`, and everything that depends on `tala-config`. When that one edge is how most of the workspace reaches the big crate, it's also why an edit to the big crate rebuilds most of the workspace.
+A dependency is all or nothing. If `app-config` uses one type from a 24,000-line `app-session-store`, it still waits for all of `app-session-store` to compile. Every edit to `app-session-store` also rebuilds `app-config`, and everything that depends on `app-config`. When that one edge is how most of the workspace reaches the big crate, it's also why an edit to the big crate rebuilds most of the workspace.
 
 You can often cut an edge like that cheaply. Move the few items the dependent uses (an ID type, an error enum, a constant) down into a small crate that both sides can depend on, or into a crate the dependent already uses. Then remove the dependency. In one workspace, that took an edit to a session store from rebuilding 79 crates to rebuilding 28. The tradeoff is one more crate, or a type living away from the code it belongs with.
 
@@ -944,7 +944,7 @@ Here's a story from a real workspace: about forty crates of async Rust, implemen
 
 ### The symptom
 
-The workspace had a low-level crate, `tala-mx`, that wrapped the Matrix client. After editing it, `cargo clippy --workspace --all-targets` took **12 minutes and 3 seconds**.
+The workspace had a low-level crate, `app-mx`, that wrapped the Matrix client. After editing it, `cargo clippy --workspace --all-targets` took **12 minutes and 3 seconds**.
 
 Edits to a low-level crate rebuild everything above it, so some of that was expected. But the timeline showed something that wasn't: one unit, the check of the application's binary crate, took **312 seconds**. The application's library crate took 298 seconds. Their test-harness checks were similar. These were `cargo check`-style units: no LLVM at all. Whatever was slow was in the frontend.
 
@@ -964,7 +964,7 @@ Grouping by the crate of the type being proved showed where inside `Bot` the tim
 
 Here's what was happening.
 
-`Bot` held an `Mx`, the wrapper from `tala-mx`. `Mx` held a bare `matrix_sdk::Client`. Inside that client is a large graph of types: an event cache, the latest events per room, a send queue, broadcast channels, and much more.
+`Bot` held an `Mx`, the wrapper from `app-mx`. `Mx` held a bare `matrix_sdk::Client`. Inside that client is a large graph of types: an event cache, the latest events per room, a send queue, broadcast channels, and much more.
 
 Every `#[async_trait]` method that touched `Bot` across an await produced a boxed future that had to be `Send`. Proving that meant proving `Bot: Send + Sync`, which meant walking all of `matrix_sdk::Client`'s internals. And as we saw in [The cost of async-trait](#the-cost-of-async-trait), each method's lifetime bounds are part of its parameter environment, which is part of the trait solver's cache key. So the proof wasn't shared between methods. About 130 async-trait methods across the crates each walked the whole graph again, each costing seconds under load.
 
@@ -972,7 +972,7 @@ The crate wasn't too big, and macros weren't the problem. A single field type, i
 
 ### Fix 1: erase the client
 
-The fix was a pull request of about thirty lines in `tala-mx`, the technique from [Erasing a heavy type](#erasing-a-heavy-type):
+The fix was a pull request of about thirty lines in `app-mx`, the technique from [Erasing a heavy type](#erasing-a-heavy-type):
 
 ```rust
 pub trait SdkClient: Debug + Send + Sync {
@@ -993,7 +993,7 @@ pub struct Mx {
 
 Now proving `Mx: Send` stops at `dyn SdkClient`, which is `Send + Sync` by declaration.
 
-Here are the results. They were measured with `cargo clippy --timings` after the same edit to `tala-mx`, back to back, on a 32-core machine with a load average around 45:
+Here are the results. They were measured with `cargo clippy --timings` after the same edit to `app-mx`, back to back, on a 32-core machine with a load average around 45:
 
 | Unit | Before | After |
 |---|---:|---:|

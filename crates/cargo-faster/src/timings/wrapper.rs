@@ -52,7 +52,7 @@ pub struct WrapperRun {
 /// One per-crate event from `kache stats --format json`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WrapperEvent {
-    /// The rustc crate name (`tala_core`).
+    /// The rustc crate name (`app_core`).
     pub crate_name: String,
     /// When the wrapper started, Unix milliseconds.
     pub start_ms: f64,

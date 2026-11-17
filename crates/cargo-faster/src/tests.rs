@@ -884,7 +884,7 @@ mod unit {
         let s = check(&runner_ctx(), &i);
         assert_eq!(s.findings[0].severity, Severity::Medium);
         assert!(s.findings[0].saw.contains("Not measured"));
-        // tala-agent: 3969 tests, the fastest 8ms, 8 threads, 55s.
+        // app-agent: 3969 tests, the fastest 8ms, 8 threads, 55s.
         i.process_cost = Some(ProcessCost {
             tests: 3969,
             fastest: 0.008,

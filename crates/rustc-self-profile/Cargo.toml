@@ -11,7 +11,7 @@ authors.workspace = true
 readme = "README.md"
 keywords = ["rustc", "self-profile", "measureme", "compile-time", "profiling"]
 categories = ["development-tools::profiling", "development-tools", "no-std"]
-include = ["src/**/*.rs", "examples/**", "tests/**", "README.md", "LICENSE", "NOTICE"]
+include = ["src/**/*.rs", "examples/**", "tests/*.rs", "/README.md", "/LICENSE", "/NOTICE"]
 
 [features]
 default = ["std"]

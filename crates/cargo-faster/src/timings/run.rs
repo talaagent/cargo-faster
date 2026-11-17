@@ -282,8 +282,8 @@ mod tests {
       "workspace_root": "/w", "target_directory": "/w/target",
       "workspace_members": ["core 0.1", "app 0.1", "mac 0.1"],
       "packages": [
-        {"id": "core 0.1", "name": "tala-core", "version": "0.1.0", "manifest_path": "/w/core/Cargo.toml",
-         "targets": [{"name": "tala_core", "kind": ["lib"], "src_path": "/w/core/src/lib.rs"}]},
+        {"id": "core 0.1", "name": "app-core", "version": "0.1.0", "manifest_path": "/w/core/Cargo.toml",
+         "targets": [{"name": "app_core", "kind": ["lib"], "src_path": "/w/core/src/lib.rs"}]},
         {"id": "app 0.1", "name": "app", "version": "0.1.0", "manifest_path": "/w/app/Cargo.toml",
          "targets": [{"name": "app", "kind": ["bin"], "src_path": "/w/app/src/main.rs"}]},
         {"id": "mac 0.1", "name": "mac", "version": "0.1.0", "manifest_path": "/w/mac/Cargo.toml",
@@ -296,8 +296,8 @@ mod tests {
     #[test]
     fn edit_targets() {
         let m = Metadata::parse(META).unwrap();
-        let t = edit_target(&m, "tala_core").unwrap();
-        assert_eq!(t.krate, "tala-core");
+        let t = edit_target(&m, "app_core").unwrap();
+        assert_eq!(t.krate, "app-core");
         assert_eq!(t.file, Path::new("/w/core/src/lib.rs"));
         assert!(!t.proc_macro);
         assert_eq!(
@@ -309,10 +309,10 @@ mod tests {
         let e = edit_target(&m, "serde").unwrap_err();
         assert_eq!(e.code(), "unknown_value");
         assert!(
-            edit_target(&m, "tala-cor")
+            edit_target(&m, "app-cor")
                 .unwrap_err()
                 .to_string()
-                .contains("tala-core")
+                .contains("app-core")
         );
     }
 
@@ -331,14 +331,12 @@ mod tests {
     fn fingerprints() {
         let dir = tempfile::tempdir().unwrap();
         let t = dir.path();
-        assert!(!has_fingerprints(t, &["tala-core"]));
+        assert!(!has_fingerprints(t, &["app-core"]));
         std::fs::create_dir_all(t.join("debug/.fingerprint/serde-0123abcd")).unwrap();
-        assert!(!has_fingerprints(t, &["tala-core"]));
-        std::fs::create_dir_all(
-            t.join("x86_64-unknown-linux-gnu/gate/.fingerprint/tala-core-9f8e"),
-        )
-        .unwrap();
-        assert!(has_fingerprints(t, &["tala-core"]));
+        assert!(!has_fingerprints(t, &["app-core"]));
+        std::fs::create_dir_all(t.join("x86_64-unknown-linux-gnu/gate/.fingerprint/app-core-9f8e"))
+            .unwrap();
+        assert!(has_fingerprints(t, &["app-core"]));
     }
 
     #[test]

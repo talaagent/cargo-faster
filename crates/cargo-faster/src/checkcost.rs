@@ -626,7 +626,7 @@ pub fn load(path: &Path) -> Result<crate::profile::Profile, Error> {
     crate::profile::Profile::load(&stem).map_err(|e| Error::Other(e.to_string()))
 }
 
-/// The crate name from a profile file name (`tala_agent-12345.mm_profdata`).
+/// The crate name from a profile file name (`app_agent-12345.mm_profdata`).
 #[must_use]
 pub fn crate_from_file(path: &Path) -> String {
     let stem = path
@@ -695,8 +695,8 @@ mod tests {
     #[test]
     fn crate_names_from_files() {
         assert_eq!(
-            crate_from_file(Path::new("/t/tala_agent_bin-2359592.mm_profdata")),
-            "tala_agent_bin"
+            crate_from_file(Path::new("/t/app_agent_bin-2359592.mm_profdata")),
+            "app_agent_bin"
         );
         assert_eq!(crate_from_file(Path::new("x.mm_profdata")), "x");
     }
