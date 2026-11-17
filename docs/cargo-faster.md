@@ -34,14 +34,21 @@ $ cargo-faster --man > ~/.local/share/man/man1/cargo-faster.1
 
 ## Global options
 
-Every subcommand takes these:
+Every subcommand takes these, before or after the subcommand's name (`cargo faster --json setup` and `cargo faster setup --json` are the same):
 
 - `--json` prints the report as JSON instead of text, for scripts and agents. Findings keep their `id`, `severity`, `title`, `saw`, `why`, `fix`, and `guide` fields. Each section also has a `data` object with what it measured, so a script can compare runs without parsing the text tables. For `timings`, that's `wall_s`, `units_compiled`, `units_fresh`, `critical_path` (each step with `unit`, `crate`, `version`, `target`, `mode`, `kind`, `start_s`, `took_s`, `waited` (`full` or `meta`), `gap_s`, and `cache` and `wait_s` when kache's records were joined), `slowest_units`, `kinds`, `linked`, `wrapper`, `slowdown` and `rebuilt`. Seconds are in fields ending in `_s`. For `check-cost`, it's `queries`, `obligations`, `trait_solving_by_category`, `heavy_bodies`, `items` and `modules`.
 - `--manifest-path PATH` points at a workspace other than the current directory's.
+- `--fail-on LEVEL` exits 1 when any finding is at least `LEVEL` severe: `high`, `medium` or `low`. The report is printed first. Use it in CI to fail a job on a new `high` finding.
 - `--dry-run` prints the builds that `timings --run`, `tests --run` and `check-cost` would start, and stops before starting them. The quick checks still run, because they only read things.
 - `-v` and `-q` change how much it logs to stderr.
 
-The builds it starts are echoed to stderr before they run. Errors go to stderr as `cargo faster: error[CODE]: message` and exit non-zero. The codes are stable: `no_workspace`, `no_timings`, `unknown_value`, `failed`, and `cmd_spawn`, `cmd_exit`, `cmd_timeout`, `cmd_io`, `cmd_utf8` when a command it runs goes wrong. A misspelled crate name for `rdeps`, or a wrong `-p` or `--bin` for `check-cost`, gets a "did you mean" suggestion.
+The builds it starts are echoed to stderr before they run. Errors go to stderr as `cargo faster: error[CODE]: message`. The codes are stable: `usage`, `no_workspace`, `no_timings`, `unknown_value`, `failed`, and `cmd_spawn`, `cmd_exit`, `cmd_timeout`, `cmd_io`, `cmd_utf8` when a command it runs goes wrong. A misspelled crate name for `rdeps`, `timings --edit`, or a wrong `-p` or `--bin` for `check-cost`, lists the three closest names.
+
+The exit status is:
+
+- `0`: the report was printed, findings or not;
+- `1`: an error, or a finding at or above `--fail-on`;
+- `2`: a usage error: an unknown option, a bad value, or options that don't go together (`timings --body` without `--edit`).
 
 Findings have one of four severities: `high`, `medium`, `low`, and `info`. A `high` finding probably costs you a lot of time right now. An `info` finding is something to know about, not necessarily something to change.
 
@@ -228,11 +235,11 @@ Options:
 - `--lib`, `--bin NAME`, `--test NAME`, `--example NAME` and `--bench NAME` pick the target. The default is the library, or the first binary if there is no library. `--test NAME` is an integration test, `tests/NAME.rs`.
 - `--tests` profiles the `--test` build of the library, binary or example: the unit-test crate, with its `#[cfg(test)]` modules and the test harness. That is the crate `cargo test` and `cargo nextest` rebuild after every edit, and it is often much bigger than the library itself. Integration tests and benchmarks are always built with `--test`.
 - `-- ARGS` passes extra arguments to `cargo check`, like `-- --features postgres`. Target flags here (`-- --tests`, `-- --all-targets`) replace the filter `cargo faster` would add. When they produce both builds of the library, the normal one is profiled, unless they include `--tests` or `--profile test`; then it is the `--test` one.
-- `--keep DIR` writes the profile into `DIR` and keeps it, so you can analyze it again with `--profile` or open it with `summarize` and `crox` from [measureme](https://github.com/rust-lang/measureme).
-- `--profile FILE` analyzes an existing `.mm_profdata` file without building anything.
+- `--keep DIR` writes the profile into `DIR` and keeps it, so you can analyze it again with `--profdata` or open it with `summarize` and `crox` from [measureme](https://github.com/rust-lang/measureme).
+- `--profdata FILE` analyzes an existing `.mm_profdata` file without building anything.
 - `--nice N` sets the priority, as with `timings`.
 
-The header and the `target` line say which build was profiled: `(lib)`, `(bin)`, `(lib, --test)` for unit tests, `(test)` for an integration test. With `--test`, `measured with` starts with `rustc --test`. Both come from the command line recorded in the profile, so `--profile FILE` shows them too.
+The header and the `target` line say which build was profiled: `(lib)`, `(bin)`, `(lib, --test)` for unit tests, `(test)` for an integration test. With `--test`, `measured with` starts with `rustc --test`. Both come from the command line recorded in the profile, so `--profdata FILE` shows them too.
 
 Here's a real profile of the binary crate from the case study, after the first fix:
 
@@ -299,7 +306,7 @@ The findings then put it together:
 
 Each finding has a fix: erasing the heavy type behind `Arc<dyn Trait + Send + Sync>`, or boxing the futures at a module boundary. The guide explains both, in [Erasing a heavy type](guide.md#erasing-a-heavy-type) and [Boxing futures at a boundary](guide.md#boxing-futures-at-a-boundary).
 
-A profile of a big crate on a busy machine can take several minutes. That's because it's a full, non-incremental check. Run it once, keep the profile with `--keep`, and analyze it again with `--profile` as often as you like.
+A profile of a big crate on a busy machine can take several minutes. That's because it's a full, non-incremental check. Run it once, keep the profile with `--keep`, and analyze it again with `--profdata` as often as you like.
 
 ## `cargo faster setup`
 
@@ -491,7 +498,7 @@ See [Test suites](guide.md#test-suites) and [Measuring a test run](guide.md#meas
 
 ```console
 $ cargo faster rdeps            # the whole workspace
-$ cargo faster rdeps tala-core  # one crate
+$ cargo faster rdeps app-core   # one crate (or -p app-core)
 ```
 
 ```text

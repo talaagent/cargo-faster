@@ -61,7 +61,7 @@ $ cargo faster check-cost -p tala-agent-bin
 | `tests` | nextest, target runners, thread limits, database-backed tests |
 | `rdeps` | What rebuilds when a crate changes, which crates are worth splitting, and dependency edges that use only a few items from a big crate |
 
-Every command takes `--json`. See [Using cargo faster](docs/cargo-faster.md) for details and real output.
+Every command takes `--json`, and `--fail-on high|medium|low` to exit 1 on a finding that severe (for CI). See [Using cargo faster](docs/cargo-faster.md) for details and real output.
 
 ## Docs
 

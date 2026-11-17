@@ -18,8 +18,8 @@
 
 use crate::context::{Context, Package, Target, build, cargo_bin};
 use crate::error::Error;
+use crate::error::UnknownName;
 use bpaf_kit::cmd;
-use bpaf_kit::suggest::UnknownValue;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 
@@ -352,11 +352,12 @@ pub fn pick<'a>(ctx: &'a Context, opts: &Options) -> Result<(&'a Package, &'a Ta
     let members: Vec<&Package> = m.members().collect();
     let pkg = if let Some(name) = &opts.package {
         *members.iter().find(|p| &p.name == name).ok_or_else(|| {
-            UnknownValue::new(
+            UnknownName::new(
                 "workspace member",
                 name,
                 members.iter().map(|p| p.name.as_str()),
             )
+            .list_with("cargo faster rdeps")
         })?
     } else if let Some(p) = members
         .iter()
@@ -384,7 +385,7 @@ pub fn pick<'a>(ctx: &'a Context, opts: &Options) -> Result<(&'a Package, &'a Ta
             .iter()
             .find(|t| kinds(t, kind) && t.name == name)
             .ok_or_else(|| {
-                UnknownValue::new(
+                UnknownName::new(
                     format!("{} {what}", pkg.name),
                     name,
                     pkg.targets
