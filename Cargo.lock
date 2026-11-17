@@ -101,6 +101,7 @@ dependencies = [
  "bpaf",
  "bpaf-kit",
  "bpaf-kit-build",
+ "cargo-timings-parse",
  "nextest-libtest-json",
  "rustc-self-profile",
  "serde",
@@ -110,6 +111,15 @@ dependencies = [
  "thiserror",
  "toml",
  "tracing",
+]
+
+[[package]]
+name = "cargo-timings-parse"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

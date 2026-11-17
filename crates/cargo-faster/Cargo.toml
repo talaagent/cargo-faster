@@ -21,6 +21,7 @@ path = "src/main.rs"
 [dependencies]
 bpaf.workspace = true
 bpaf-kit.workspace = true
+cargo-timings-parse.workspace = true
 nextest-libtest-json.workspace = true
 rustc-self-profile.workspace = true
 serde = { workspace = true, features = ["std"] }

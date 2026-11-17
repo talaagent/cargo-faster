@@ -1,17 +1,19 @@
 //! Real reports, from building this repository (see `tests/fixtures/README.md`).
 
 use cargo_timings_parse::{
-    Extra, Jobs, Kind, Timings, Waited, Workspace, analyze, analyze_with, check_before,
-    path_edges,
+    Extra, Jobs, Kind, Timings, Waited, Workspace, analyze, analyze_with, check_before, path_edges,
 };
-use std::collections::BTreeSet;
+extern crate alloc;
+
+use alloc::collections::BTreeSet;
 
 fn read(name: &str) -> Timings {
     let path = format!(
         "{}/tests/fixtures/cargo-faster/{name}.html",
         env!("CARGO_MANIFEST_DIR")
     );
-    Timings::parse_html(&std::fs::read_to_string(path).unwrap()).unwrap()
+    let html = std::fs::read_to_string(path).expect("fixture");
+    Timings::parse_html(&html).expect("a timings report")
 }
 
 fn close(a: f64, b: f64) -> bool {
@@ -25,7 +27,11 @@ fn workspace() -> Workspace {
         deps: [
             (
                 "cargo-faster".to_owned(),
-                ["nextest-libtest-json".to_owned(), "rustc-self-profile".to_owned()].into(),
+                [
+                    "nextest-libtest-json".to_owned(),
+                    "rustc-self-profile".to_owned(),
+                ]
+                .into(),
             ),
             ("nextest-libtest-json".to_owned(), none()),
             ("rustc-self-profile".to_owned(), none()),
@@ -72,7 +78,10 @@ fn cold_check() {
     assert_eq!(a.critical_path[1].waited, Waited::Meta);
     assert_eq!(a.critical_path[4].waited, Waited::Full);
     let syn = &a.slowest[0];
-    assert_eq!((syn.unit.as_str(), syn.of.version.as_str()), ("syn", "2.0.119"));
+    assert_eq!(
+        (syn.unit.as_str(), syn.of.version.as_str()),
+        ("syn", "2.0.119")
+    );
     assert!(close(syn.duration, 3.69));
     assert_eq!(a.linked.units, 0);
 }
@@ -82,17 +91,9 @@ fn cold_check() {
 #[test]
 fn build_after_check() {
     let t = read("build");
-    let check = read("check");
     assert_eq!(t.units.len(), 62);
     assert!(!t.is_check());
-    let ws = workspace();
-    let a = analyze_with(
-        &t,
-        Extra {
-            baseline: Some(&check),
-            workspace: Some(&ws),
-        },
-    );
+    let a = analyze(&t);
     assert_eq!((a.compiled, a.units_fresh), (62, 0));
     assert!(close(a.wall, 7.38));
     let last = a.critical_path.last().unwrap();
@@ -103,28 +104,46 @@ fn build_after_check() {
     assert_eq!(a.linked.units, 1);
     assert!(close(a.linked.tail, 1.05));
     assert_eq!(a.linked.slowest[0].unit, last.unit);
+}
+
+/// The same build compared with the check before it and the workspace.
+#[test]
+fn build_compared_with_check() {
+    let build = read("build");
+    let check = read("check");
+    let ws = workspace();
+    let a = analyze_with(
+        &build,
+        Extra {
+            baseline: Some(&check),
+            workspace: Some(&ws),
+        },
+    );
 
     // Libraries up to their metadata, against the same crates' checks.
-    let s = a.slowdown.as_ref().unwrap();
-    assert!(s.baseline_check);
-    assert!(close(s.baseline_wall, 8.51));
-    assert_eq!(s.compared, 5);
-    assert!(close(s.median, 0.885 / 1.1));
-    assert_eq!(s.top[0].unit, "regex-automata");
-    assert_eq!(s.top[0].before, Some(1.37));
+    let slow = a.slowdown.as_ref().unwrap();
+    assert!(slow.baseline_check);
+    assert!(close(slow.baseline_wall, 8.51));
+    assert_eq!(slow.compared, 5);
+    assert!(close(slow.median, 0.885 / 1.1));
+    assert_eq!(slow.top[0].unit, "regex-automata");
+    assert_eq!(slow.top[0].before, Some(1.37));
 
-    let r = a.rebuilt.as_ref().unwrap();
-    assert_eq!(r.crates, 3);
-    assert_eq!(r.roots, ["nextest-libtest-json", "rustc-self-profile"]);
-    assert!(close(r.busy, 4.93));
+    let rebuilt = a.rebuilt.as_ref().unwrap();
+    assert_eq!(rebuilt.crates, 3);
+    assert_eq!(
+        rebuilt.roots,
+        ["nextest-libtest-json", "rustc-self-profile"]
+    );
+    assert!(close(rebuilt.busy, 4.93));
     // cargo-faster waited for bpaf-kit, not a workspace crate.
     assert_eq!(path_edges(&a, &ws).len(), 0);
 
-    let v = serde_json::to_value(&a).unwrap();
-    assert_eq!(v["critical_path"][1]["waited"], "meta");
-    assert_eq!(v["linked"]["slowest"][0]["took_s"], 1.05);
-    assert_eq!(v["slowdown"]["top"][0]["before_s"], 1.37);
-    assert_eq!(v["jobs"]["ncpu"], 32);
+    let json = serde_json::to_value(&a).unwrap();
+    assert_eq!(json["critical_path"][1]["waited"], "meta");
+    assert_eq!(json["linked"]["slowest"][0]["took_s"], 1.05);
+    assert_eq!(json["slowdown"]["top"][0]["before_s"], 1.37);
+    assert_eq!(json["jobs"]["ncpu"], 32);
 }
 
 #[test]

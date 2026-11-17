@@ -759,8 +759,15 @@ mod tests {
         assert_eq!(s.top[0].before, Some(6.0));
         let kinds: Vec<Kind> = a.kinds.iter().map(|k| k.kind).collect();
         assert_eq!(kinds, [Kind::Link, Kind::Lib]);
-        let path: Vec<&str> = a.critical_path.iter().map(|p| p.of.krate.as_str()).collect();
-        assert_eq!(path, ["lib0", "lib1", "lib2", "lib3", "lib4", "lib5", "tool-5"]);
+        let path: Vec<&str> = a
+            .critical_path
+            .iter()
+            .map(|p| p.of.krate.as_str())
+            .collect();
+        assert_eq!(
+            path,
+            ["lib0", "lib1", "lib2", "lib3", "lib4", "lib5", "tool-5"]
+        );
     }
 
     #[test]

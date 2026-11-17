@@ -2,9 +2,9 @@
 
 use crate::Timings;
 use alloc::borrow::ToOwned;
+use alloc::vec::Vec;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::vec::Vec;
 
 /// The `cargo-timing-*.html` reports in a target directory's
 /// `cargo-timings/`, newest first (cargo puts the start time in the name).

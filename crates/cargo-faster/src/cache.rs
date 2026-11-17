@@ -225,7 +225,7 @@ fn when(iso: &str, now_ms: Option<f64>) -> String {
     let clock = iso
         .get(11..16)
         .map_or_else(String::new, |c| format!("{c} UTC"));
-    let ago = crate::timings::unix_ms(iso)
+    let ago = cargo_timings_parse::parse_timestamp(iso)
         .zip(now_ms)
         .map(|(t, now)| ago((now - t) / 1000.0));
     match ago {
