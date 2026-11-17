@@ -4,6 +4,7 @@ use crate::asynctrait::{self, Scan};
 use crate::context::Metadata;
 use crate::finding::{Finding, Section, Severity};
 use alloc::collections::{BTreeMap, BTreeSet};
+use core::cmp::Ordering;
 use serde::Serialize;
 
 /// What the dependency graph says.
@@ -72,7 +73,7 @@ pub fn analyze(m: &Metadata) -> Analysis {
         .filter(|(_, v)| v.len() > 1)
         .map(|(k, v)| {
             let mut v: Vec<String> = v.into_iter().map(str::to_owned).collect();
-            v.sort_by_key(|s| version_key(s));
+            v.sort_by(|a, b| cmp_versions(a, b));
             (k.to_owned(), v)
         })
         .collect();
@@ -93,7 +94,7 @@ pub fn analyze(m: &Metadata) -> Analysis {
     }
     a.tokio_features.sort();
     a.tokio_features.dedup();
-    a.syn_versions.sort();
+    a.syn_versions.sort_by(|a, b| cmp_versions(a, b));
     for p in m.members() {
         for d in &p.dependencies {
             if d.kind.as_deref() == Some("dev") {
@@ -112,11 +113,55 @@ pub fn analyze(m: &Metadata) -> Analysis {
     a
 }
 
-/// Sort key for `1.2.3`-style versions: numeric parts compare as numbers.
-fn version_key(v: &str) -> Vec<u64> {
-    v.split(['.', '-', '+'])
-        .map(|p| p.parse().unwrap_or(0))
-        .collect()
+/// Semver order, oldest first: `0.8.8 < 0.9.5 < 0.10.3`, and a pre-release
+/// sorts before its release (`1.0.0-alpha.2 < 1.0.0-beta < 1.0.0`). Build
+/// metadata (`+spec-1.1.0`) is ignored, with a string compare as the last
+/// tie-break so the order is total.
+fn cmp_versions(a: &str, b: &str) -> Ordering {
+    let (ka, kb) = (version_key(a), version_key(b));
+    ka.0.cmp(&kb.0)
+        .then_with(|| cmp_pre(ka.1, kb.1))
+        .then_with(|| a.cmp(b))
+}
+
+/// `1.2.3-rc.1+meta` -> (`[1, 2, 3]`, `rc.1`).
+fn version_key(v: &str) -> ([u64; 3], &str) {
+    let v = v.split_once('+').map_or(v, |(v, _)| v);
+    let (core, pre) = v.split_once('-').unwrap_or((v, ""));
+    let mut nums = [0; 3];
+    for (n, part) in nums.iter_mut().zip(core.split('.')) {
+        *n = part.parse().unwrap_or(0);
+    }
+    (nums, pre)
+}
+
+/// Pre-release order: none is greatest, then dot-separated identifiers,
+/// numeric ones as numbers and below alphanumeric ones.
+fn cmp_pre(a: &str, b: &str) -> Ordering {
+    match (a.is_empty(), b.is_empty()) {
+        (true, true) => return Ordering::Equal,
+        (true, false) => return Ordering::Greater,
+        (false, true) => return Ordering::Less,
+        (false, false) => {}
+    }
+    let mut a = a.split('.');
+    let mut b = b.split('.');
+    loop {
+        let o = match (a.next(), b.next()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(x), Some(y)) => match (x.parse::<u64>(), y.parse::<u64>()) {
+                (Ok(x), Ok(y)) => x.cmp(&y),
+                (Ok(_), Err(_)) => Ordering::Less,
+                (Err(_), Ok(_)) => Ordering::Greater,
+                (Err(_), Err(_)) => x.cmp(y),
+            },
+        };
+        if o != Ordering::Equal {
+            return o;
+        }
+    }
 }
 
 /// Crates whose duplicates are expensive enough to mention.
@@ -322,6 +367,76 @@ mod tests {
                 "syn-1-and-2",
                 "uses-async-trait"
             ]
+        );
+    }
+
+    #[test]
+    fn versions_sort_by_semver_oldest_first() {
+        let mut v = vec![
+            "0.10.3",
+            "0.8.8",
+            "0.9.5",
+            "1.0.0",
+            "1.0.0-rc.1",
+            "1.0.0-alpha.10",
+            "1.0.0-alpha.2",
+            "1.0.0-alpha",
+            "1.0.0-alpha.beta",
+            "0.9.12+spec-1.1.0",
+            "10.0.0",
+            "2.0.0",
+        ];
+        v.sort_by(|a, b| cmp_versions(a, b));
+        assert_eq!(
+            v,
+            [
+                "0.8.8",
+                "0.9.5",
+                "0.9.12+spec-1.1.0",
+                "0.10.3",
+                "1.0.0-alpha",
+                "1.0.0-alpha.2",
+                "1.0.0-alpha.10",
+                "1.0.0-alpha.beta",
+                "1.0.0-rc.1",
+                "1.0.0",
+                "2.0.0",
+                "10.0.0",
+            ]
+        );
+    }
+
+    #[test]
+    fn duplicates_and_syn_versions_list_oldest_first() {
+        let m = Metadata::parse(
+            r#"{
+          "workspace_root": "/w", "target_directory": "/w/target", "workspace_members": ["app"],
+          "packages": [
+            {"id": "app", "name": "app", "version": "0.1.0", "manifest_path": "/w/Cargo.toml"},
+            {"id": "r10", "name": "rand", "version": "0.10.3", "manifest_path": "/r/r10"},
+            {"id": "r8", "name": "rand", "version": "0.8.8", "manifest_path": "/r/r8"},
+            {"id": "r9", "name": "rand", "version": "0.9.5", "manifest_path": "/r/r9"},
+            {"id": "s10", "name": "syn", "version": "10.0.0", "manifest_path": "/r/s10"},
+            {"id": "s2", "name": "syn", "version": "2.0.100", "manifest_path": "/r/s2"}
+          ],
+          "resolve": {"nodes": [
+            {"id": "app"}, {"id": "r10"}, {"id": "r8"}, {"id": "r9"}, {"id": "s10"}, {"id": "s2"}
+          ]}
+        }"#,
+        )
+        .unwrap();
+        let a = analyze(&m);
+        assert_eq!(a.duplicates["rand"], ["0.8.8", "0.9.5", "0.10.3"]);
+        assert_eq!(a.syn_versions, ["2.0.100", "10.0.0"]);
+        let s = section(&a);
+        let f = s
+            .findings
+            .iter()
+            .find(|f| f.id == "duplicate-heavy-crates")
+            .unwrap();
+        assert!(
+            f.saw
+                .starts_with("rand 0.8.8 + 0.9.5 + 0.10.3, syn 2.0.100 + 10.0.0.")
         );
     }
 
