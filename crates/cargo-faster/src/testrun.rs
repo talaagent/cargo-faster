@@ -755,7 +755,7 @@ not json
             kind: "bin".into(),
             tests: 0
         }));
-        assert!(parse_list("not json").is_empty());
+        assert_eq!(parse_list("not json"), []);
         let unit = |name: &str, target: &str, duration: f64| crate::timings::Unit {
             name: name.into(),
             target: target.into(),
