@@ -19,7 +19,7 @@ $ cargo faster
   [low] Editing tala-spool rebuilds 98 of 183 workspace crates
 ```
 
-The quick report reads your configuration, caches, test setup, dependency graph, and machine, and builds nothing. To see inside the compiler, find the slow crate with `cargo faster timings --run`, then self-profile it:
+The quick report reads your configuration, caches, test setup, dependency graph, and machine, and builds nothing. To see inside the compiler, find the slow crate with `cargo faster timings --run` (`--cmd build|clippy|test` for other builds, `--edit CRATE` to time the rebuild after an edit to one crate), then self-profile it:
 
 ```console
 $ cargo faster check-cost -p tala-agent-bin

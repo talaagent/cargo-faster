@@ -5,6 +5,7 @@
 
 pub mod breakdown;
 mod findings;
+pub mod run;
 pub mod wrapper;
 
 use crate::finding::{Section, table};

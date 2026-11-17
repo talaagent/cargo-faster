@@ -82,6 +82,33 @@ $ cargo faster timings --run
 
 That runs `cargo check --workspace --timings` under `nice -n 10`. Use `--nice 0` to run it at normal priority. You can also pass a report file to read, including one from another machine. `--baseline FILE` names an earlier report to compare with (see below).
 
+`--cmd` picks the build to time, and anything after `--` goes to cargo:
+
+```console
+$ cargo faster timings --cmd build                  # cargo build --workspace --timings
+$ cargo faster timings --cmd clippy                 # cargo clippy --workspace --timings
+$ cargo faster timings --cmd test -- --profile ci   # cargo nextest run --workspace --no-run --timings --profile ci
+```
+
+`--cmd test` times the test build: `cargo nextest run --no-run` when nextest is installed, `cargo test --no-run` otherwise. Every build is `--workspace`, never `-p`, so it resolves features and cache keys the way your usual build does. Clippy runs rustc through `clippy-driver`, so its units don't share artifacts or cache entries with `cargo check`: time the one you wait on.
+
+### What an edit to one crate costs
+
+`--edit CRATE` measures the build you get after editing a crate, without you editing anything:
+
+```console
+$ cargo faster timings --edit tala-mx --cmd clippy
++ cargo clippy --workspace
++ cargo clippy --workspace --timings
+== timings
+  build        cargo clippy --workspace --timings
+  edit         tala-mx: a new public function (the crate's API changed) in crates/tala-mx/src/lib.rs, restored after the build
+  ...
+  rebuilt      23 workspace crates, from tala-mx
+```
+
+It first runs the build without `--timings`, so the timed build starts from an up-to-date tree. Then it appends a probe function to the crate's root file, times the build, and puts the file back (also on an error or Ctrl-C). The probe is a new public function, which changes the crate's API the way adding or changing a public item does. `--body` changes only a private function's body instead, which is the cheapest kind of edit: compare the two to see what your dependents pay for API changes. A proc-macro crate always gets a body edit. Restoring the file is an edit too, so your next build rebuilds the same crates once more.
+
 Here's a report from an edit to the application crate:
 
 ```text

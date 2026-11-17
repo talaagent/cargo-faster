@@ -39,6 +39,8 @@ If `cargo faster` isn't installed: `cargo install --locked cargo-faster`, or
 
    ```sh
    cargo faster timings --run          # runs `cargo check --workspace --timings` under nice
+   cargo faster timings --cmd build    # or build, clippy, test (nextest/test --no-run); `-- ARGS` go to cargo
+   cargo faster timings --edit CRATE   # warm up, add a probe pub fn to CRATE, time the rebuild, restore
    cargo faster timings path/to/cargo-timing.html   # or read an existing report
    cargo faster tests --run            # slow tests? times the test build and the run separately
    ```
@@ -47,8 +49,9 @@ If `cargo faster` isn't installed: `cargo install --locked cargo-faster`, or
    go to step 4. Units that spend most of their time in codegen point to generics and
    monomorphization (`cargo llvm-lines`). Build scripts and proc macros show up too.
 
-   For a slow `cargo build` (not a check), run `cargo check --workspace --timings` first and
-   then the build with `--timings`: `cargo faster timings` compares the build with that check
+   To reproduce "an edit to X is slow", use `--edit X` with the user's `--cmd`; add `--body`
+   for an edit that doesn't change X's API. For a slow `cargo build` (not a check), run
+   `cargo check --workspace --timings` first and then the build with `--timings`: `cargo faster timings` compares the build with that check
    (or `--baseline FILE`), and with kache it shows each unit's cache outcome and waits. The
    facts and findings then say whether the time went to rebuilt workspace crates
    (`edit-rebuilt-many`), links (`slow-links`), waits (`wrapper-wait`,
