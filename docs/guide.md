@@ -799,6 +799,8 @@ That costs one extra `exec` per test, about a millisecond. `cargo faster tests` 
 
 If you have a runner configured, check whether it's needed for tests, and whether it's set somewhere you didn't expect: a global `~/.cargo/config.toml`, or an environment variable. `CARGO_TARGET_<TRIPLE>_RUNNER` set by a script (a CI or pre-merge script, a Makefile) beats the config's runner for that run, so the runner that wraps your CI tests may not be the one in `.cargo/config.toml`. `cargo faster tests` reports runners, the lines in `scripts/`, Makefiles, justfiles and CI workflows that override them, nextest configuration, and relevant environment variables. The surest way to know what a runner costs is to run one quick test a few times through `cargo nextest run` with and without it, back to back.
 
+A runner that does real work isn't necessarily slow. `cargo faster tests` alone can't tell, so it grades such a runner `medium` and says it is unmeasured. `cargo faster tests --run` sizes it: every test is a process, so the fastest test's time is at least what one process costs, runner included, and tests × that / threads bounds what the runner adds to the run's wall time. The finding is `high` only when that bound is a quarter of the run or more; in one workspace, 3,969 tests whose fastest took 8 ms on 8 threads bound a timeout-wrapper runner at 4 s of a 55 s run, and timing the run with and without it showed no difference.
+
 ### Database-backed tests
 
 Tests that talk to a real database are often slow for reasons that have nothing to do with Rust. If your tests use PostgreSQL, a few changes can make a big difference:
@@ -852,6 +854,29 @@ mod billing;
 
 Cargo picks up `tests/it/main.rs` as a single integration test target named `it`. Now there's one crate to compile and one binary to link. You can still run a subset by name: `cargo test --test it auth::`, or with nextest's filters.
 
+### Test binaries without tests
+
+Cargo builds a test binary for every lib and bin target, and for every file in `tests/`, whether or not it holds a `#[test]`. Each one compiles its crate again in test mode and links the whole dependency graph. In one workspace, `cargo nextest run --no-run` spent 65.9 s on a 345-line lib's test binary and 63.8 s on an 81-line `main.rs`'s, about 220 s of unit time across four binaries that ran no tests.
+
+Turn the test binary off on the target in its Cargo.toml:
+
+```toml
+[lib]
+test = false
+
+# An implicit bin (src/main.rs) needs an explicit entry to carry the setting.
+[[bin]]
+name = "my-tool"
+path = "src/main.rs"
+test = false
+```
+
+Delete an empty file under `tests/`. Doc tests aren't affected (that is `doctest`). The tradeoff: a `#[test]` added to that target later doesn't run until `test = false` comes off, so a CI check that fails when a `test = false` target gains tests is worth the few lines.
+
+A bin with one or two tests is the same problem in a smaller form. If its test unit is on the critical path of the test build, the whole build waits for a binary that runs one test. Move the tests, and the code they test, into the package's lib, and set `test = false` on the `[[bin]]`.
+
+`cargo faster tests --run` lists each binary's tests with `cargo nextest list` after the `--no-run` build, reports the ones with none and what building them cost (from the build's timings), and flags bin test targets with one or two tests on the critical path.
+
 ### Measuring a test run
 
 A slow test suite is two problems that look like one: **building** the test binaries, and **running** them. Measure them separately before fixing either:
@@ -863,8 +888,9 @@ $ cargo nextest run --workspace                      # the run
 
 `cargo faster tests --run` does both. Arguments after `--` go to both commands, e.g. `cargo faster tests --run -- --profile ci`, except that the `--no-run` build drops the ones nextest only accepts for a run (`--no-fail-fast`, `--test-threads`, `--retries`, `-E` and other filters, reporter options, test binary arguments after a second `--`), so a gate's command line can be pasted as is. It reports:
 
-- **build vs run wall time.** In big workspaces the build is often most of the wait: in one workspace, building the tests took 9 minutes cold and 98 s after a one-line edit, and running all 3,885 of them took 66 s. Faster tests wouldn't have helped; the timings section (from the `--no-run` build) shows which units to work on.
+- **build vs run wall time.** In big workspaces the build is often most of the wait: in one workspace, building the tests took 9 minutes cold and 98 s after a one-line edit, and running all 3,885 of them took 66 s. Faster tests wouldn't have helped; the timings section (from the `--no-run` build) shows which units to work on. When the build compiled nothing, the section says `fresh, nothing compiled` and the timings section is left out.
 - **the slowest tests and test binaries.** Under nextest every test is a process, so a binary's fastest test is roughly what it costs to start one of its processes.
+- **test binaries with no tests**, and what building them cost (see [Test binaries without tests](#test-binaries-without-tests)).
 - **tests near the slow-timeout**, the ones a loaded machine pushes over it.
 - **how busy the test threads were**: total test time over wall time × threads. A low number means the run waits on a few long tests at the end, a test group with a low thread limit, or setup outside the tests.
 
