@@ -1,4 +1,4 @@
-# CI: fmt, clippy, tests, MSRV, docs, cargo-deny, package verification and
+# CI: fmt, clippy, tests (Linux and macOS), MSRV, docs, cargo-deny, package verification and
 # the Nix flake (dev shell and the package build).
 
 name: CI
@@ -20,7 +20,7 @@ env:
   CARGO_TERM_COLOR: always
   # The toolchain the crate is developed against (rust-toolchain.toml).
   # Bump it with release-plz.yml's.
-  RUST_TOOLCHAIN: "1.98.1"
+  RUST_TOOLCHAIN: "1.99.1"
 
 jobs:
   fmt:
@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      # dtolnay/rust-toolchain master @ 2026-10-16; installs env.RUST_TOOLCHAIN (1.98.1)
+      # dtolnay/rust-toolchain master @ 2026-10-16; installs env.RUST_TOOLCHAIN (1.99.1)
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -40,7 +40,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      # dtolnay/rust-toolchain master @ 2026-10-16; installs env.RUST_TOOLCHAIN (1.98.1)
+      # dtolnay/rust-toolchain master @ 2026-10-16; installs env.RUST_TOOLCHAIN (1.99.1)
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -73,7 +73,7 @@ jobs:
       CARGO_FASTER_PROFILE_TESTS: "1"
     steps:
       - uses: actions/checkout@v7
-      # dtolnay/rust-toolchain master @ 2026-10-16; installs env.RUST_TOOLCHAIN (1.98.1)
+      # dtolnay/rust-toolchain master @ 2026-10-16; installs env.RUST_TOOLCHAIN (1.99.1)
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -82,12 +82,30 @@ jobs:
       - run: cargo nextest run --profile ci --workspace --locked
       - run: cargo test --workspace --doc --locked
 
+  macos:
+    # Linux is the primary platform; this keeps the macOS fallbacks (sysctl,
+    # vm_stat, ps, df -P, mount) building and their tests passing.
+    name: macOS (clippy, test)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      # dtolnay/rust-toolchain master @ 2026-10-16; installs env.RUST_TOOLCHAIN (1.99.1)
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo nextest run --profile ci --workspace --locked
+
   msrv:
     name: MSRV
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      # dtolnay/rust-toolchain master @ 2026-10-16; installs env.RUST_TOOLCHAIN (1.98.1)
+      # dtolnay/rust-toolchain master @ 2026-10-16; installs env.RUST_TOOLCHAIN (1.99.1)
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -110,7 +128,7 @@ jobs:
       RUSTDOCFLAGS: -D warnings
     steps:
       - uses: actions/checkout@v7
-      # dtolnay/rust-toolchain master @ 2026-10-16; installs env.RUST_TOOLCHAIN (1.98.1)
+      # dtolnay/rust-toolchain master @ 2026-10-16; installs env.RUST_TOOLCHAIN (1.99.1)
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -133,7 +151,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      # dtolnay/rust-toolchain master @ 2026-10-16; installs env.RUST_TOOLCHAIN (1.98.1)
+      # dtolnay/rust-toolchain master @ 2026-10-16; installs env.RUST_TOOLCHAIN (1.99.1)
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}

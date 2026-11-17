@@ -425,13 +425,15 @@ Before you believe any timing, know what else the machine was doing:
   memory         179.6 GiB available of 249.1 GiB
   target dir fs  /home/me/proj/app/target on /home (btrfs), 221.9 GiB free
   cache fs       /home/me/.cache/kache-store on /home (btrfs), 221.9 GiB free
-  tmp fs         /tmp on /tmp (unknown), 817.1 GiB free
+  tmp fs         /tmp on /tmp (tmpfs), 817.1 GiB free
 
   [high] The machine is busy: timings will be noisy and slower
   [medium] The target dir filesystem is 94% full
 ```
 
 It checks load against the number of cores, other `rustc` and `cargo` processes, memory and swap, free disk space, and whether your target directory and your cache are on the same filesystem. If they aren't, a cache hit is a full copy instead of a reflink.
+
+On Linux these come from `/proc`, `df -PT`, the mount table and `stat -f`. On macOS they come from `sysctl` (load, memory, swap), `vm_stat` (free memory), `ps` (other builds), and `df -P` plus `mount` (filesystems). The default sccache directory there is `~/Library/Caches/Mozilla.sccache`. Anything it can't read on a platform is listed in an `unavailable` fact and left out, rather than reported as zero, and a busy-machine finding needs a load or process count to go on.
 
 A load average of 74 on 32 cores means every number on this page could be twice what it would be on a quiet machine. That's fine, as long as you compare before and after under similar load, back to back. See [Measuring fairly](guide.md#measuring-fairly).
 
