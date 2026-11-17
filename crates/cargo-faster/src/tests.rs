@@ -23,8 +23,77 @@ pub struct Inputs {
     /// the runner as configured.
     pub runner_scripts: BTreeMap<String, String>,
     /// Lines in the repository's scripts that mention a test setting (a
-    /// `CARGO_TARGET_<TRIPLE>_RUNNER` override, ...).
+    /// `CARGO_TARGET_<TRIPLE>_RUNNER` override, `--test-threads`).
     pub script_hits: Vec<ScriptHit>,
+    /// What the workspace already does to make test databases cheap.
+    pub db_setup: DbSetup,
+}
+
+/// Where the workspace already makes test databases cheap, as `file:line`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DbSetup {
+    /// `CREATE DATABASE .. TEMPLATE ..` from a template of its own (not
+    /// `template0`/`template1`).
+    pub template: Option<String>,
+    /// `fsync=off` or `synchronous_commit=off`.
+    pub durability: Option<String>,
+    /// The data directory on tmpfs (`/dev/shm`, `tmpfs`) in a file that
+    /// starts Postgres.
+    pub tmpfs: Option<String>,
+}
+
+impl DbSetup {
+    /// Look through one file's text; keep the first location of each.
+    pub fn scan(&mut self, file: &str, text: &str) {
+        let lower = text.to_lowercase();
+        let starts_postgres = ["postgres", "initdb", "pg_ctl"]
+            .iter()
+            .any(|w| lower.contains(w));
+        for (n, l) in lower.lines().enumerate() {
+            let at = || Some(format!("{file}:{}", n + 1));
+            if self.template.is_none() && l.contains("create database") {
+                let words: Vec<&str> = l.split_whitespace().collect();
+                let from_own_template = words.windows(2).any(|w| {
+                    w[0] == "template" && {
+                        let t = w[1]
+                            .trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '{');
+                        !t.is_empty() && t != "template0" && t != "template1"
+                    }
+                });
+                if from_own_template {
+                    self.template = at();
+                }
+            }
+            if self.durability.is_none() {
+                let squashed: String = l
+                    .chars()
+                    .filter(|c| !c.is_whitespace() && *c != '"' && *c != '\'')
+                    .collect();
+                if squashed.contains("fsync=off") || squashed.contains("synchronous_commit=off") {
+                    self.durability = at();
+                }
+            }
+            if self.tmpfs.is_none()
+                && starts_postgres
+                && (l.contains("/dev/shm") || l.contains("tmpfs"))
+            {
+                self.tmpfs = at();
+            }
+        }
+    }
+
+    /// `(what, where)` for each thing found.
+    #[must_use]
+    pub fn found(&self) -> Vec<(&'static str, &str)> {
+        [
+            ("template databases", &self.template),
+            ("fsync off", &self.durability),
+            ("tmpfs", &self.tmpfs),
+        ]
+        .into_iter()
+        .filter_map(|(k, v)| v.as_deref().map(|v| (k, v)))
+        .collect()
+    }
 }
 
 /// One line of a repository script (`scripts/`, a Makefile, a justfile, a
@@ -41,6 +110,12 @@ pub struct ScriptHit {
     /// through a variable holding that name), the runner it sets, with
     /// `$PWD/` and quotes stripped; `None` when it can't be read.
     pub runner: Option<String>,
+    /// For a nextest command line, the `--test-threads`/`-j` it passes
+    /// (or a `NEXTEST_TEST_THREADS=` it sets).
+    pub test_threads: Option<String>,
+    /// For a nextest command line, the `--profile`/`-P` it passes (or a
+    /// `NEXTEST_PROFILE=` it sets).
+    pub nextest_profile: Option<String>,
 }
 
 impl ScriptHit {
@@ -78,10 +153,28 @@ fn assigned_value(line: &str, key: &str) -> Option<String> {
     (!v.is_empty() && !v.starts_with('$')).then(|| v.to_owned())
 }
 
+/// The value of `flag` on a command line: `--flag v` or `--flag=v`.
+fn flag_value(line: &str, flags: &[&str]) -> Option<String> {
+    let words: Vec<&str> = line.split_whitespace().collect();
+    words.iter().enumerate().find_map(|(i, w)| {
+        let w = w.trim_matches(['"', '\'']);
+        flags.iter().find_map(|f| {
+            if w == *f {
+                words
+                    .get(i + 1)
+                    .map(|v| v.trim_matches(['"', '\'', ';']).to_owned())
+            } else {
+                w.strip_prefix(f)?.strip_prefix('=').map(str::to_owned)
+            }
+        })
+    })
+}
+
 /// The lines of a script that set a target runner through the environment:
 /// `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=...`, or a variable that
 /// holds that name (`runner_var=CARGO_TARGET_..._RUNNER` and later
-/// `$runner_var=...`, as in `env "$runner_var=..." cargo nextest run`).
+/// `$runner_var=...`, as in `env "$runner_var=..." cargo nextest run`), or
+/// that run nextest with `--test-threads` (with the `--profile`, if any).
 #[must_use]
 pub fn script_hits(file: &str, text: &str) -> Vec<ScriptHit> {
     let lines: Vec<(usize, &str)> = text
@@ -107,11 +200,24 @@ pub fn script_hits(file: &str, text: &str) -> Vec<ScriptHit> {
     }
     let mut out = Vec::new();
     for (n, l) in &lines {
+        let nextest = l.contains("nextest");
+        let test_threads = flag_value(l, &["NEXTEST_TEST_THREADS"]).or_else(|| {
+            nextest
+                .then(|| flag_value(l, &["--test-threads", "-j"]))
+                .flatten()
+        });
+        let nextest_profile = flag_value(l, &["NEXTEST_PROFILE"]).or_else(|| {
+            nextest
+                .then(|| flag_value(l, &["--profile", "-P"]))
+                .flatten()
+        });
         let hit = |runner| ScriptHit {
             file: file.to_owned(),
             line: *n,
             text: (*l).to_owned(),
             runner,
+            test_threads: test_threads.clone(),
+            nextest_profile: nextest_profile.clone(),
         };
         let used = vars.iter().find_map(|v| {
             [format!("${{{v}}}"), format!("${v}")]
@@ -127,6 +233,8 @@ pub fn script_hits(file: &str, text: &str) -> Vec<ScriptHit> {
                     .map(|j| &l[i..i + j + "_RUNNER".len()])
             });
             out.push(hit(key.and_then(|k| assigned_value(l, k))));
+        } else if test_threads.is_some() {
+            out.push(hit(None));
         }
     }
     out
@@ -161,11 +269,21 @@ impl Inputs {
         let (test_binaries, integration_files) =
             ctx.metadata.as_ref().map_or((0, 0), count_test_binaries);
         let mut sqlx_tests = 0;
+        let mut db_setup = DbSetup::default();
         if let Some(m) = &ctx.metadata {
-            for p in m.members() {
-                if let Some(dir) = p.manifest_path.parent() {
-                    sqlx_tests += count_in_rs(dir, "#[sqlx::test");
-                }
+            let mut dirs: Vec<&Path> = m
+                .members()
+                .filter_map(|p| p.manifest_path.parent())
+                .collect();
+            // A root package's dir contains the others; scan each file once.
+            dirs.sort();
+            dirs.dedup_by(|b, a| b.starts_with(a));
+            for dir in dirs {
+                walk_rs(dir, &mut |p, text| {
+                    sqlx_tests += text.matches("#[sqlx::test").count();
+                    let rel = p.strip_prefix(root).unwrap_or(p).display().to_string();
+                    db_setup.scan(&rel, text);
+                });
             }
         }
         let mut runner_scripts = BTreeMap::new();
@@ -176,7 +294,7 @@ impl Inputs {
                 runner_scripts.insert(r, text);
             }
         }
-        let script_hits = gather_script_hits(root);
+        let script_hits = gather_script_hits(root, &mut db_setup);
         for h in &script_hits {
             if let Some(v) = &h.runner
                 && let Some(text) = read_small(&root.join(v))
@@ -192,6 +310,7 @@ impl Inputs {
             integration_files,
             runner_scripts,
             script_hits,
+            db_setup,
         }
     }
 }
@@ -222,7 +341,8 @@ fn runner_program(ctx: &Context, src: &str, runner: &str) -> Option<PathBuf> {
 
 /// Scan the scripts that usually drive test runs: `scripts/` (two levels),
 /// `Makefile`, `justfile` and `.github/workflows`.
-fn gather_script_hits(root: &Path) -> Vec<ScriptHit> {
+/// Also looks for database setup in them, and in compose files.
+fn gather_script_hits(root: &Path, db: &mut DbSetup) -> Vec<ScriptHit> {
     let mut files = Vec::new();
     for name in [
         "Makefile",
@@ -231,6 +351,10 @@ fn gather_script_hits(root: &Path) -> Vec<ScriptHit> {
         "justfile",
         "Justfile",
         ".justfile",
+        "docker-compose.yml",
+        "docker-compose.yaml",
+        "compose.yml",
+        "compose.yaml",
     ] {
         files.push(root.join(name));
     }
@@ -242,6 +366,7 @@ fn gather_script_hits(root: &Path) -> Vec<ScriptHit> {
         if let Some(text) = read_small(&f) {
             let rel = f.strip_prefix(root).unwrap_or(&f).display().to_string();
             out.extend(script_hits(&rel, &text));
+            db.scan(&rel, &text);
         }
     }
     out
@@ -289,28 +414,25 @@ pub fn count_test_binaries(m: &Metadata) -> (usize, usize) {
     (bins, files)
 }
 
-fn count_in_rs(dir: &Path, needle: &str) -> usize {
+/// Call `f` with every `.rs` file under `dir` (skipping `target/` and
+/// hidden directories) and its text.
+fn walk_rs(dir: &Path, f: &mut impl FnMut(&Path, &str)) {
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0;
+        return;
     };
-    entries
-        .flatten()
-        .map(|e| {
-            let p = e.path();
-            let name = e.file_name();
-            if p.is_dir() {
-                if name == "target" || name.to_string_lossy().starts_with('.') {
-                    0
-                } else {
-                    count_in_rs(&p, needle)
-                }
-            } else if p.extension().is_some_and(|x| x == "rs") {
-                std::fs::read_to_string(&p).map_or(0, |s| s.matches(needle).count())
-            } else {
-                0
+    for e in entries.flatten() {
+        let p = e.path();
+        let name = e.file_name();
+        if p.is_dir() {
+            if name != "target" && !name.to_string_lossy().starts_with('.') {
+                walk_rs(&p, f);
             }
-        })
-        .sum()
+        } else if p.extension().is_some_and(|x| x == "rs")
+            && let Ok(text) = std::fs::read_to_string(&p)
+        {
+            f(&p, &text);
+        }
+    }
 }
 
 /// Target runners from config and environment: `(where, runner)`.
@@ -340,6 +462,156 @@ pub fn runners(ctx: &Context) -> Vec<(String, String)> {
         }
     }
     out
+}
+
+/// `NEXTEST_TEST_THREADS` against the profiles' `test-threads`, crediting
+/// scripts that pass `--test-threads` themselves.
+fn threads_env(ctx: &Context, i: &Inputs, s: &mut Section, f: &mut Vec<Finding>) {
+    let profile_threads: Vec<(String, String)> = i
+        .nextest_config
+        .as_ref()
+        .and_then(|c| c.get("profile"))
+        .and_then(toml::Value::as_table)
+        .map(|p| {
+            p.iter()
+                .filter_map(|(name, v)| {
+                    v.get("test-threads").map(|t| (name.clone(), t.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(t) = ctx.var("NEXTEST_TEST_THREADS") {
+        s.fact("NEXTEST_TEST_THREADS", t);
+        // Profiles whose callers pass --test-threads themselves.
+        let passes = |profile: &str| {
+            i.script_hits
+                .iter()
+                .find(|h| h.test_threads.is_some() && h.nextest_profile.as_deref() == Some(profile))
+        };
+        let (covered, overridden): (Vec<_>, Vec<_>) = profile_threads
+            .iter()
+            .partition(|(p, _)| passes(p).is_some());
+        let covered_note = covered
+            .iter()
+            .filter_map(|(p, _)| {
+                let h = passes(p)?;
+                Some(format!(
+                    "{} passes --test-threads {} with --profile {p}",
+                    h.location(),
+                    h.test_threads.as_deref().unwrap_or_default()
+                ))
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        let listed = |v: &[&(String, String)]| {
+            v.iter()
+                .map(|(p, n)| format!("{p}={n}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        if !overridden.is_empty() {
+            f.push(
+                Finding::new("nextest-threads-env", Severity::Medium, "NEXTEST_TEST_THREADS overrides your nextest profile", "nextest")
+                    .saw(format!("NEXTEST_TEST_THREADS={t} is set, and .config/nextest.toml sets test-threads ({}).{}", listed(&overridden), if covered_note.is_empty() { String::new() } else { format!(" Scripts pass their own for the rest: {covered_note}.") }))
+                    .why("The environment variable beats the profile, so the limit someone chose for a reason (database tests, memory) silently stops applying, or a tuned profile is throttled by a stale shell setting.")
+                    .fix("Unset NEXTEST_TEST_THREADS and keep the limit in the profile, or pass `--test-threads` explicitly in the scripts that use the profile."),
+            );
+        } else if !covered.is_empty() {
+            f.push(
+                Finding::new("nextest-threads-env", Severity::Info, format!("NEXTEST_TEST_THREADS={t} sets the threads for plain nextest runs"), "nextest")
+                    .saw(format!("NEXTEST_TEST_THREADS={t} is set, and .config/nextest.toml sets test-threads ({}). {covered_note}, so those runs get the profile's threads; a plain `cargo nextest run` gets {t}.", listed(&covered)))
+                    .why("The environment variable beats the profile's test-threads, but an explicit --test-threads beats both. Scripts that pass it are unaffected.")
+                    .fix("Nothing, if that's intended. Running a profile by hand (`cargo nextest run --profile NAME`) gets the variable's threads, not the profile's."),
+            );
+        }
+    }
+}
+
+/// Database-backed tests, and the setup the workspace already has for them.
+fn database_tests(ctx: &Context, i: &Inputs, s: &mut Section, f: &mut Vec<Finding>) {
+    let deps: Vec<&str> = ctx
+        .metadata
+        .as_ref()
+        .map(|m| {
+            m.members()
+                .flat_map(|p| p.dependencies.iter().map(|d| d.name.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let db: Vec<&str> = [
+        "sqlx",
+        "testcontainers",
+        "postgresql_embedded",
+        "pg-embed",
+        "tokio-postgres",
+        "diesel",
+        "sea-orm",
+        "pgtemp",
+    ]
+    .into_iter()
+    .filter(|d| deps.contains(d))
+    .collect();
+    if !db.is_empty() {
+        s.fact("database crates", db.join(", "));
+        if i.sqlx_tests > 0 {
+            s.fact("#[sqlx::test] tests", i.sqlx_tests.to_string());
+        }
+        let found = i.db_setup.found();
+        for (what, at) in &found {
+            s.fact(format!("db tests: {what}"), *at);
+        }
+        let setup_scripts: Vec<String> = i
+            .nextest_config
+            .as_ref()
+            .and_then(|c| c.get("scripts").or_else(|| c.get("script")))
+            .and_then(toml::Value::as_table)
+            .map(|t| {
+                // `[scripts.setup.NAME]` (current) or `[script.NAME]` (older).
+                t.get("setup")
+                    .and_then(toml::Value::as_table)
+                    .unwrap_or(t)
+                    .keys()
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !setup_scripts.is_empty() {
+            s.fact("nextest setup scripts", setup_scripts.join(", "));
+        }
+        let mut todo = Vec::new();
+        if i.db_setup.tmpfs.is_none() || i.db_setup.durability.is_none() {
+            todo.push("Run the test Postgres on tmpfs with fsync=off, synchronous_commit=off and full_page_writes=off.");
+        }
+        if i.db_setup.template.is_none() {
+            todo.push("Run migrations once into a template database and create each test database with `CREATE DATABASE t TEMPLATE app_template`.");
+        }
+        if !todo.is_empty() {
+            let done = if found.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " It already uses {}.",
+                    found
+                        .iter()
+                        .map(|(w, at)| format!("{w} ({at})"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            let severity = if i.db_setup.template.is_some() || i.sqlx_tests < 50 {
+                Severity::Info
+            } else {
+                Severity::Medium
+            };
+            todo.push("Limit nextest test-threads for these tests with a test group rather than for the whole suite.");
+            f.push(
+                Finding::new("database-tests", severity, "Database-backed tests: make each database cheap", "database-backed-tests")
+                    .saw(format!("The workspace uses {}{}.{done}", db.join(", "), if i.sqlx_tests > 0 { format!(", with {} #[sqlx::test] tests", i.sqlx_tests) } else { String::new() }))
+                    .why("A test that creates a database and runs every migration pays tens to hundreds of milliseconds before it does anything, plus fsyncs. Multiply by every test.")
+                    .fix(todo.join(" ")),
+            );
+        }
+    }
 }
 
 /// Run the check.
@@ -445,62 +717,8 @@ pub fn check(ctx: &Context, i: &Inputs) -> Section {
                 .fix("Make sure the runner execs the test straight away under nextest (`NEXTEST_EXECUTION_MODE=process-per-test`), or measure one quick test through `cargo nextest run` with and without it."),
         );
     }
-    let profile_threads = i
-        .nextest_config
-        .as_ref()
-        .and_then(|c| c.get("profile"))
-        .and_then(toml::Value::as_table)
-        .map(|p| {
-            p.iter()
-                .filter_map(|(name, v)| v.get("test-threads").map(|t| format!("{name}={t}")))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    if let Some(t) = ctx.var("NEXTEST_TEST_THREADS") {
-        s.fact("NEXTEST_TEST_THREADS", t);
-        if !profile_threads.is_empty() {
-            f.push(
-                Finding::new("nextest-threads-env", Severity::Medium, "NEXTEST_TEST_THREADS overrides your nextest profile", "nextest")
-                    .saw(format!("NEXTEST_TEST_THREADS={t} is set, and .config/nextest.toml sets test-threads ({}).", profile_threads.join(", ")))
-                    .why("The environment variable beats the profile, so the limit someone chose for a reason (database tests, memory) silently stops applying, or a tuned profile is throttled by a stale shell setting.")
-                    .fix("Unset NEXTEST_TEST_THREADS and keep the limit in the profile, or pass `--test-threads` explicitly for one-off runs."),
-            );
-        }
-    }
-    let deps: Vec<&str> = ctx
-        .metadata
-        .as_ref()
-        .map(|m| {
-            m.members()
-                .flat_map(|p| p.dependencies.iter().map(|d| d.name.as_str()))
-                .collect()
-        })
-        .unwrap_or_default();
-    let db: Vec<&str> = [
-        "sqlx",
-        "testcontainers",
-        "postgresql_embedded",
-        "pg-embed",
-        "tokio-postgres",
-        "diesel",
-        "sea-orm",
-        "pgtemp",
-    ]
-    .into_iter()
-    .filter(|d| deps.contains(d))
-    .collect();
-    if !db.is_empty() {
-        s.fact("database crates", db.join(", "));
-        if i.sqlx_tests > 0 {
-            s.fact("#[sqlx::test] tests", i.sqlx_tests.to_string());
-        }
-        f.push(
-            Finding::new("database-tests", if i.sqlx_tests >= 50 { Severity::Medium } else { Severity::Info }, "Database-backed tests: make each database cheap", "database-backed-tests")
-                .saw(format!("The workspace uses {}{}.", db.join(", "), if i.sqlx_tests > 0 { format!(", with {} #[sqlx::test] tests", i.sqlx_tests) } else { String::new() }))
-                .why("A test that creates a database and runs every migration pays tens to hundreds of milliseconds before it does anything, plus fsyncs. Multiply by every test.")
-                .fix("Run the test Postgres on tmpfs with fsync=off, synchronous_commit=off and full_page_writes=off. Run migrations once into a template database and create each test database with `CREATE DATABASE t TEMPLATE app_template`. Limit nextest test-threads for these tests with a test group rather than for the whole suite."),
-        );
-    }
+    threads_env(ctx, i, &mut s, &mut f);
+    database_tests(ctx, i, &mut s, &mut f);
     if i.integration_files >= 15 {
         f.push(
             Finding::new("many-test-binaries", Severity::Low, format!("{} integration test files, one binary each", i.integration_files), "fewer-test-binaries")
@@ -625,6 +843,128 @@ mod unit {
         // No config runner: the script's runner alone is reported.
         let s = check(&Context::default(), &i);
         assert_eq!(s.findings[0].id, "target-runner-in-scripts");
+    }
+
+    fn threads_ctx() -> (Context, Inputs) {
+        let mut ctx = Context::default();
+        ctx.env.insert("NEXTEST_TEST_THREADS".into(), "4".into());
+        let i = Inputs {
+            nextest_config: Some("[profile.gate]\ntest-threads = 8\n".parse().unwrap()),
+            nextest_installed: true,
+            ..Inputs::default()
+        };
+        (ctx, i)
+    }
+
+    #[test]
+    fn script_passing_test_threads_makes_env_info() {
+        let hits = script_hits(
+            "scripts/gate",
+            "  \"cargo nextest|$runner_var=$PWD/scripts/test-runner $cargo nextest run --workspace --profile gate --no-fail-fast --test-threads 8\"\ncargo build -j 4 --profile release\n",
+        );
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].test_threads.as_deref(), Some("8"));
+        assert_eq!(hits[0].nextest_profile.as_deref(), Some("gate"));
+        let (ctx, mut i) = threads_ctx();
+        i.script_hits = hits;
+        let s = check(&ctx, &i);
+        let t = s
+            .findings
+            .iter()
+            .find(|f| f.id == "nextest-threads-env")
+            .unwrap();
+        assert_eq!(t.severity, Severity::Info);
+        assert!(
+            t.saw
+                .contains("scripts/gate:1 passes --test-threads 8 with --profile gate"),
+            "{}",
+            t.saw
+        );
+        assert!(t.saw.contains("plain `cargo nextest run` gets 4"));
+    }
+
+    #[test]
+    fn script_for_another_profile_keeps_env_medium() {
+        let (ctx, mut i) = threads_ctx();
+        i.script_hits = script_hits(
+            "justfile",
+            "test:\n\tcargo nextest run --profile=ci --test-threads=2\n",
+        );
+        assert_eq!(i.script_hits[0].nextest_profile.as_deref(), Some("ci"));
+        let s = check(&ctx, &i);
+        let t = s
+            .findings
+            .iter()
+            .find(|f| f.id == "nextest-threads-env")
+            .unwrap();
+        assert_eq!(t.severity, Severity::Medium);
+    }
+
+    fn db_ctx() -> Context {
+        let m = Metadata::parse(
+            r#"{"workspace_root":"/w","target_directory":"/w/target","workspace_members":["a"],
+               "packages":[{"id":"a","name":"a","version":"0.1.0","manifest_path":"/w/Cargo.toml",
+               "dependencies":[{"name":"sqlx","kind":null}]}]}"#,
+        )
+        .unwrap();
+        Context {
+            metadata: Some(m),
+            ..Context::default()
+        }
+    }
+
+    #[test]
+    fn db_setup_scan() {
+        let mut d = DbSetup::default();
+        d.scan(
+            "nix/module.nix",
+            "psql -c \"CREATE DATABASE ${db} OWNER x TEMPLATE template0;\"\n",
+        );
+        d.scan("src/launcher.rs", "args.push(\"--tmpfs\".into());\n");
+        assert_eq!(d, DbSetup::default());
+        d.scan(
+            "crates/core/src/pg_testing.rs",
+            "//! Servers live on tmpfs (`/dev/shm`).\nconst POSTGRES: &str = r#\"\"$pg\" -D \"$dir\" -c fsync=off \\\n  -c synchronous_commit=off\"#;\nfn db() { format!(\"CREATE DATABASE {name} TEMPLATE {TEMPLATE}\"); }\n",
+        );
+        assert_eq!(d.tmpfs.as_deref(), Some("crates/core/src/pg_testing.rs:1"));
+        assert_eq!(
+            d.durability.as_deref(),
+            Some("crates/core/src/pg_testing.rs:2")
+        );
+        assert_eq!(
+            d.template.as_deref(),
+            Some("crates/core/src/pg_testing.rs:4")
+        );
+    }
+
+    #[test]
+    fn database_finding_follows_what_the_repo_does() {
+        let ctx = db_ctx();
+        let mut i = Inputs {
+            sqlx_tests: 80,
+            ..Inputs::default()
+        };
+        let db = |s: &Section| {
+            s.findings
+                .iter()
+                .find(|f| f.id == "database-tests")
+                .cloned()
+        };
+        let f = db(&check(&ctx, &i)).unwrap();
+        assert_eq!(f.severity, Severity::Medium);
+        assert!(f.fix.contains("TEMPLATE") && f.fix.contains("tmpfs"));
+
+        i.db_setup.template = Some("src/pg.rs:9".into());
+        let f = db(&check(&ctx, &i)).unwrap();
+        assert_eq!(f.severity, Severity::Info);
+        assert!(!f.fix.contains("TEMPLATE"), "{}", f.fix);
+        assert!(f.saw.contains("template databases (src/pg.rs:9)"));
+
+        i.db_setup.durability = Some("src/pg.rs:3".into());
+        i.db_setup.tmpfs = Some("src/pg.rs:1".into());
+        let s = check(&ctx, &i);
+        assert!(db(&s).is_none());
+        assert!(s.facts.iter().any(|f| f.key == "db tests: fsync off"));
     }
 
     #[test]
