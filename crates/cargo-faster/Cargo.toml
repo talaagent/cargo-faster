@@ -12,7 +12,7 @@ readme = "README.md"
 documentation = "https://github.com/talaagent/cargo-faster/blob/main/docs/cargo-faster.md"
 keywords = ["compile-times", "build-time", "performance", "profiling", "cargo-subcommand"]
 categories = ["development-tools::cargo-plugins", "development-tools::profiling"]
-include = ["src/**/*.rs", "build.rs", "tests/*.rs", "README.md", "LICENSE", "NOTICE"]
+include = ["src/**/*.rs", "build.rs", "tests/*.rs", "/README.md", "/LICENSE", "/NOTICE"]
 
 [[bin]]
 name = "cargo-faster"
