@@ -1,5 +1,6 @@
 //! Dependencies: heavy feature sets, duplicate versions, proc macros.
 
+use crate::asynctrait::{self, Scan};
 use crate::context::Metadata;
 use crate::finding::{Finding, Section, Severity};
 use alloc::collections::{BTreeMap, BTreeSet};
@@ -24,7 +25,23 @@ pub struct Analysis {
     pub syn_versions: Vec<String>,
     /// Workspace crates depending on async-trait directly.
     pub async_trait_in: Vec<String>,
+    /// `#[async_trait]` uses in the workspace's sources, when they were read.
+    pub async_trait: Option<Scan>,
 }
+
+/// [`analyze`], plus a scan of the workspace's sources for `#[async_trait]`.
+#[must_use]
+pub fn analyze_with_sources(m: &Metadata) -> Analysis {
+    let mut a = analyze(m);
+    a.async_trait = Some(asynctrait::scan_workspace(m));
+    a
+}
+
+/// From this many `#[async_trait]` uses on, replacing them is worth a plan.
+pub const ASYNC_TRAIT_MANY: usize = 10;
+
+/// The `disallowed-macros` entry that keeps `#[async_trait]` out.
+pub const CLIPPY_BAN: &str = r#"disallowed-macros = [{ path = "async_trait::async_trait", reason = "native async fn in traits; dynosaur for dyn" }]"#;
 
 /// Analyze `cargo metadata`.
 #[must_use]
@@ -133,6 +150,93 @@ const HEAVY: &[&str] = &[
     "zerocopy",
 ];
 
+/// The `uses-async-trait` finding: from the sources when they were read,
+/// else from the manifests.
+fn async_trait_finding(a: &Analysis) -> Option<Finding> {
+    let fix = format!(
+        "Replace #[async_trait] with native `async fn` in traits (Rust 1.75+). Where callers spawn the future or need it Send, declare the method as `fn m(&self) -> impl Future<Output = T> + Send` and keep `async fn` in the impls. For traits you hold as `dyn Trait`, use the dynosaur crate (`#[dynosaur::dynosaur(DynX)]`, then `DynX::new_arc`), which boxes only at the dyn boundary. Then ban the macro in clippy.toml:\n{CLIPPY_BAN}\nImpls of upstream #[async_trait] traits keep the macro under a crate-level `#![allow(clippy::disallowed_macros)]` (clippy reports attribute macros at crate level). Tradeoff: a mechanical diff across every impl, and `-> impl Future + Send` signatures are noisier than `async fn`. Measure first with `cargo faster check-cost -p <crate>`."
+    );
+    let Some(scan) = &a.async_trait else {
+        if a.async_trait_in.is_empty() {
+            return None;
+        }
+        return Some(
+            Finding::new("uses-async-trait", Severity::Info, format!("{} workspace crates depend on async-trait", a.async_trait_in.len()), "the-cost-of-async-trait")
+                .saw(format!("Direct dependency in: {}.", a.async_trait_in.join(", ")))
+                .why("#[async_trait] gives every method a boxed `dyn Future + Send + 'async_trait` and its own lifetime, which keeps rustc from reusing trait-solving results across bodies.")
+                .fix(fix),
+        );
+    };
+    if scan.uses == 0 {
+        if a.async_trait_in.is_empty() {
+            return None;
+        }
+        return Some(
+            Finding::new("unused-async-trait", Severity::Info, format!("{} workspace crates depend on async-trait without using it", a.async_trait_in.len()), "the-cost-of-async-trait")
+                .saw(format!("async-trait is a dependency of {}, but no #[async_trait] attribute is in their sources.", a.async_trait_in.join(", ")))
+                .why("An unused dependency still has to be built (and its proc macro loaded) before these crates can start.")
+                .fix(format!("Drop async-trait from those manifests, and keep it out with clippy.toml:\n{CLIPPY_BAN}")),
+        );
+    }
+    let top: Vec<String> = scan
+        .crates
+        .iter()
+        .take(5)
+        .map(|c| format!("{} {}", c.name, c.uses))
+        .collect();
+    let more = scan.crates.len().saturating_sub(top.len());
+    let more = if more > 0 {
+        format!(" and {more} more")
+    } else {
+        String::new()
+    };
+    let defined = match scan.traits.len() {
+        0 => "They define no traits of their own.".to_owned(),
+        n => format!("They define {n} traits, {}.", dyn_held(scan)),
+    };
+    let foreign = if scan.foreign_impls > 0 {
+        format!(
+            " {} are impls of traits defined outside the workspace, which stay until upstream drops the macro.",
+            scan.foreign_impls
+        )
+    } else {
+        String::new()
+    };
+    let sev = if scan.uses >= ASYNC_TRAIT_MANY {
+        Severity::Medium
+    } else {
+        Severity::Low
+    };
+    Some(
+        Finding::new("uses-async-trait", sev, format!("#[async_trait] is used {} times in {} workspace crates", scan.uses, scan.crates.len()), "the-cost-of-async-trait")
+            .saw(format!(
+                "{} #[async_trait] attributes: {}{more}. {defined}{foreign}",
+                scan.uses,
+                top.join(", "),
+            ))
+            .why("Each #[async_trait] method returns `Pin<Box<dyn Future + Send + 'async_trait>>` with lifetimes of its own. rustc proves the body Send while building the box, separately in every impl, and the fresh `'async_trait` lifetimes keep it from reusing those answers. Native async fn in traits gives rustc plain opaque types it can cache.")
+            .fix(fix),
+    )
+}
+
+/// "3 held as `dyn` (`A`, `B`, `C`)".
+fn dyn_held(scan: &Scan) -> String {
+    if scan.dyn_traits.is_empty() {
+        return "none held as `dyn`".to_owned();
+    }
+    let names: Vec<String> = scan
+        .dyn_traits
+        .iter()
+        .take(5)
+        .map(|t| format!("`{t}`"))
+        .collect();
+    format!(
+        "{} held as `dyn` ({})",
+        scan.dyn_traits.len(),
+        names.join(", ")
+    )
+}
+
 /// The deps section.
 #[must_use]
 pub fn section(a: &Analysis) -> Section {
@@ -176,14 +280,7 @@ pub fn section(a: &Analysis) -> Section {
                 .fix("Find who still uses syn 1 with `cargo tree -i syn@1 -e normal,build` and upgrade those macros."),
         );
     }
-    if !a.async_trait_in.is_empty() {
-        f.push(
-            Finding::new("uses-async-trait", Severity::Info, format!("{} workspace crates use async-trait", a.async_trait_in.len()), "the-cost-of-async-trait")
-                .saw(format!("Direct dependency in: {}.", a.async_trait_in.join(", ")))
-                .why("#[async_trait] expands every method into a boxed future plus a Send proof. That's cheap per method but can add up in crates with many impls.")
-                .fix("`cargo faster check-cost -p <crate>` shows how much time the async-trait methods' Send proofs take. Native `async fn` in traits works without the macro when you don't need `dyn Trait`."),
-        );
-    }
+    f.extend(async_trait_finding(a));
     s.extend(f);
     s.data = serde_json::to_value(a).unwrap_or_default();
     s
@@ -225,6 +322,68 @@ mod tests {
                 "syn-1-and-2",
                 "uses-async-trait"
             ]
+        );
+    }
+
+    #[test]
+    fn async_trait_finding_counts_uses_not_manifests() {
+        let mut a = Analysis {
+            async_trait_in: vec!["app".into(), "lib".into()],
+            ..Analysis::default()
+        };
+        let finding = |a: &Analysis| {
+            async_trait_finding(a).map(|f| (f.id, f.severity, f.title, f.saw, f.fix))
+        };
+
+        // Manifests only: an info note.
+        let (id, sev, title, ..) = finding(&a).unwrap();
+        assert_eq!((id, sev), ("uses-async-trait", Severity::Info));
+        assert_eq!(title, "2 workspace crates depend on async-trait");
+
+        // Sources read, nothing uses it: drop the dependency.
+        a.async_trait = Some(Scan::default());
+        assert_eq!(finding(&a).unwrap().0, "unused-async-trait");
+
+        // A few uses: low; many: medium, with the clippy ban.
+        let scan = |n: usize| {
+            let files: Vec<(String, String)> = (0..n)
+                .map(|i| {
+                    (
+                        "app".to_owned(),
+                        format!("#[async_trait]\nimpl Store for S{i} {{}}\n"),
+                    )
+                })
+                .chain([(
+                    "lib".to_owned(),
+                    "#[async_trait]\npub trait Store {}\nfn f(_: &dyn Store) {}\n".to_owned(),
+                )])
+                .collect();
+            asynctrait::aggregate(&files)
+        };
+        a.async_trait = Some(scan(3));
+        let (id, sev, title, saw, _) = finding(&a).unwrap();
+        assert_eq!((id, sev), ("uses-async-trait", Severity::Low));
+        assert_eq!(
+            title,
+            "#[async_trait] is used 4 times in 2 workspace crates"
+        );
+        assert_eq!(
+            saw,
+            "4 #[async_trait] attributes: app 3, lib 1. They define 1 traits, 1 held as `dyn` (`Store`)."
+        );
+        a.async_trait = Some(scan(ASYNC_TRAIT_MANY));
+        let (_, sev, _, _, fix) = finding(&a).unwrap();
+        assert_eq!(sev, Severity::Medium);
+        assert!(fix.contains(CLIPPY_BAN));
+        assert!(fix.contains("dynosaur"));
+
+        // No dependency and no uses: nothing to say.
+        assert!(
+            async_trait_finding(&Analysis {
+                async_trait: Some(Scan::default()),
+                ..Analysis::default()
+            })
+            .is_none()
         );
     }
 }

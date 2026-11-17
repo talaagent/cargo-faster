@@ -671,11 +671,27 @@ pub fn findings(a: &Analysis, crate_name: &str) -> Vec<Finding> {
     }
 
     if a.async_trait_secs >= 0.3 {
+        let share = pct(a.async_trait_secs, total);
+        let sev = if share >= 10.0 || a.async_trait_secs >= 5.0 {
+            Severity::High
+        } else if share >= 3.0 || a.async_trait_secs >= 1.0 {
+            Severity::Medium
+        } else {
+            Severity::Low
+        };
         out.push(
-            Finding::new("async-trait-overhead", Severity::Low, "async-trait boxes cost trait solving", "the-cost-of-async-trait")
-                .saw(format!("{} obligations mentioning `'async_trait` took {}.", a.async_trait_obligations, secs(a.async_trait_secs)))
-                .why("#[async_trait] turns each method into a boxed `dyn Future + Send`, and rustc proves the body Send while building the box, in every impl.")
-                .fix("Since Rust 1.75, traits can have native `async fn`. If you don't need `dyn Trait`, drop #[async_trait]; if you do, keep it only on the traits you use as objects."),
+            Finding::new("async-trait-overhead", sev, format!("#[async_trait] futures cost {crate_name} {} of trait solving", secs(a.async_trait_secs)), "the-cost-of-async-trait")
+                .saw(format!(
+                    "{} obligations on async-trait's boxed futures (`Pin<Box<dyn Future + Send + 'async_trait>>` and other `'async_trait` predicates) took {} ({share:.0}% of the profile, {:.0}% of trait solving).",
+                    a.async_trait_obligations,
+                    secs(a.async_trait_secs),
+                    pct(a.async_trait_secs, a.trait_solving_secs.max(1e-9))
+                ))
+                .why("#[async_trait] rewrites each method to return a boxed `dyn Future + Send` with fresh `'async_trait` lifetimes. rustc proves the body Send while building the box, in every impl, and the per-method lifetimes keep it from reusing those answers across bodies. Native async fn in traits gives it opaque types it can cache. This is time the compiler spends on the macro's shape, not on your types.")
+                .fix(format!(
+                    "Replace #[async_trait] with native `async fn` in traits (Rust 1.75+); use `fn m(&self) -> impl Future<Output = T> + Send` where callers spawn; use dynosaur for traits held as `dyn`. Then ban the macro in clippy.toml:\n{}\nTradeoff: a mechanical diff across every impl.",
+                    crate::deps::CLIPPY_BAN
+                )),
         );
     }
 
@@ -989,6 +1005,27 @@ mod tests {
         assert_eq!(f[0].severity, Severity::High);
         assert!(f[0].saw.contains("`app::Bot`"), "{}", f[0].saw);
         assert!(f[0].saw.contains("60 times"), "{}", f[0].saw);
+    }
+
+    #[test]
+    fn async_trait_severity_follows_measured_cost() {
+        let sev = |at: f64| {
+            let a = Analysis {
+                total_secs: 40.0,
+                trait_solving_secs: 30.0,
+                async_trait_secs: at,
+                async_trait_obligations: 100,
+                ..Analysis::default()
+            };
+            findings(&a, "a")
+                .into_iter()
+                .find(|f| f.id == "async-trait-overhead")
+                .map(|f| f.severity)
+        };
+        assert_eq!(sev(0.1), None);
+        assert_eq!(sev(0.5), Some(Severity::Low));
+        assert_eq!(sev(1.5), Some(Severity::Medium));
+        assert_eq!(sev(6.0), Some(Severity::High));
     }
 
     #[test]

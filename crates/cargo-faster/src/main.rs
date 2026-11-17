@@ -191,7 +191,9 @@ fn run(opts: &Opts) -> Result<Report, Error> {
                 &ctx,
                 machine::cache_dir(&ctx),
             ))),
-        Command::Deps => report.sections.push(deps::section(&deps::analyze(&m))),
+        Command::Deps => report
+            .sections
+            .push(deps::section(&deps::analyze_with_sources(&m))),
         Command::Tests => report
             .sections
             .push(tests::check(&ctx, &tests::Inputs::gather(&ctx))),
@@ -279,7 +281,9 @@ fn full_report(ctx: &Context, m: &cargo_faster::context::Metadata, report: &mut 
             ctx,
             machine::cache_dir(ctx),
         )));
-    report.sections.push(deps::section(&deps::analyze(m)));
+    report
+        .sections
+        .push(deps::section(&deps::analyze_with_sources(m)));
     report
         .sections
         .push(tests::check(ctx, &tests::Inputs::gather(ctx)));
