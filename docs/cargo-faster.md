@@ -38,7 +38,10 @@ Every subcommand takes these:
 
 - `--json` prints the report as JSON instead of text, for scripts and agents. Findings keep their `id`, `severity`, `title`, `saw`, `why`, `fix`, and `guide` fields.
 - `--manifest-path PATH` points at a workspace other than the current directory's.
+- `--dry-run` prints the builds that `timings --run` and `check-cost` would start, and stops before starting them. The quick checks still run, because they only read things.
 - `-v` and `-q` change how much it logs to stderr.
+
+The builds it starts are echoed to stderr before they run. Errors go to stderr as `cargo faster: error[CODE]: message` and exit non-zero. The codes are stable: `no_workspace`, `no_timings`, `unknown_value`, `failed`, and `cmd_spawn`, `cmd_exit`, `cmd_timeout`, `cmd_io`, `cmd_utf8` when a command it runs goes wrong. A misspelled crate name for `rdeps`, or a wrong `-p` or `--bin` for `check-cost`, gets a "did you mean" suggestion.
 
 Findings have one of four severities: `high`, `medium`, `low`, and `info`. A `high` finding probably costs you a lot of time right now. An `info` finding is something to know about, not necessarily something to change.
 

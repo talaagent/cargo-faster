@@ -234,41 +234,31 @@ impl Report {
     }
 }
 
-/// Render a simple left-aligned table; the last column may be long.
+/// Render a borderless table for the text output and `details`
+/// ([`bpaf_kit::table::plain`]): two spaces between columns, numbers lined
+/// up on the right, text on the left, the last column left as is.
 #[must_use]
 pub fn table(headers: &[&str], rows: &[Vec<String>]) -> String {
-    let cols = headers.len();
-    let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
+    use bpaf_kit::table::comfy_table::{Cell, CellAlignment};
+    let last = headers.len().saturating_sub(1);
+    let mut t = bpaf_kit::table::plain(headers.iter().copied());
     for row in rows {
-        for (i, cell) in row.iter().enumerate().take(cols.saturating_sub(1)) {
-            widths[i] = widths[i].max(cell.chars().count());
-        }
+        t.add_row(row.iter().enumerate().map(|(i, cell)| {
+            let c = Cell::new(cell);
+            if i < last && cell.starts_with(|c: char| c.is_ascii_digit()) {
+                c.set_alignment(CellAlignment::Right)
+            } else {
+                c
+            }
+        }));
+    }
+    for (i, column) in t.column_iter_mut().enumerate() {
+        column.set_padding((0, if i == last { 0 } else { 2 }));
     }
     let mut out = String::new();
-    let mut line = |cells: &[String]| {
-        let mut l = String::new();
-        for (i, cell) in cells.iter().enumerate() {
-            if i + 1 == cells.len() {
-                l.push_str(cell);
-            } else {
-                let pad = widths[i].saturating_sub(cell.chars().count());
-                // Numbers line up on the right, text on the left.
-                if cell.starts_with(|c: char| c.is_ascii_digit()) {
-                    l.push_str(&" ".repeat(pad));
-                    l.push_str(cell);
-                } else {
-                    l.push_str(cell);
-                    l.push_str(&" ".repeat(pad));
-                }
-                l.push_str("  ");
-            }
-        }
-        out.push_str(l.trim_end());
+    for line in t.lines() {
+        out.push_str(line.trim_end());
         out.push('\n');
-    };
-    line(&headers.iter().map(|h| (*h).to_owned()).collect::<Vec<_>>());
-    for row in rows {
-        line(row);
     }
     out
 }
@@ -305,8 +295,9 @@ mod tests {
             &[
                 vec!["1.0s".into(), "a".into()],
                 vec!["10.0s".into(), "b".into()],
+                vec!["2.0s".into(), "3 units".into()],
             ],
         );
-        assert_eq!(t, "time   crate\n 1.0s  a\n10.0s  b\n");
+        assert_eq!(t, "time   crate\n 1.0s  a\n10.0s  b\n 2.0s  3 units\n");
     }
 }

@@ -3,10 +3,12 @@
 //!
 //! Gathering is separate from checking so the checks can run on fixtures.
 
+use crate::error::Error;
 use alloc::collections::BTreeMap;
-use bpaf_kit::cmd::{Cmd, Output};
+use bpaf_kit::cmd::Cmd;
 use core::time::Duration;
 use serde::Deserialize;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 /// The subset of `cargo metadata` the checks use.
@@ -324,21 +326,18 @@ impl Context {
     /// # Errors
     ///
     /// When `cargo metadata` fails (not in a workspace).
-    pub fn gather(manifest_path: Option<&Path>) -> Result<Self, String> {
+    pub fn gather(manifest_path: Option<&Path>) -> Result<Self, Error> {
         let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
         let env: BTreeMap<String, String> = std::env::vars().collect();
         let cargo = cargo_bin(&env);
-        let mut args = vec!["metadata".into(), "--format-version".into(), "1".into()];
+        let mut metadata = probe(&cargo);
+        metadata.args(["metadata", "--format-version", "1"]);
         if let Some(m) = manifest_path {
-            args.push("--manifest-path".into());
-            args.push(m.display().to_string());
+            metadata.arg("--manifest-path").arg(m);
         }
-        let out = capture(&cargo, &args, None)?;
+        let out = metadata.output()?;
         if !out.success() {
-            return Err(format!(
-                "cargo metadata failed (is this a Cargo workspace?):\n{}",
-                out.stderr_lossy().trim()
-            ));
+            return Err(Error::NoWorkspace(out.stderr_lossy().trim().to_owned()));
         }
         let metadata = Metadata::parse(&String::from_utf8_lossy(&out.stdout))?;
         let root = metadata.workspace_root.clone();
@@ -355,7 +354,10 @@ impl Context {
             .get("RUSTC")
             .cloned()
             .unwrap_or_else(|| "rustc".to_owned());
-        let rustc = capture(&rustc_bin, &["-vV".to_owned()], Some(&root))
+        let rustc = probe(&rustc_bin)
+            .arg("-vV")
+            .current_dir(&root)
+            .output()
             .map(|o| RustcInfo::parse(&o.stdout_lossy()))
             .unwrap_or_default();
         Ok(Self {
@@ -424,37 +426,37 @@ impl Context {
     }
 }
 
-/// Run a program quietly, capturing its output, with a timeout. A
-/// non-zero exit is returned, not an error.
-///
-/// # Errors
-///
-/// When the program can't be started or times out.
-pub fn capture(prog: &str, args: &[String], dir: Option<&Path>) -> Result<Output, String> {
-    capture_for(prog, args, dir, Duration::from_secs(300))
+/// A read-only probe (`cargo metadata`, `rustc -vV`, `git`, `kache`,
+/// `df`): not echoed, run even under `--dry-run`, output captured, a
+/// five-minute timeout. A non-zero exit is a [`bpaf_kit::cmd::Output`], not an error.
+#[must_use]
+pub fn probe(program: impl AsRef<OsStr>) -> Cmd {
+    let mut cmd = Cmd::new(program);
+    cmd.echo(false)
+        .dry_run(false)
+        .allow_failure()
+        .timeout(Duration::from_secs(300))
+        .max_output(1 << 30);
+    cmd
 }
 
-/// [`capture`] with a custom timeout.
-///
-/// # Errors
-///
-/// When the program can't be started or times out.
-pub fn capture_for(
-    prog: &str,
-    args: &[String],
-    dir: Option<&Path>,
-    timeout: Duration,
-) -> Result<Output, String> {
-    let mut cmd = Cmd::new(prog);
-    cmd.args(args)
-        .echo(false)
-        .allow_failure()
-        .timeout(timeout)
+/// A build (`cargo check`, a profiled rustc): echoed `set -x` style,
+/// skipped under `--dry-run`, output captured, a four-hour timeout, under
+/// `nice -n N` when `nice` is positive and on `PATH`. A non-zero exit is an
+/// [`bpaf_kit::cmd::Output`], not an error.
+#[must_use]
+pub fn build(ctx: &Context, nice: i32, program: impl AsRef<OsStr>) -> Cmd {
+    let mut cmd = if nice > 0 && on_path(&ctx.env, "nice").is_some() {
+        let mut c = Cmd::new("nice");
+        c.arg("-n").arg(nice.to_string()).arg(program);
+        c
+    } else {
+        Cmd::new(program)
+    };
+    cmd.allow_failure()
+        .timeout(Duration::from_secs(4 * 3600))
         .max_output(1 << 30);
-    if let Some(d) = dir {
-        cmd.current_dir(d);
-    }
-    cmd.output().map_err(|e| format!("running {prog}: {e}"))
+    cmd
 }
 
 /// The cargo binary to run (`$CARGO` when we're a subcommand).

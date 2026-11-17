@@ -13,6 +13,7 @@ pub mod cache;
 pub mod checkcost;
 pub mod context;
 pub mod deps;
+pub mod error;
 pub mod finding;
 pub mod fmt;
 pub mod graph;

@@ -16,7 +16,10 @@
 //!
 //! The analysis lives in [`crate::profile`].
 
-use crate::context::{Context, Package, Target, capture_for, cargo_bin, on_path};
+use crate::context::{Context, Package, Target, build, cargo_bin};
+use crate::error::Error;
+use bpaf_kit::cmd;
+use bpaf_kit::suggest::UnknownValue;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 
@@ -174,17 +177,20 @@ pub fn replay_args(args: &[String], out: &Path) -> Vec<String> {
 /// # Errors
 ///
 /// When the package doesn't exist or has no matching target.
-pub fn pick<'a>(ctx: &'a Context, opts: &Options) -> Result<(&'a Package, &'a Target), String> {
+pub fn pick<'a>(ctx: &'a Context, opts: &Options) -> Result<(&'a Package, &'a Target), Error> {
     let m = ctx
         .metadata
         .as_ref()
         .ok_or("check-cost needs cargo metadata")?;
     let members: Vec<&Package> = m.members().collect();
     let pkg = if let Some(name) = &opts.package {
-        *members
-            .iter()
-            .find(|p| &p.name == name)
-            .ok_or_else(|| format!("no workspace member called {name}"))?
+        *members.iter().find(|p| &p.name == name).ok_or_else(|| {
+            UnknownValue::new(
+                "workspace member",
+                name,
+                members.iter().map(|p| p.name.as_str()),
+            )
+        })?
     } else if let Some(p) = members
         .iter()
         .find(|p| p.manifest_path.parent() == Some(m.workspace_root.as_path()))
@@ -202,10 +208,21 @@ pub fn pick<'a>(ctx: &'a Context, opts: &Options) -> Result<(&'a Package, &'a Ta
     };
     let kinds = |t: &Target, k: &str| t.kind.iter().any(|x| x == k);
     let target = match &opts.bin {
-        Some(bin) => pkg
-            .targets
-            .iter()
-            .find(|t| kinds(t, "bin") && &t.name == bin),
+        Some(bin) => Some(
+            pkg.targets
+                .iter()
+                .find(|t| kinds(t, "bin") && &t.name == bin)
+                .ok_or_else(|| {
+                    UnknownValue::new(
+                        format!("{} binary", pkg.name),
+                        bin,
+                        pkg.targets
+                            .iter()
+                            .filter(|t| kinds(t, "bin"))
+                            .map(|t| t.name.as_str()),
+                    )
+                })?,
+        ),
         None => pkg
             .targets
             .iter()
@@ -221,25 +238,34 @@ pub fn pick<'a>(ctx: &'a Context, opts: &Options) -> Result<(&'a Package, &'a Ta
 /// # Errors
 ///
 /// When cargo or rustc can't run or no profile is written.
-pub fn run(ctx: &Context, opts: &Options) -> Result<Run, String> {
+pub fn run(ctx: &Context, opts: &Options) -> Result<Run, Error> {
     let (pkg, target) = pick(ctx, opts)?;
     let crate_name = target.name.replace('-', "_");
     let root = ctx.root().to_path_buf();
-    // Make cargo run rustc for this crate. Only the mtime changes.
-    std::fs::File::options()
-        .append(true)
-        .open(&target.src_path)
-        .and_then(|f| f.set_modified(SystemTime::now()))
-        .map_err(|e| format!("touching {}: {e}", target.src_path.display()))?;
     eprintln!(
-        "cargo faster: running `cargo check --workspace -vv` to capture the rustc command for {} ({crate_name})",
+        "cargo faster: capturing the rustc command for {} ({crate_name})",
         pkg.name
     );
-    let mut args: Vec<String> = ["check", "--workspace", "-vv", "--color", "never"]
-        .map(String::from)
-        .to_vec();
-    args.extend(opts.cargo_args.iter().cloned());
-    let out = nice_capture(ctx, opts.nice, &cargo_bin(&ctx.env), &args, &root, &[])?;
+    // Make cargo run rustc for this crate. Only the mtime changes.
+    if cmd::dry_run_enabled() {
+        cmd::echo_line(format_args!("touch {}", target.src_path.display()));
+    } else {
+        std::fs::File::options()
+            .append(true)
+            .open(&target.src_path)
+            .and_then(|f| f.set_modified(SystemTime::now()))
+            .map_err(|e| format!("touching {}: {e}", target.src_path.display()))?;
+    }
+    let out = build(ctx, opts.nice, cargo_bin(&ctx.env))
+        .args(["check", "--workspace", "-vv", "--color", "never"])
+        .args(&opts.cargo_args)
+        .current_dir(&root)
+        .output()?;
+    if cmd::dry_run_enabled() {
+        return Err(Error::DryRun(format!(
+            "--dry-run: stopping before profiling {crate_name}; the rustc command line to replay comes from that build's output"
+        )));
+    }
     let stderr = out.stderr_lossy();
     let src = target
         .src_path
@@ -247,20 +273,20 @@ pub fn run(ctx: &Context, opts: &Options) -> Result<Run, String> {
         .unwrap_or(&target.src_path)
         .display()
         .to_string();
-    let inv = find_invocation(&stderr, &crate_name, &src).ok_or_else(|| {
+    let inv = find_invocation(&stderr, &crate_name, &src).ok_or_else(|| -> Error {
         format!(
             "cargo didn't run rustc for {crate_name}; is it a dependency of the selected packages? last output:\n{}",
             stderr.lines().rev().take(10).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n")
-        )
+        ).into()
     })?;
-    let dir = match &opts.keep {
-        Some(d) => d.clone(),
-        None => std::env::temp_dir().join(format!("cargo-faster-{}", std::process::id())),
+    let dir = if let Some(d) = &opts.keep {
+        d.clone()
+    } else {
+        let tmp = std::env::temp_dir();
+        remove_stale_temp_dirs(&tmp);
+        tmp.join(format!("{TEMP_PREFIX}{}", std::process::id()))
     };
     std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
-    let mut env: Vec<(String, String)> = inv.env.clone();
-    env.push(("RUSTC_BOOTSTRAP".into(), "1".into()));
-    env.push(("CARGO_INCREMENTAL".into(), "0".into()));
     eprintln!(
         "cargo faster: profiling {crate_name} with RUSTC_BOOTSTRAP=1 -Zself-profile (no wrapper{}, no incremental){}",
         inv.wrapper
@@ -274,21 +300,25 @@ pub fn run(ctx: &Context, opts: &Options) -> Result<Run, String> {
         }
     );
     let started = Instant::now();
-    let replay = nice_capture(
-        ctx,
-        opts.nice,
-        &inv.rustc,
-        &replay_args(&inv.args, &dir),
-        &root,
-        &env,
-    )?;
+    // The exact environment cargo used, at a lower priority, without
+    // touching our own process. The command line is long; the line above
+    // says what it is.
+    let replay = build(ctx, opts.nice, &inv.rustc)
+        .args(replay_args(&inv.args, &dir))
+        .envs(inv.env.iter().map(|(k, v)| (k, v)))
+        .env("RUSTC_BOOTSTRAP", "1")
+        .env("CARGO_INCREMENTAL", "0")
+        .current_dir(&root)
+        .echo(false)
+        .output()?;
     let wall_secs = started.elapsed().as_secs_f64();
-    let profile = newest_profile(&dir).ok_or_else(|| {
+    let profile = newest_profile(&dir).ok_or_else(|| -> Error {
         format!(
             "rustc wrote no profile in {}:\n{}",
             dir.display(),
             replay.stderr_lossy().trim()
         )
+        .into()
     })?;
     Ok(Run {
         crate_name,
@@ -298,32 +328,34 @@ pub fn run(ctx: &Context, opts: &Options) -> Result<Run, String> {
     })
 }
 
-fn nice_capture(
-    ctx: &Context,
-    nice: i32,
-    prog: &str,
-    args: &[String],
-    dir: &Path,
-    env: &[(String, String)],
-) -> Result<bpaf_kit::cmd::Output, String> {
-    // `nice -n N env K=V prog args`: exact environment, lower priority,
-    // without touching our own process.
-    let mut cmd: Vec<String> = Vec::new();
-    if nice > 0 && on_path(&ctx.env, "nice").is_some() {
-        cmd.extend(["nice".to_owned(), "-n".to_owned(), nice.to_string()]);
+/// Temporary profile directories are `<tmp>/cargo-faster-<pid>`.
+pub const TEMP_PREFIX: &str = "cargo-faster-";
+
+/// Remove the temporary profile directories of runs that are gone. Ctrl-C
+/// exits at once (bpaf-kit's handler), so an interrupted run leaves its
+/// directory behind; the next run cleans it up. Only on systems with
+/// `/proc`, where we can tell whether the process is still running.
+pub fn remove_stale_temp_dirs(tmp: &Path) {
+    let proc = Path::new("/proc");
+    if !proc.join("self").exists() {
+        return;
     }
-    if !env.is_empty() {
-        cmd.push("env".to_owned());
-        cmd.extend(env.iter().map(|(k, v)| format!("{k}={v}")));
+    let Ok(entries) = std::fs::read_dir(tmp) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name
+            .to_str()
+            .and_then(|n| n.strip_prefix(TEMP_PREFIX))
+            .filter(|p| p.parse::<u32>().is_ok())
+        else {
+            continue;
+        };
+        if !proc.join(pid).exists() {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
     }
-    cmd.push(prog.to_owned());
-    cmd.extend(args.iter().cloned());
-    capture_for(
-        &cmd[0],
-        &cmd[1..],
-        Some(dir),
-        core::time::Duration::from_secs(4 * 3600),
-    )
 }
 
 /// The most recently written `.mm_profdata` in `dir`.
@@ -342,13 +374,13 @@ pub fn newest_profile(dir: &Path) -> Option<PathBuf> {
 /// # Errors
 ///
 /// When it can't be read.
-pub fn load(path: &Path) -> Result<crate::profile::Profile, String> {
+pub fn load(path: &Path) -> Result<crate::profile::Profile, Error> {
     let stem = if path.extension().is_some_and(|x| x == "mm_profdata") {
         path.with_extension("")
     } else {
         path.to_path_buf()
     };
-    crate::profile::Profile::load(&stem)
+    Ok(crate::profile::Profile::load(&stem)?)
 }
 
 /// The crate name from a profile file name (`tala_agent-12345.mm_profdata`).

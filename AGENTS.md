@@ -48,7 +48,10 @@ and the `cargo-faster` binary (`src/main.rs`, the bpaf CLI).
   database-backed tests.
 - `profile.rs`: self-profile analysis (`analyzeme` adapter plus a pure
   aggregator over intervals); `checkcost.rs` runs the profile.
-- `context.rs`: the project context (metadata, config, env) the checks read.
+- `context.rs`: the project context (metadata, config, env) the checks
+  read, and the `probe`/`build` helpers every subprocess goes through
+  (`bpaf_kit::cmd::Cmd`, so builds echo and honor `--dry-run`).
+- `error.rs`: `Error` and its stable `code()`s.
 
 ## Conventions
 
