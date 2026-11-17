@@ -822,6 +822,24 @@ mod billing;
 
 Cargo picks up `tests/it/main.rs` as a single integration test target named `it`. Now there's one crate to compile and one binary to link. You can still run a subset by name: `cargo test --test it auth::`, or with nextest's filters.
 
+### Measuring a test run
+
+A slow test suite is two problems that look like one: **building** the test binaries, and **running** them. Measure them separately before fixing either:
+
+```console
+$ cargo nextest run --workspace --no-run --timings   # the build
+$ cargo nextest run --workspace                      # the run
+```
+
+`cargo faster tests --run` does both. Arguments after `--` go to both commands, e.g. `cargo faster tests --run -- --profile ci`. It reports:
+
+- **build vs run wall time.** In big workspaces the build is often most of the wait: in one workspace, building the tests took 9 minutes cold and 98 s after a one-line edit, and running all 3,885 of them took 66 s. Faster tests wouldn't have helped; the timings section (from the `--no-run` build) shows which units to work on.
+- **the slowest tests and test binaries.** Under nextest every test is a process, so a binary's fastest test is roughly what it costs to start one of its processes.
+- **tests near the slow-timeout**, the ones a loaded machine pushes over it.
+- **how busy the test threads were**: total test time over wall time × threads. A low number means the run waits on a few long tests at the end, a test group with a low thread limit, or setup outside the tests.
+
+It reads test times from nextest's machine-readable output (`--message-format libtest-json-plus`, with `NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1`), and runs with `--no-fail-fast`, so failing tests are timed too. Both commands run under `nice` (`--nice N`) and print what they run; `--dry-run` prints them without running.
+
 ## The machine
 
 Finally, the build runs on a computer, and that computer may be busier than you think.
