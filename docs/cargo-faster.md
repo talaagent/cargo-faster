@@ -247,6 +247,8 @@ It looks at:
 - **`RUSTFLAGS`** in the environment, which silently replaces the `rustflags` in your Cargo config, and changes every cache key;
 - **jobs**: `CARGO_BUILD_JOBS` or `build.jobs` limiting parallelism.
 
+It reads settings the way cargo does, environment included: rustflags come from `CARGO_ENCODED_RUSTFLAGS`, else `RUSTFLAGS`, else `target.<triple>.rustflags` plus `CARGO_TARGET_<TRIPLE>_RUSTFLAGS`, else `build.rustflags` plus `CARGO_BUILD_RUSTFLAGS`; incremental from `CARGO_INCREMENTAL`, else `build.incremental` (or `CARGO_BUILD_INCREMENTAL`), else the profile. Each line names where its value came from, e.g. `linker  mold (CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS)`.
+
 Every one of these is a tradeoff, and the finding says what you give up. Turning off debug info makes builds faster and debugging worse. Optimizing dependencies makes tests faster and clean builds slower. `setup` tells you what you have; you decide.
 
 ## `cargo faster cache`
