@@ -251,9 +251,39 @@ impl Report {
             for f in all.iter().filter(|f| f.severity > Severity::Info) {
                 let _ = writeln!(out, "  [{}] {}", f.severity.name(), f.title);
             }
+            if let Some(next) = self.next_command() {
+                let _ = writeln!(out, "\n{}", paint("1", "== next"));
+                let _ = writeln!(out, "  {next}");
+            }
         }
         out
     }
+
+    /// The one command to run next: the first `cargo` command in the fix
+    /// of the most severe finding that has one, else a timed build when
+    /// the report has no timings yet.
+    #[must_use]
+    pub fn next_command(&self) -> Option<String> {
+        let found = self
+            .findings()
+            .iter()
+            .filter(|f| f.severity > Severity::Info)
+            .find_map(|f| first_command(&f.fix));
+        found.or_else(|| {
+            (!self.sections.iter().any(|s| s.name == "timings"))
+                .then(|| "cargo faster timings --run".to_owned())
+        })
+    }
+}
+
+/// The first backticked `cargo ...` command in `text` that is concrete
+/// (no `<placeholder>`).
+fn first_command(text: &str) -> Option<String> {
+    text.split('`')
+        .skip(1)
+        .step_by(2)
+        .find(|c| c.starts_with("cargo ") && !c.contains('<'))
+        .map(str::to_owned)
 }
 
 /// Render a borderless table for the text output and `details`
@@ -272,6 +302,47 @@ pub fn table(headers: &[&str], rows: &[Vec<String>]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn next_command_comes_from_the_worst_finding() {
+        let f = |id, sev, fix: &str| Finding::new(id, sev, id, "debug-info").fix(fix);
+        let mut a = Section::new("setup");
+        a.extend([f("a", Severity::Low, "Run `cargo faster deps`.")]);
+        let mut b = Section::new("machine");
+        b.extend([
+            f("b", Severity::High, "No command here, `just` text."),
+            f(
+                "c",
+                Severity::Medium,
+                "Try `cargo rustc -p <x>` or `cargo faster check-cost -p app-core`.",
+            ),
+        ]);
+        let mut r = Report {
+            workspace: None,
+            sections: vec![a, b],
+            skipped: vec![],
+        };
+        assert_eq!(
+            r.next_command().as_deref(),
+            Some("cargo faster check-cost -p app-core")
+        );
+        let text = r.render_text(false);
+        assert!(
+            text.ends_with("== next\n  cargo faster check-cost -p app-core\n"),
+            "{text}"
+        );
+        // Nothing to act on and no timings yet: time a build.
+        for s in &mut r.sections {
+            s.findings.clear();
+        }
+        assert_eq!(
+            r.next_command().as_deref(),
+            Some("cargo faster timings --run")
+        );
+        r.sections.push(Section::new("timings"));
+        assert_eq!(r.next_command(), None);
+        assert!(!r.render_text(false).contains("== next"));
+    }
 
     #[test]
     fn json_has_versions_first_and_pinned_guide_links() {

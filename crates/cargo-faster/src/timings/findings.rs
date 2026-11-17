@@ -8,11 +8,66 @@ fn package(unit: &str) -> &str {
     unit.split(' ').next().unwrap_or(unit)
 }
 
+/// Whether `pkg` is a workspace member, when the workspace is known.
+fn is_member(a: &Analysis, pkg: &str) -> Option<bool> {
+    let want = pkg.replace('_', "-");
+    a.members
+        .as_ref()
+        .map(|m| m.iter().any(|n| n.replace('_', "-") == want))
+}
+
+/// How to find out what's slow inside `pkg`. `check-cost -p` profiles
+/// workspace members only; for a dependency, `then` (advice that only
+/// makes sense for your own crate) is left out too.
+fn look_inside(a: &Analysis, pkg: &str, then: &str) -> String {
+    let dep = format!(
+        "{pkg} is a dependency, so you can't change its code: run `cargo faster deps` to see the features you enable on it and duplicate versions, turn off default features you don't use, check whether a newer version builds faster, and whether you need it at all."
+    );
+    match is_member(a, pkg) {
+        Some(true) => {
+            format!("Find out what's slow inside it with `cargo faster check-cost -p {pkg}`.{then}")
+        }
+        Some(false) => dep,
+        None => format!(
+            "If {pkg} is a workspace crate, find out what's slow inside it with `cargo faster check-cost -p {pkg}`.{then} If it's a dependency, run `cargo faster deps` to see the features you enable on it and duplicate versions, turn off default features you don't use, and check whether a newer version builds faster."
+        ),
+    }
+}
+
+/// The timed build failed: the report covers only the units it compiled
+/// before it stopped. `stderr` is the build's; its last lines go in `saw`.
+#[must_use]
+pub fn build_failed(code: i32, stderr: &str) -> Finding {
+    let lines: Vec<&str> = stderr
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.contains("Timing report saved to"))
+        .collect();
+    let tail = lines[lines.len().saturating_sub(5)..].join("\n");
+    Finding::new("build-failed", Severity::High, format!("The build failed (exit {code})"), "the-build-timeline")
+        .saw(if tail.is_empty() {
+            format!("cargo exited with status {code}.")
+        } else {
+            format!("cargo exited with status {code}. The end of its output:\n{tail}")
+        })
+        .why("Cargo stops starting units after an error, so the times, the critical path and the findings below cover only part of the build.")
+        .fix("Fix the build error and run it again. Pass --allow-failed-build to read the partial report and exit 0.")
+}
+
 /// Findings for an analysis.
 #[must_use]
 pub fn findings(a: &Analysis) -> Vec<Finding> {
     let mut out = Vec::new();
     if a.wall <= 0.0 {
+        out.push(
+            Finding::new("nothing-rebuilt", Severity::Info, "Nothing was rebuilt", "the-build-timeline")
+                .saw(match a.total_units {
+                    0 => "The report lists no units: cargo had nothing to do, so there is no build to time.".to_owned(),
+                    1 => "Its one unit was fresh: cargo had nothing to compile, so there is no build to time.".to_owned(),
+                    n => format!("All {n} units were fresh: cargo had nothing to compile, so there is no build to time."),
+                })
+                .why("A report only says where the time goes for the units it compiled.")
+                .fix("Use `cargo faster timings --run --edit CRATE` to time the build after an edit to CRATE, or edit something yourself and run `cargo faster timings --run`."),
+        );
         return out;
     }
     shape(a, &mut out);
@@ -51,7 +106,7 @@ fn shape(a: &Analysis, out: &mut Vec<Finding>) {
             Finding::new("serial-crate", if pct(s.duration, a.wall) >= 50.0 { Severity::High } else { Severity::Medium }, format!("{} serializes the build", s.unit), "the-critical-path")
                 .saw(format!("{} took {} of the {} build while little else could run: {}.", s.unit, secs(s.duration), secs(a.wall), list.join("; ")))
                 .why("Cargo parallelizes across crates, but one crate is compiled by one rustc. A big crate everything else waits for (or that waits for everything) runs on a few cores while the rest idle.")
-                .fix(format!("Find out what's slow inside it with `cargo faster check-cost -p {}`. If it's just big, split it (see `cargo faster rdeps`) so the pieces build in parallel and edits rebuild less.", package(&s.unit))),
+                .fix(look_inside(a, package(&s.unit), " If it's just big, split it (see `cargo faster rdeps`) so the pieces build in parallel and edits rebuild less.")),
         );
     }
     if let Some(top) = a
@@ -66,7 +121,7 @@ fn shape(a: &Analysis, out: &mut Vec<Finding>) {
             Finding::new("critical-path-dominated", Severity::Medium, format!("{} is most of the critical path", top.unit), "the-critical-path")
                 .saw(format!("{} of the {} wall time is {} on the critical path.", secs(top.duration), secs(a.wall), top.unit))
                 .why("Speeding up crates off the critical path doesn't change the wall time. This one does.")
-                .fix(format!("Profile it: `cargo faster check-cost -p {}`.", package(&top.unit))),
+                .fix(look_inside(a, package(&top.unit), "")),
         );
     }
     if a.compiled >= 50 && a.parallelism < 3.0 && a.wall >= 30.0 {
@@ -107,7 +162,7 @@ fn per_unit(a: &Analysis, out: &mut Vec<Finding>) {
             Finding::new("post-metadata-analysis", Severity::Low, format!("{u} spends {} after its metadata", secs(*after)), "check-versus-build")
                 .saw(format!("{u} took {}, {} of it after writing its metadata. A check unit has no code generation: this is analysis after metadata (borrow checking, MIR checks) and, with incremental, saving the dependency graph.", secs(*d), secs(*after)))
                 .why("Dependents can start once the metadata is written, so this part is off their path, but it still holds a job slot and ends the check of anything that has to wait for the whole crate.")
-                .fix(format!("See which queries take the time with `cargo faster check-cost -p {}`. A large incremental save shrinks when the crate is split.", package(u))),
+                .fix(look_inside(a, package(u), " A large incremental save shrinks when the crate is split.")),
         );
     }
     if let Some(UnitTime {
@@ -267,7 +322,7 @@ fn slow_build(a: &Analysis) -> Option<Finding> {
             "Most of it is code generation of libraries: check debug info, codegen-units and dependency opt-level with `cargo faster setup`, and profile the slowest crate on the critical path."
         }
         _ => {
-            "Profile the slowest crate on the critical path with `cargo faster check-cost -p <crate>`, and see `cargo faster rdeps` for how many crates an edit rebuilds."
+            "Profile the slowest workspace crate on the critical path with `cargo faster check-cost -p CRATE` (for a dependency, see `cargo faster deps`), and see `cargo faster rdeps` for how many crates an edit rebuilds."
         }
     };
     Some(

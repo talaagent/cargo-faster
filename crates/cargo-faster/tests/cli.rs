@@ -5,6 +5,11 @@ use std::process::{Command, Output};
 
 #[allow(clippy::unwrap_used, reason = "a test helper")]
 fn run(args: &[&str]) -> (Output, String) {
+    run_with("", args)
+}
+
+#[allow(clippy::unwrap_used, reason = "a test helper")]
+fn run_with(lib: &str, args: &[&str]) -> (Output, String) {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("Cargo.toml"),
@@ -12,7 +17,7 @@ fn run(args: &[&str]) -> (Output, String) {
     )
     .unwrap();
     std::fs::create_dir(dir.path().join("src")).unwrap();
-    std::fs::write(dir.path().join("src/lib.rs"), "").unwrap();
+    std::fs::write(dir.path().join("src/lib.rs"), lib).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_cargo-faster"))
         .arg("faster")
         .args(args)
@@ -97,5 +102,21 @@ fn fail_on() {
     assert!(!all.contains("[high]"), "{all}");
     assert_eq!(out.status.code(), Some(0), "{all}");
     let (out, all) = run(&["setup"]);
+    assert_eq!(out.status.code(), Some(0), "{all}");
+}
+
+#[test]
+fn a_failed_build_exits_3() {
+    // `cargo check` of a one-file crate that doesn't compile: quick.
+    let lib = "pub fn x() -> u32 { \"no\" }\n";
+    let (out, all) = run_with(lib, &["timings", "--run", "--nice", "0"]);
+    assert_eq!(out.status.code(), Some(3), "{all}");
+    assert!(all.contains("[high] The build failed (exit 101)"), "{all}");
+    assert!(all.contains("build failed (exit 101)"), "{all}");
+    assert!(all.contains("error[build_failed]"), "{all}");
+    let (out, all) = run_with(
+        lib,
+        &["timings", "--run", "--nice", "0", "--allow-failed-build"],
+    );
     assert_eq!(out.status.code(), Some(0), "{all}");
 }

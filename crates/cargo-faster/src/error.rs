@@ -17,6 +17,9 @@ pub enum Error {
     /// The command line doesn't parse, or asks for something contradictory.
     #[error("{0}")]
     Usage(String),
+    /// The build being measured failed: no report, or only a partial one.
+    #[error("{0}")]
+    BuildFailed(String),
     /// `cargo metadata` failed, with the end of its stderr.
     #[error("cargo metadata failed (is this a Cargo workspace?):\n{0}")]
     NoWorkspace(String),
@@ -43,6 +46,7 @@ impl Error {
             Self::Unknown(e) => e.code(),
             Self::UnknownName(_) => "unknown_value",
             Self::Usage(_) => "usage",
+            Self::BuildFailed(_) => "build_failed",
             Self::NoWorkspace(_) => "no_workspace",
             Self::NoTimings => "no_timings",
             Self::DryRun(_) => "dry_run",
@@ -56,9 +60,14 @@ impl bpaf_kit::report::Coded for Error {
         Self::code(self)
     }
 
-    /// 2 for usage errors (the cargo and clap convention), else 1.
+    /// 2 for usage errors (the cargo and clap convention), 3 when the
+    /// build being measured failed, else 1.
     fn exit_code(&self) -> u8 {
-        if matches!(self, Self::Usage(_)) { 2 } else { 1 }
+        match self {
+            Self::Usage(_) => 2,
+            Self::BuildFailed(_) => 3,
+            _ => 1,
+        }
     }
 }
 
@@ -209,5 +218,6 @@ mod tests {
         use bpaf_kit::report::Coded;
         assert_eq!(Error::Usage("x".into()).exit_code(), 2);
         assert_eq!(Error::NoTimings.exit_code(), 1);
+        assert_eq!(Error::BuildFailed("x".into()).exit_code(), 3);
     }
 }
