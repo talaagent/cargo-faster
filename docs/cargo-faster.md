@@ -36,7 +36,7 @@ $ cargo-faster --man > ~/.local/share/man/man1/cargo-faster.1
 
 Every subcommand takes these, before or after the subcommand's name (`cargo faster --json setup` and `cargo faster setup --json` are the same):
 
-- `--json` prints the report as JSON instead of text, for scripts and agents. Findings keep their `id`, `severity`, `title`, `saw`, `why`, `fix`, and `guide` fields. Each section also has a `data` object with what it measured, so a script can compare runs without parsing the text tables. For `timings`, that's `wall_s`, `units_compiled`, `units_fresh`, `critical_path` (each step with `unit`, `crate`, `version`, `target`, `mode`, `kind`, `start_s`, `took_s`, `waited` (`full` or `meta`), `gap_s`, and `cache` and `wait_s` when kache's records were joined), `slowest_units`, `kinds`, `linked`, `wrapper`, `slowdown` and `rebuilt`. Seconds are in fields ending in `_s`. For `check-cost`, it's `queries`, `obligations`, `trait_solving_by_category`, `heavy_bodies`, `items` and `modules`.
+- `--json` prints the report as JSON instead of text, for scripts and agents (see [JSON output](#json-output) for which fields are stable). Each section has a `data` object with what it measured, so a script can compare runs without parsing the text tables. For `timings`, that's `wall_s`, `units_compiled`, `units_fresh`, `critical_path` (each step with `unit`, `crate`, `version`, `target`, `mode`, `kind`, `start_s`, `took_s`, `waited` (`full` or `meta`), `gap_s`, and `cache` and `wait_s` when kache's records were joined), `slowest_units`, `kinds`, `linked`, `wrapper`, `slowdown` and `rebuilt`. Seconds are in fields ending in `_s`. For `check-cost`, it's `queries`, `obligations`, `trait_solving_by_category`, `heavy_bodies`, `items` and `modules`.
 - `--manifest-path PATH` points at a workspace other than the current directory's.
 - `--fail-on LEVEL` exits 1 when any finding is at least `LEVEL` severe: `high`, `medium` or `low`. The report is printed first. Use it in CI to fail a job on a new `high` finding.
 - `--dry-run` prints the builds that `timings --run`, `tests --run` and `check-cost` would start, and stops before starting them. The quick checks still run, because they only read things.
@@ -49,6 +49,43 @@ The exit status is:
 - `0`: the report was printed, findings or not;
 - `1`: an error, or a finding at or above `--fail-on`;
 - `2`: a usage error: an unknown option, a bad value, or options that don't go together (`timings --body` without `--edit`).
+
+### JSON output
+
+`--json` prints one object:
+
+```json
+{
+  "schema_version": 1,
+  "cargo_faster_version": "0.1.0",
+  "workspace": "/path/to/workspace",
+  "sections": [
+    {
+      "name": "setup",
+      "facts": [{ "key": "dev debuginfo", "value": "full (default)" }],
+      "findings": [
+        {
+          "id": "full-debuginfo",
+          "severity": "medium",
+          "title": "Dev builds emit full debug info",
+          "saw": "...", "why": "...", "fix": "...",
+          "guide": "https://github.com/talaagent/cargo-faster/blob/v0.1.0/docs/guide.md#debug-info"
+        }
+      ],
+      "data": {}
+    }
+  ],
+  "skipped": [{ "key": "check-cost", "value": "..." }]
+}
+```
+
+These fields are stable: `schema_version` goes up if one of them is removed, renamed or changes meaning, and a new field never changes it.
+
+- the top level: `schema_version`, `cargo_faster_version`, `workspace`, `sections`, `skipped` (absent when empty);
+- each section: `name`, `facts` (`key` and `value`), `findings`, `details` and `data` (absent when empty);
+- each finding: `id`, `severity` (`high`, `medium`, `low` or `info`), `title`, `saw`, `why`, `fix` and `guide`. The `id`s are stable; `guide` links into the guide at this release's tag.
+
+Everything else is for people and may change in any release: the wording of `title`, `saw`, `why`, `fix`, facts' `value`s and `details`, the set of facts, and the contents of `data` (documented above per subcommand, but still growing).
 
 Findings have one of four severities: `high`, `medium`, `low`, and `info`. A `high` finding probably costs you a lot of time right now. An `info` finding is something to know about, not necessarily something to change.
 
