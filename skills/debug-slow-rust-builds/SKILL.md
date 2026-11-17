@@ -54,7 +54,7 @@ If `cargo faster` isn't installed: `cargo install --locked cargo-faster`, or
    `cargo check --workspace --timings` first and then the build with `--timings`: `cargo faster timings` compares the build with that check
    (or `--baseline FILE`), and with kache it shows each unit's cache outcome and waits. The
    facts and findings then say whether the time went to rebuilt workspace crates
-   (`edit-rebuilt-many`), links (`slow-links`), waits (`wrapper-wait`,
+   (`edit-rebuilt-many`; `first-build` when the timeline is a cold build, with no fan-out to report), links (`slow-links`), waits (`wrapper-wait`,
    `critical-path-waiting`) or a busy machine (`contention`).
 
    When an edit rebuilds too much, `cargo faster rdeps CRATE` lists what each dependent uses

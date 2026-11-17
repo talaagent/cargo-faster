@@ -300,9 +300,8 @@ pub fn used_items(src: &str, krate: &str) -> Used {
             // `pub use krate::...` (or `pub use ::krate::...`), but not
             // `pub(crate) use`: visible to the crate's own dependents.
             let head = if absolute { i - 1 } else { i };
-            let public = head >= 2
-                && is_id(toks.get(head - 1), "use")
-                && is_id(toks.get(head - 2), "pub");
+            let public =
+                head >= 2 && is_id(toks.get(head - 1), "use") && is_id(toks.get(head - 2), "pub");
             let linked = head >= 2
                 && is_id(toks.get(head - 1), "crate")
                 && is_id(toks.get(head - 2), "extern");
@@ -605,7 +604,11 @@ pub fn findings(edges: &[Edge], limit: usize) -> Vec<Finding> {
     }
     for e in pick(Edge::reexported) {
         let rust = e.to.replace('-', "_");
-        let list: Vec<String> = e.reexports.iter().map(|i| format!("`{rust}::{i}`")).collect();
+        let list: Vec<String> = e
+            .reexports
+            .iter()
+            .map(|i| format!("`{rust}::{i}`"))
+            .collect();
         let users = e.reexport_users.len();
         out.push(
             Finding::new(
@@ -837,7 +840,10 @@ mod tests {
             f[0].title,
             "tala-core uses 1 item from tala-hook-wire (120 lines)"
         );
-        assert!(f[0].saw.contains("rebuilds 91 workspace crates; without this edge it would rebuild 78"));
+        assert!(
+            f[0].saw
+                .contains("rebuilds 91 workspace crates; without this edge it would rebuild 78")
+        );
         // Same rebuilds saved: fewer items first.
         let two = edge(&["A", "B"], 24_000, 79, 74);
         let one = edge(&["A"], 300, 79, 74);
@@ -856,7 +862,10 @@ mod tests {
         let f = findings(&[e], 5);
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].id, "unused-dependency");
-        assert_eq!(f[0].title, "tala-mx depends on tala-spool but doesn't use it");
+        assert_eq!(
+            f[0].title,
+            "tala-mx depends on tala-spool but doesn't use it"
+        );
         assert!(f[0].fix.contains("cargo machete"));
         assert!(detail(&[edge(&[], 900, 12, 11)], false).is_some());
         // A glob or `extern crate` hides what's used: not unused.
@@ -919,7 +928,10 @@ mod tests {
         let f = findings(&[e], 5);
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].id, "reexported-dependency");
-        assert!(f[0].fix.starts_with("Import from the owning crate directly"));
+        assert!(
+            f[0].fix
+                .starts_with("Import from the owning crate directly")
+        );
         assert!(f[0].saw.contains("would rebuild 6"));
     }
 
@@ -979,7 +991,11 @@ mod tests {
         assert_eq!((e[0].before, e[0].after), (2, 1));
         // config re-exports a module of store that app uses: without the
         // edge app depends on store itself, so an edit still rebuilds it.
-        std::fs::write(root.join("config/src/lib.rs"), "pub use kv::{mail, Store};\n").unwrap();
+        std::fs::write(
+            root.join("config/src/lib.rs"),
+            "pub use kv::{mail, Store};\n",
+        )
+        .unwrap();
         std::fs::write(root.join("app/src/lib.rs"), "use config::mail::send;\n").unwrap();
         let e = gather(&m, &pairs);
         assert_eq!(e[0].reexports, ["Store", "mail"]);

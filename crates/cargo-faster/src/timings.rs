@@ -501,6 +501,10 @@ pub struct Extra<'a> {
     pub baseline: Option<&'a Timings>,
     /// The workspace's crates and their dependencies.
     pub workspace: Option<&'a Workspace>,
+    /// Whether the build was the first in its target directory: `Some(true)`
+    /// when it had no fingerprints for the workspace before, `Some(false)`
+    /// after a known edit (`--edit`), `None` to tell from the report.
+    pub first_build: Option<bool>,
 }
 
 /// Analyze a report on its own.
@@ -550,7 +554,9 @@ pub fn analyze_with(t: &Timings, extra: Extra<'_>) -> Analysis {
     a.linked = breakdown::linked(&ran, end);
     a.wrapper = breakdown::wrapper_summary(&ran);
     a.slowdown = extra.baseline.and_then(|b| breakdown::slowdown(&ran, b));
-    a.rebuilt = extra.workspace.and_then(|w| breakdown::rebuilt(&ran, w));
+    a.rebuilt = extra
+        .workspace
+        .and_then(|w| breakdown::rebuilt(&ran, &t.units, w, extra.first_build));
     a
 }
 
@@ -750,11 +756,18 @@ pub fn section(a: &Analysis, source: &str) -> Section {
     if let Some(r) = &a.rebuilt {
         s.fact(
             "rebuilt",
-            format!(
-                "{} workspace crates, from {}",
-                r.crates,
-                ellipsize(&r.roots.join(", "), 60)
-            ),
+            if r.first_build.is_some() {
+                format!(
+                    "{} workspace crates: a first build in this target directory",
+                    r.crates
+                )
+            } else {
+                format!(
+                    "{} workspace crates, from {}",
+                    r.crates,
+                    ellipsize(&r.roots.join(", "), 60)
+                )
+            },
         );
     }
     path_table(&mut s, a);
@@ -973,6 +986,7 @@ mod tests {
                 Extra {
                     baseline: None,
                     workspace: ws.as_ref(),
+                    first_build: None,
                 },
             );
             let f = findings(&a)
@@ -1196,6 +1210,7 @@ mod tests {
             Extra {
                 baseline: Some(&check),
                 workspace: Some(&ws),
+                first_build: None,
             },
         );
         let w = a.wrapper.as_ref().unwrap();
@@ -1219,6 +1234,7 @@ mod tests {
         let r = a.rebuilt.as_ref().unwrap();
         assert_eq!(r.roots, ["tala-core"]);
         assert!(r.crates >= 80);
+        assert_eq!(r.first_build, None);
         let sd = a.slowdown.as_ref().unwrap();
         assert!(sd.baseline_check && sd.compared >= 50);
         assert!(sd.median < 3.0);
@@ -1275,6 +1291,74 @@ mod tests {
         }
     }
 
+    /// A first build in a new target directory (#51): every workspace crate
+    /// compiles, "starting from" the workspace's leaves.
+    #[test]
+    fn first_build_has_no_fan_out() {
+        let units = |fresh: bool| {
+            let mut u = vec![
+                lib(0, "leaf-a", "", 0.0, 2.0, &[]),
+                lib(1, "leaf-b", "", 0.0, 2.0, &[]),
+            ];
+            for n in 0..12 {
+                u.push(lib(n + 2, &format!("app{n}"), "", 2.0, 3.0, &[]));
+            }
+            if fresh {
+                u.push(lib(20, "other", "", 0.0, 0.0, &[]));
+            }
+            Timings {
+                units: u,
+                ..Timings::default()
+            }
+        };
+        let mut deps: alloc::collections::BTreeMap<String, BTreeSet<String>> = (0..12)
+            .map(|n| (format!("app{n}"), ["leaf-a".to_owned()].into()))
+            .collect();
+        deps.insert("leaf-a".into(), BTreeSet::new());
+        deps.insert("leaf-b".into(), BTreeSet::new());
+        deps.insert("other".into(), BTreeSet::new());
+        let ws = Workspace { deps };
+        let run = |t: &Timings, first_build| {
+            analyze_with(
+                t,
+                Extra {
+                    baseline: None,
+                    workspace: Some(&ws),
+                    first_build,
+                },
+            )
+        };
+        let a = run(&units(false), None);
+        let r = a.rebuilt.as_ref().unwrap();
+        assert_eq!(r.roots, ["leaf-a", "leaf-b"]);
+        assert_eq!(r.first_build, Some(breakdown::FirstBuild::FromLeaves));
+        let f = findings(&a);
+        assert!(f.iter().all(|f| f.id != "edit-rebuilt-many"));
+        let first = f.iter().find(|f| f.id == "first-build").unwrap();
+        assert_eq!(first.severity, crate::finding::Severity::Info);
+        assert!(
+            first
+                .saw
+                .contains("starting from 2 crates with no workspace dependencies (leaf-a, leaf-b)")
+        );
+        let s = section(&a, "x");
+        assert!(
+            s.facts
+                .iter()
+                .any(|f| f.value == "14 workspace crates: a first build in this target directory")
+        );
+        // A workspace crate was fresh: something was edited.
+        assert!(ids(&run(&units(true), None)).contains(&"edit-rebuilt-many"));
+        // `--edit` says it was an edit; no fingerprints before says it wasn't.
+        assert!(ids(&run(&units(false), Some(false))).contains(&"edit-rebuilt-many"));
+        let a = run(&units(true), Some(true));
+        assert_eq!(
+            a.rebuilt.as_ref().unwrap().first_build,
+            Some(breakdown::FirstBuild::NoFingerprints)
+        );
+        assert!(ids(&a).contains(&"first-build"));
+    }
+
     /// The 566 s build from #13: a chain of libraries 10x slower than their
     /// check, then six tool binaries of ~2 minutes each.
     fn slow_build() -> (Timings, Timings) {
@@ -1319,6 +1403,7 @@ mod tests {
             Extra {
                 baseline: Some(&check),
                 workspace: None,
+                first_build: None,
             },
         );
         assert!((a.wall - 554.0).abs() < 1e-9);

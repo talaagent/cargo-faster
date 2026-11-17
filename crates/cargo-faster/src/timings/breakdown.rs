@@ -228,6 +228,22 @@ pub struct Rebuilt {
     /// Summed seconds of the members' units.
     #[serde(rename = "busy_s")]
     pub busy: f64,
+    /// Why this looks like a first build in its target directory rather
+    /// than an edit: then the roots are where the graph starts, not edits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_build: Option<FirstBuild>,
+}
+
+/// What says a build was a first build in its target directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FirstBuild {
+    /// The target directory had no fingerprints for any workspace crate
+    /// before the build, and had them after.
+    NoFingerprints,
+    /// Every workspace crate in the report compiled, none was fresh, and
+    /// the roots are all crates with no workspace dependency.
+    FromLeaves,
 }
 
 #[derive(Serialize)]
@@ -267,7 +283,17 @@ fn count_json<S: serde::Serializer>(v: &(usize, f64), s: S) -> Result<S::Ok, S::
     .serialize(s)
 }
 
-pub(super) fn rebuilt(ran: &[&Unit], ws: &Workspace) -> Option<Rebuilt> {
+///
+/// `first_build` is what the caller knows: `Some(true)` when the target
+/// directory had no fingerprints before the build, `Some(false)` when the
+/// build followed a known edit (`timings --edit`), `None` to tell from
+/// the report.
+pub(super) fn rebuilt(
+    ran: &[&Unit],
+    units: &[Unit],
+    ws: &Workspace,
+    first_build: Option<bool>,
+) -> Option<Rebuilt> {
     let compiled: BTreeSet<&str> = ran
         .iter()
         .filter(|u| u.kind() != Kind::BuildScript && ws.deps.contains_key(&u.name))
@@ -284,10 +310,24 @@ pub(super) fn rebuilt(ran: &[&Unit], ws: &Workspace) -> Option<Rebuilt> {
                 .is_none_or(|d| !d.iter().any(|d| compiled.contains(d.as_str())))
         })
         .map(|c| (*c).to_owned())
-        .collect();
+        .collect::<Vec<String>>();
+    let fresh_members = units.iter().any(|u| {
+        u.duration <= 0.0 && u.kind() != Kind::BuildScript && ws.deps.contains_key(&u.name)
+    });
+    let from_leaves = !fresh_members
+        && roots.len() >= 2
+        && roots
+            .iter()
+            .all(|r| ws.deps.get(r).is_none_or(BTreeSet::is_empty));
+    let first_build = match first_build {
+        Some(true) => Some(FirstBuild::NoFingerprints),
+        None if from_leaves => Some(FirstBuild::FromLeaves),
+        _ => None,
+    };
     Some(Rebuilt {
         crates: compiled.len(),
         roots,
+        first_build,
         busy: ran
             .iter()
             .filter(|u| compiled.contains(u.name.as_str()))

@@ -1,5 +1,6 @@
 //! Findings for a timings analysis.
 
+use super::breakdown::FirstBuild;
 use super::{Analysis, Kind, UnitTime};
 use crate::finding::{Finding, Severity};
 use crate::fmt::{pct, secs};
@@ -266,6 +267,23 @@ fn waits(a: &Analysis, out: &mut Vec<Finding>) {
 fn rebuilt(a: &Analysis, out: &mut Vec<Finding>) {
     let Some(r) = &a.rebuilt else { return };
     if r.crates < 10 {
+        return;
+    }
+    if let Some(why) = r.first_build {
+        let leaves = if r.roots.len() > 4 {
+            format!("{} and {} more", r.roots[..4].join(", "), r.roots.len() - 4)
+        } else {
+            r.roots.join(", ")
+        };
+        out.push(
+            Finding::new("first-build", Severity::Info, "First build in this target directory: no fan-out to report", "worktrees-and-cold-target-directories")
+                .saw(match why {
+                    FirstBuild::NoFingerprints => format!("The target directory had no fingerprints for any workspace crate before this build, so all {} workspace crates it compiled ({} of units) were built for the first time, whatever came from a cache.", r.crates, secs(r.busy)),
+                    FirstBuild::FromLeaves => format!("All {} workspace crates in the report compiled ({} of units) and none was fresh, starting from {} crates with no workspace dependencies ({leaves}): that's a first build in this target directory (or after `cargo clean`), not an edit.", r.crates, secs(r.busy), r.roots.len()),
+                })
+                .why("A first build compiles every crate, so which ones it started from says nothing about what an edit rebuilds.")
+                .fix("To see what an edit to one crate costs, run `cargo faster timings --run --edit CRATE`: it brings the tree up to date, makes the edit and times the build. To make first builds cheaper, share a compile cache between target directories (`cargo faster cache`)."),
+        );
         return;
     }
     let root = r.roots.first().map_or("<crate>", String::as_str);

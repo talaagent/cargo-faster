@@ -494,6 +494,8 @@ That gives you a simple rule: **the crates you edit most should have the fewest 
 
 To measure the rebuild instead of estimating it, `cargo faster timings --edit <crate>` makes the edit for you. It brings the build up to date, adds a public function to the crate, times the build that follows, and then removes the function. With `--body`, the edit changes only a private function's body, so the crate's API stays the same. Dependents still rebuild after a body edit, but the gap between the two times is what changing the API costs them. Use `--cmd build`, `--cmd clippy` or `--cmd test` to time the build you actually wait on.
 
+A timeline from a first build in a new target directory compiles every workspace crate, so it looks like an edit that rebuilt everything. `cargo faster timings` says so (`first-build`) instead of reporting fan-out: when it ran the build and found no fingerprints for workspace crates before it, or when the rebuilt crates start from several workspace leaves and none of them was fresh. Time a real edit with `--edit`.
+
 ### Cutting a dependency edge
 
 A dependency is all or nothing. If `tala-config` uses one type from a 24,000-line `tala-session-store`, it still waits for all of `tala-session-store` to compile. Every edit to `tala-session-store` also rebuilds `tala-config`, and everything that depends on `tala-config`. When that one edge is how most of the workspace reaches the big crate, it's also why an edit to the big crate rebuilds most of the workspace.

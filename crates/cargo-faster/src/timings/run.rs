@@ -154,6 +154,44 @@ pub fn edit_target(m: &Metadata, name: &str) -> Result<EditTarget, Error> {
     })
 }
 
+/// Whether the target directory has a cargo fingerprint for any of
+/// `members` (package names), in any profile (`debug/.fingerprint`) or
+/// target (`x86_64-unknown-linux-gnu/debug/.fingerprint`). A build in a
+/// target directory without one compiles every workspace crate for the
+/// first time.
+#[must_use]
+pub fn has_fingerprints(target_dir: &Path, members: &[&str]) -> bool {
+    let subdirs = |p: &Path| -> Vec<PathBuf> {
+        std::fs::read_dir(p)
+            .map(|d| {
+                d.flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.is_dir())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut dirs = Vec::new();
+    for profile in subdirs(target_dir) {
+        dirs.push(profile.join(".fingerprint"));
+        dirs.extend(
+            subdirs(&profile)
+                .into_iter()
+                .map(|p| p.join(".fingerprint")),
+        );
+    }
+    dirs.iter().any(|d| {
+        std::fs::read_dir(d).is_ok_and(|entries| {
+            entries.flatten().any(|e| {
+                let name = e.file_name();
+                let name = name.to_string_lossy();
+                name.rsplit_once('-')
+                    .is_some_and(|(pkg, _)| members.contains(&pkg))
+            })
+        })
+    })
+}
+
 /// A probe edit in place: the file's original bytes, written back by
 /// [`Edit::restore`], or on drop or Ctrl-C if that never runs.
 #[derive(Debug)]
@@ -287,6 +325,20 @@ mod tests {
         assert!(!b.contains("pub fn"));
         assert!(b.contains("fn __cargo_faster_probe() -> u64 {\n    1\n}"));
         assert!(a.contains(MARKER) && b.contains(MARKER));
+    }
+
+    #[test]
+    fn fingerprints() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = dir.path();
+        assert!(!has_fingerprints(t, &["tala-core"]));
+        std::fs::create_dir_all(t.join("debug/.fingerprint/serde-0123abcd")).unwrap();
+        assert!(!has_fingerprints(t, &["tala-core"]));
+        std::fs::create_dir_all(
+            t.join("x86_64-unknown-linux-gnu/gate/.fingerprint/tala-core-9f8e"),
+        )
+        .unwrap();
+        assert!(has_fingerprints(t, &["tala-core"]));
     }
 
     #[test]
