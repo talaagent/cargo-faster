@@ -25,6 +25,7 @@ nix develop -c cargo fmt --all --check
 nix develop -c cargo clippy --workspace --all-targets -- -D warnings
 CARGO_FASTER_PROFILE_TESTS=1 nix develop -c cargo nextest run --workspace
 RUSTDOCFLAGS="-D warnings" nix develop -c cargo doc --workspace --no-deps
+nix develop -c ./scripts/no-std-check.sh
 nix develop -c cargo deny check
 ```
 
@@ -34,7 +35,10 @@ checks the Nix flake (including `nix build .#cargo-faster`).
 ## Releases
 
 `release-plz.toml` writes `CHANGELOG.md` and owns the `v<version>` tag and
-GitHub release. With `release_always = false`, only a merged release PR
+GitHub release. The parser crates in `crates/` share cargo-faster's version
+and are published with it; their commits go in the same changelog, and
+they get no tag of their own. A new parser crate needs a `[[package]]`
+entry there and its name in cargo-faster's `changelog_include`. With `release_always = false`, only a merged release PR
 publishes. Review the version bump and the changelog, and merge only after
 CI passes.
 
@@ -52,15 +56,15 @@ replaces the built-in token.
 
 ### First publication
 
-Trusted publishing can't create a crate, so the first release needs a
-token:
+Trusted publishing can't create a crate, so the first release of each
+crate (cargo-faster, and each parser crate) needs a token:
 
 1. Create a short-lived crates.io token with the `publish-new` scope and
    store it as the `CARGO_REGISTRY_TOKEN` Actions secret.
 2. Add the release date to the `0.1.0` heading in CHANGELOG.md.
 3. Run the release-plz workflow by hand with `bootstrap=true`. It publishes
    the committed version.
-4. On crates.io, add a trusted publisher to the crate: owner `talaagent`,
+4. On crates.io, add a trusted publisher to each new crate: owner `talaagent`,
    repository `cargo-faster`, workflow `release-plz.yml`, no environment.
 5. Delete the `CARGO_REGISTRY_TOKEN` secret and revoke the token. Later
    releases use OIDC. A persistent token would override it.

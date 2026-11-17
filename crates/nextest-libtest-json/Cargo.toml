@@ -1,0 +1,26 @@
+[package]
+name = "nextest-libtest-json"
+description = "Parse cargo-nextest's libtest-json and libtest-json-plus output into typed events and a run summary"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+readme = "README.md"
+keywords = ["nextest", "libtest", "json", "test", "parser"]
+categories = ["development-tools::testing", "parser-implementations", "no-std"]
+include = ["src/**/*.rs", "tests/**", "README.md", "LICENSE", "NOTICE"]
+
+[features]
+default = ["std"]
+## `std::io` readers (`parse_reader`). Parsing from `&str` works without it.
+std = ["serde/std", "serde_json/std"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -11,61 +11,14 @@ use alloc::collections::BTreeMap;
 /// How many of the slowest tests and binaries to list.
 pub const TOP: usize = 15;
 
-/// One test's result.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TestTime {
-    /// `crate::binary`, as nextest names it.
-    pub binary: String,
-    /// The test's path inside the binary.
-    pub name: String,
-    /// Wall time of the test's process.
-    pub secs: f64,
-    /// Whether it passed.
-    pub passed: bool,
-}
-
-/// What a nextest run reported.
-#[derive(Debug, Clone, Default)]
-pub struct Run {
-    /// Every test that finished.
-    pub tests: Vec<TestTime>,
-    /// Tests that were skipped (ignored).
-    pub ignored: usize,
-}
+pub use nextest_libtest_json::{Run, TestResult as TestTime};
 
 /// Parse `cargo nextest run --message-format libtest-json[-plus]` output
 /// (needs `NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1`). Lines that aren't test
 /// results are ignored.
 #[must_use]
 pub fn parse(stdout: &str) -> Run {
-    let mut run = Run::default();
-    for line in stdout.lines() {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        if v.get("type").and_then(|t| t.as_str()) != Some("test") {
-            continue;
-        }
-        let event = v.get("event").and_then(|e| e.as_str()).unwrap_or_default();
-        let full = v.get("name").and_then(|n| n.as_str()).unwrap_or_default();
-        match event {
-            "ok" | "failed" | "timeout" => {
-                let (binary, name) = full.split_once('$').unwrap_or(("", full));
-                run.tests.push(TestTime {
-                    binary: binary.to_owned(),
-                    name: name.to_owned(),
-                    secs: v
-                        .get("exec_time")
-                        .and_then(serde_json::Value::as_f64)
-                        .unwrap_or_default(),
-                    passed: event == "ok",
-                });
-            }
-            "ignored" => run.ignored += 1,
-            _ => {}
-        }
-    }
-    run
+    Run::parse(stdout)
 }
 
 /// A nextest duration (`"60s"`, `"2m"`, `"500ms"`, `"1m 30s"`) in seconds.
@@ -391,12 +344,7 @@ not json
         assert_eq!(r.ignored, 1);
         assert_eq!(
             r.tests[0],
-            TestTime {
-                binary: "app::app".into(),
-                name: "db::migrates".into(),
-                secs: 40.5,
-                passed: true,
-            }
+            TestTime::new("app::app", "db::migrates", 40.5, true)
         );
         assert!(!r.tests[2].passed);
     }

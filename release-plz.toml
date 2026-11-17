@@ -1,6 +1,9 @@
 # Runs from .github/workflows/release-plz.yml while the repository is public.
-# One crate, one changelog (CHANGELOG.md), one `v<version>` tag and GitHub
-# release.
+# cargo-faster and the parser crates it is built on release together: one
+# version (`version_group`), one changelog (CHANGELOG.md, which includes the
+# parser crates' commits), one `v<version>` tag and GitHub release. The
+# parser crates are published with it but get no tag or changelog of their
+# own.
 [workspace]
 changelog_update = true
 changelog_path = "CHANGELOG.md"
@@ -17,3 +20,12 @@ release_always = false
 
 [[package]]
 name = "cargo-faster"
+version_group = "cargo-faster"
+changelog_include = ["nextest-libtest-json"]
+
+[[package]]
+name = "nextest-libtest-json"
+version_group = "cargo-faster"
+changelog_update = false
+git_tag_enable = false
+git_release_enable = false

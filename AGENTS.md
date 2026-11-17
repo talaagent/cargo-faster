@@ -18,6 +18,7 @@ nix develop -c cargo clippy --workspace --all-targets -- -D warnings
 nix develop -c cargo nextest run --workspace
 CARGO_FASTER_PROFILE_TESTS=1 nix develop -c cargo nextest run --workspace
 RUSTDOCFLAGS="-D warnings" nix develop -c cargo doc --workspace --no-deps
+nix develop -c ./scripts/no-std-check.sh
 nix develop -c cargo deny check
 nix develop -c cargo publish --workspace --dry-run --allow-dirty
 nix build .#cargo-faster && ./result/bin/cargo-faster --version
@@ -28,6 +29,15 @@ tiny crate and self-profile it (they need `RUSTC_BOOTSTRAP=1`, which the
 tool sets itself). Everything else runs on fixtures and is fast.
 
 ## Layout
+
+The parser crates under `crates/` are reusable on their own: public serde
+types, no cargo-faster concepts (findings, severity), `#![no_std]` + `alloc`
+with file IO behind a default `std` feature (`scripts/no-std-check.sh`
+builds them for `wasm32v1-none`). Each keeps real fixtures from runs on this
+repository under `tests/fixtures/cargo-faster/`.
+
+- `crates/nextest-libtest-json`: nextest's experimental libtest-json(-plus)
+  output as typed events and a run summary.
 
 `crates/cargo-faster` is a library (`src/lib.rs`, unstable API, for tests)
 and the `cargo-faster` binary (`src/main.rs`, the bpaf CLI).
@@ -44,6 +54,7 @@ and the `cargo-faster` binary (`src/main.rs`, the bpaf CLI).
 - `graph.rs`: workspace reverse dependencies and big crates, from
   `cargo metadata`.
 - `deps.rs`: heavy features, duplicate versions, proc macros.
+- `testrun.rs`: `tests --run` findings over a `nextest-libtest-json` run.
 - `tests.rs`: nextest config, target runners, `NEXTEST_TEST_THREADS`,
   database-backed tests.
 - `profile.rs`: self-profile analysis (`analyzeme` adapter plus a pure
