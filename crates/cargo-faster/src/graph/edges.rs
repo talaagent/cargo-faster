@@ -528,20 +528,20 @@ mod tests {
     #[test]
     fn counts_paths_and_use_trees() {
         let src = r#"
-            use tala_store::{Store, config::{self, Limits as L}, open};
-            // tala_store::Commented is ignored
-            /* and tala_store::Blocked too */
-            fn f() -> tala_store::Store {
-                let s = "tala_store::InString";
+            use app_store::{Store, config::{self, Limits as L}, open};
+            // app_store::Commented is ignored
+            /* and app_store::Blocked too */
+            fn f() -> app_store::Store {
+                let s = "app_store::InString";
                 let c = 'x';
-                tala_store::open(&L::default());
-                ::tala_store::Error::Missing;
-                tala_store::m!();
-                other::tala_store::Nope;
-                tala_store::Store::new()
+                app_store::open(&L::default());
+                ::app_store::Error::Missing;
+                app_store::m!();
+                other::app_store::Nope;
+                app_store::Store::new()
             }
         "#;
-        let u = used_items(src, "tala_store");
+        let u = used_items(src, "app_store");
         assert!(!u.opaque, "{u:?}");
         assert_eq!(
             u.items.into_iter().collect::<Vec<_>>(),
@@ -572,7 +572,7 @@ mod tests {
             ["util"]
         );
         // Re-exported at the root and reached through `crate::` (the
-        // tala-connections pattern), in paths and in use trees.
+        // app-connections pattern), in paths and in use trees.
         let src = "pub use b::{config, orgs, pg}; pub use b::config_kdl;
             use crate::config::Config;
             fn f(_: impl Fn() -> Option<crate::orgs::Role>) { crate::pg::shared(); }
@@ -595,8 +595,8 @@ mod tests {
 
     fn edge(items: &[&str], to_lines: usize, before: usize, after: usize) -> Edge {
         Edge {
-            from: "tala-config".into(),
-            to: "tala-session-store".into(),
+            from: "app-config".into(),
+            to: "app-session-store".into(),
             items: items.iter().map(|s| (*s).to_owned()).collect(),
             opaque: false,
             to_lines,
@@ -618,13 +618,13 @@ mod tests {
         assert_eq!(f[0].severity, Severity::Medium);
         assert_eq!(
             f[0].title,
-            "tala-config uses 2 items from tala-session-store (24k lines, 8.0s on the critical path)"
+            "app-config uses 2 items from app-session-store (24k lines, 8.0s on the critical path)"
         );
         assert!(
             f[0].saw
                 .contains("rebuilds 79 workspace crates; without this edge it would rebuild 28")
         );
-        assert!(f[0].saw.contains("`tala_session_store::SessionId`"));
+        assert!(f[0].saw.contains("`app_session_store::SessionId`"));
         // Too many items, too small, nothing saved, or unreliable: no finding.
         let many = edge(&["A", "B", "C", "D", "E", "F"], 24_000, 79, 28);
         let small = edge(&["A"], 800, 79, 28);

@@ -11,7 +11,7 @@ authors.workspace = true
 readme = "README.md"
 keywords = ["nextest", "libtest", "json", "test", "parser"]
 categories = ["development-tools::testing", "parser-implementations", "no-std"]
-include = ["src/**/*.rs", "tests/**", "README.md", "LICENSE", "NOTICE"]
+include = ["src/**/*.rs", "tests/*.rs", "README.md", "LICENSE", "NOTICE"]
 
 [features]
 default = ["std"]

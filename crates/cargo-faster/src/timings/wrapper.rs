@@ -52,7 +52,7 @@ pub struct WrapperRun {
 /// One per-crate event from `kache stats --format json`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WrapperEvent {
-    /// The rustc crate name (`tala_core`).
+    /// The rustc crate name (`app_core`).
     pub crate_name: String,
     /// When the wrapper started, Unix milliseconds.
     pub start_ms: f64,
@@ -222,10 +222,10 @@ mod tests {
             target: target.into(),
             ..Unit::default()
         };
-        assert_eq!(crate_name(&u("tala-core", " (check)")), "tala_core");
+        assert_eq!(crate_name(&u("app-core", " (check)")), "app_core");
         assert_eq!(
-            crate_name(&u("tala-agent-bin", " tala-agent \"bin\"")),
-            "tala_agent"
+            crate_name(&u("app-agent-bin", " app-agent \"bin\"")),
+            "app_agent"
         );
         assert_eq!(crate_name(&u("x", "")), "x");
     }

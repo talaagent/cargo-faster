@@ -103,14 +103,14 @@ With no subcommand, `cargo faster` runs every check that's quick and doesn't bui
 == summary
   [medium] The target dir filesystem is 94% full
   [medium] 6 heavy crates are built in more than one version
-  [medium] tala-agent has 108449 lines of Rust
+  [medium] app-agent has 108449 lines of Rust
   [low] cargo is limited to 16 jobs on 32 CPUs
-  [low] Editing tala-spool rebuilds 98 of 183 workspace crates
-  [low] tala-admin-proto-orgs is 43509 lines, mostly generated code
-  [low] tala-admin-proto-personas is 50889 lines, mostly generated code
-  [low] tala-room-ops uses 2 items from tala-config (31k lines)
-    saw: tala-room-ops depends on tala-config (31107 lines) but uses only
-         `tala_config::config::Project`, `tala_config::state::Room`. An edit to tala-config
+  [low] Editing app-spool rebuilds 98 of 183 workspace crates
+  [low] app-admin-proto-orgs is 43509 lines, mostly generated code
+  [low] app-admin-proto-personas is 50889 lines, mostly generated code
+  [low] app-room-ops uses 2 items from app-config (31k lines)
+    saw: app-room-ops depends on app-config (31107 lines) but uses only
+         `app_config::config::Project`, `app_config::state::Room`. An edit to app-config
          rebuilds 74 workspace crates; without this edge it would rebuild 69.
 ```
 
@@ -154,14 +154,14 @@ $ cargo faster timings --cmd test -- --profile ci   # cargo nextest run --worksp
 `--edit CRATE` measures the build you get after editing a crate, without you editing anything:
 
 ```console
-$ cargo faster timings --edit tala-mx --cmd clippy
+$ cargo faster timings --edit app-mx --cmd clippy
 + cargo clippy --workspace
 + cargo clippy --workspace --timings
 == timings
   build        cargo clippy --workspace --timings
-  edit         tala-mx: a new public function (the crate's API changed) in crates/tala-mx/src/lib.rs, restored after the build
+  edit         app-mx: a new public function (the crate's API changed) in crates/app-mx/src/lib.rs, restored after the build
   ...
-  rebuilt      23 workspace crates, from tala-mx
+  rebuilt      23 workspace crates, from app-mx
 ```
 
 It first runs the build without `--timings`, so the timed build starts from an up-to-date tree. Then it appends a probe function to the crate's root file, times the build, and puts the file back (also on an error or Ctrl-C). The probe is a new public function, which changes the crate's API the way adding or changing a public item does. `--body` changes only a private function's body instead, which is the cheapest kind of edit: compare the two to see what your dependents pay for API changes. A proc-macro crate always gets a body edit. Restoring the file is an edit too, so your next build rebuilds the same crates once more.
@@ -176,22 +176,22 @@ Here's a report from an edit to the application crate:
 
   critical path (each step waited for the one above it)
   start  took   waited  unit
-  0.38s  42.3s  full    tala-agent (check)
-  42.6s  30.9s  full    tala-agent-bin (check)
-  76.0s  8.25s  full    tala-agent-bin tala-agent "bin" (check-test)
+  0.38s  42.3s  full    app-agent (check)
+  42.6s  30.9s  full    app-agent-bin (check)
+  76.0s  8.25s  full    app-agent-bin app-agent "bin" (check-test)
 
   slowest units
   took   % wall  unit
-  52.6s     62%  tala-agent (check-test)
-  42.3s     50%  tala-agent (check)
-  35.3s     42%  tala-agent-bin (check-test)
-  30.9s     37%  tala-agent-bin (check)
+  52.6s     62%  app-agent (check-test)
+  42.3s     50%  app-agent (check)
+  35.3s     42%  app-agent-bin (check-test)
+  30.9s     37%  app-agent-bin (check)
   ...
 
-  [high] tala-agent (check-test) serializes the build
-    saw: tala-agent (check-test) took 52.6s of the 84.3s build while little else could run:
+  [high] app-agent (check-test) serializes the build
+    saw: app-agent (check-test) took 52.6s of the 84.3s build while little else could run:
          ...
-    fix: Find out what's slow inside it with `cargo faster check-cost -p tala-agent`. If
+    fix: Find out what's slow inside it with `cargo faster check-cost -p app-agent`. If
          it's just big, split it (see `cargo faster rdeps`) so the pieces build in parallel
          and edits rebuild less.
 ```
@@ -231,17 +231,17 @@ After an edit to a crate near the root of a workspace, `cargo build --timings` a
   parallelism    2.7 units at a time, CPU 74% on average, jobs=16 on 32 CPUs
   cache          94 compiled incrementally (passthrough, no cache lookup) (414s); 0.00s waiting for the wrapper
   compared with  an earlier check (67.9s wall): 60 units, 1.2x their time there (median)
-  rebuilt        88 workspace crates, from tala-core
+  rebuilt        88 workspace crates, from app-core
   baseline       target/cargo-timings/cargo-timing-20261117T092210.551Z.html
 
   critical path (each step waited for the one above it; gap: idle after it was ready)
   start  took   gap     cache  wait    waited  unit
-  0.66s  7.40s  -       incr   -       full    tala-core
-  8.06s  24.1s  -       incr   -       meta    tala-config
+  0.66s  7.40s  -       incr   -       full    app-core
+  8.06s  24.1s  -       incr   -       meta    app-config
   ...
-  74.7s  51.2s  -       incr   -       meta    tala-admin
-   126s  17.5s  0.010s  incr   -       meta    tala-agent-bin
-   143s  8.16s  -       incr   -       full    tala-agent-bin tala-agent "bin"
+  74.7s  51.2s  -       incr   -       meta    app-admin
+   126s  17.5s  0.010s  incr   -       meta    app-agent-bin
+   143s  8.16s  -       incr   -       full    app-agent-bin app-agent "bin"
 
   where the time went
   busy   % busy  on path  units  kind
@@ -255,7 +255,7 @@ After an edit to a crate near the root of a workspace, `cargo build --timings` a
 - **gap**: how long a step on the critical path sat idle after the unit it waited for had finished.
 - **where the time went**: busy seconds and seconds on the critical path, split into checks, library builds, binaries and tests, and build scripts.
 
-So a slow build after an edit to `tala-core` is explained as: 88 crates rebuilt, all incrementally (not cacheable), on a path through a few big crates; not waits, and not a busy machine.
+So a slow build after an edit to `app-core` is explained as: 88 crates rebuilt, all incrementally (not cacheable), on a path through a few big crates; not waits, and not a busy machine.
 
 
 ## `cargo faster check-cost`
@@ -263,7 +263,7 @@ So a slow build after an edit to `tala-core` is explained as: 88 crates rebuilt,
 This is the one that finds causes rather than symptoms. It self-profiles the compiler while it checks one crate, and then it tells you where the time went: which compiler queries, which trait predicates, and which function bodies asked for them.
 
 ```console
-$ cargo faster check-cost -p tala-agent-bin
+$ cargo faster check-cost -p app-agent-bin
 ```
 
 Here's what it does, so you know what you're running:
@@ -294,8 +294,8 @@ The header and the `target` line say which build was profiled: `(lib)`, `(bin)`,
 Here's a real profile of the binary crate from the case study, after the first fix:
 
 ```text
-== check-cost: tala_agent_bin (bin)
-  target         crates/tala-agent-bin/src/main.rs (bin, without #[cfg(test)] code)
+== check-cost: app_agent_bin (bin)
+  target         crates/app-agent-bin/src/main.rs (bin, without #[cfg(test)] code)
   profiled time  38.7s wall, 38.6s across threads
   trait solving  32.1s (83%)
   proc macros    0.076s (0%)
@@ -311,8 +311,8 @@ Here's a real profile of the binary crate from the case study, after the first f
 
   trait solving by what is being proved
   self   %      count  category
-  6.55s  16.9%  17913  types from tala_agent
-  4.33s  11.2%    921  async bodies in tala_agent
+  6.55s  16.9%  17913  types from app_agent
+  4.33s  11.2%    921  async bodies in app_agent
   4.03s  10.4%    720  types from matrix_sdk
   2.68s   6.9%  25857  types from std
   2.00s   5.2%   4938  types from tokio
@@ -320,15 +320,15 @@ Here's a real profile of the binary crate from the case study, after the first f
 
   most expensive obligations
   self    count  bodies  predicate
-   0.47s     54      47  tala_agent::bot::Bot: Sync
-   0.46s     54      47  tala_agent::bot::Bot: Send
-   0.45s     54      47  std::sync::Weak<tala_agent::bot::Bot>: Send
+   0.47s     54      47  app_agent::bot::Bot: Sync
+   0.46s     54      47  app_agent::bot::Bot: Send
+   0.45s     54      47  std::sync::Weak<app_agent::bot::Bot>: Send
    ...
 
   bodies doing the most trait solving
   self   %      preds  body
-  8.06s  20.9%   2977  tala_agent_bin::canonical_persona::{{impl}}::invite
-  3.14s   8.1%   1291  tala_agent_bin::host::{{impl}}[2]::invite
+  8.06s  20.9%   2977  app_agent_bin::canonical_persona::{{impl}}::invite
+  3.14s   8.1%   1291  app_agent_bin::host::{{impl}}[2]::invite
   ...
 
   proc macro expansion
@@ -349,8 +349,8 @@ Here's how to read it, from the top:
 The findings then put it together:
 
 ```text
-  [high] Trait solving is 83% of tala_agent_bin's check time
-  [medium] Send/Sync proofs for `tala_agent::bot::Bot` are repeated in every async body
+  [high] Trait solving is 83% of app_agent_bin's check time
+  [medium] Send/Sync proofs for `app_agent::bot::Bot` are repeated in every async body
   [medium] One function body takes a large share of type checking
 ```
 
@@ -457,8 +457,8 @@ A load average of 74 on 32 cores means every number on this page could be twice 
          0.10.3, syn 2.0.119 + 3.0.7, thiserror-impl 1.0.69 + 2.0.21, windows-sys 0.52.0 +
          0.61.2. 32 crates are duplicated in total.
   [medium] #[async_trait] is used 62 times in 9 workspace crates
-    saw: 62 #[async_trait] attributes: tala-agent 29, tala-session-engine 9, tala-github-api
-         8, tala-delegate-runtime 5, tala-session-worker 4 and 4 more. They define 7 traits,
+    saw: 62 #[async_trait] attributes: app-agent 29, app-session-engine 9, app-github-api
+         8, app-delegate-runtime 5, app-session-worker 4 and 4 more. They define 7 traits,
          7 held as `dyn` (`CodexApi`, `GithubHttp`, `Hooks`, `ImageApi`, `OwnerGh`). 23 are
          impls of traits defined outside the workspace, which stay until upstream drops the
          macro.
@@ -489,9 +489,9 @@ Slow tests are often not slow to compile at all. `tests` checks how they're run:
   runner override       scripts/gate:180 ("cargo nextest|$runner_var=$PWD/scripts/test-runner $cargo nextest run ...")
   NEXTEST_TEST_THREADS  4
   database crates       sqlx
-  db tests: template databases  crates/tala-core/src/pg_testing.rs:602
-  db tests: fsync off           crates/tala-core/src/pg_testing.rs:231
-  db tests: tmpfs               crates/tala-core/src/pg_testing.rs:4
+  db tests: template databases  crates/app-core/src/pg_testing.rs:602
+  db tests: fsync off           crates/app-core/src/pg_testing.rs:231
+  db tests: tmpfs               crates/app-core/src/pg_testing.rs:4
 
   [low] `scripts/kache-test-runner` steps aside under nextest
   [info] NEXTEST_TEST_THREADS=4 sets the threads for plain nextest runs
@@ -525,13 +525,13 @@ It times `cargo nextest run --workspace --no-run --timings`, runs the tests (`--
 
   slowest tests
   took   binary                          test
-   600s  tala-runner::cli                session_worker_reports_invalid_request_as_json
-  8.49s  tala-client::tala_client        files::tests::a_big_image_is_scaled_to_fit
+   600s  app-runner::cli                session_worker_reports_invalid_request_as_json
+  8.49s  app-client::app_client        files::tests::a_big_image_is_scaled_to_fit
   ...
   test binaries by total test time (fastest ≈ the binary's per-test startup)
   total  tests  slowest  fastest  binary
-   600s      5     600s   0.052s  tala-runner::cli
-   139s    754    3.87s   0.009s  tala-agent::tala_agent
+   600s      5     600s   0.052s  app-runner::cli
+   139s    754    3.87s   0.009s  app-agent::app_agent
   ...
 
   [medium] 1 test(s) ran into the slow-timeout (60.0s)
@@ -559,30 +559,30 @@ $ cargo faster rdeps app-core   # one crate (or -p app-core)
 
   crates whose edits rebuild the most
   rebuilds  lines  crate
-        98   6417  tala-spool
-        95    150  tala-ids
-        91   2640  tala-hook-wire
-        87  11878  tala-core
+        98   6417  app-spool
+        95    150  app-ids
+        91   2640  app-hook-wire
+        87  11878  app-core
         ...
 
   dependency edges that are cheap to cut
   items  rebuilds without it  edge
-      2             74 -> 69  tala-room-ops -> tala-config
+      2             74 -> 69  app-room-ops -> app-config
 
-  [medium] tala-agent has 108449 lines of Rust
-    saw: tala-agent is 108449 lines; its biggest modules are delegates (14378 lines), agent
+  [medium] app-agent has 108449 lines of Rust
+    saw: app-agent is 108449 lines; its biggest modules are delegates (14378 lines), agent
          (11366 lines), personas (9094 lines), guests.rs (3243 lines).
-  [low] Editing tala-spool rebuilds 98 of 183 workspace crates
-  [low] tala-admin-proto-personas is 50889 lines, mostly generated code
-  [low] tala-room-ops uses 2 items from tala-config (31k lines)
-    saw: tala-room-ops depends on tala-config (31107 lines) but uses only
-         `tala_config::config::Project`, `tala_config::state::Room`. An edit to tala-config
+  [low] Editing app-spool rebuilds 98 of 183 workspace crates
+  [low] app-admin-proto-personas is 50889 lines, mostly generated code
+  [low] app-room-ops uses 2 items from app-config (31k lines)
+    saw: app-room-ops depends on app-config (31107 lines) but uses only
+         `app_config::config::Project`, `app_config::state::Room`. An edit to app-config
          rebuilds 74 workspace crates; without this edge it would rebuild 69.
 ```
 
 A crate near the bottom of the graph decides the cost of most edits, because every edit to it rebuilds everything above it. A big crate costs you on every edit to it, and can't use more than a few cores. `rdeps` names the biggest modules, which are the candidates to move into crates of their own.
 
-For the crates that rebuild the most, `rdeps` also reads each direct dependent's source and counts the distinct items it uses from the crate (`tala_config::config::Project` and `tala_config::state::Room` are two). When a dependent uses at most 5 items from a crate of 5,000 lines or more, and dropping the edge would spare at least 3 crates on an edit (or the edge holds up the critical path for 2 s or more), it reports a `cheap-to-cut-edge` finding with what an edit rebuilds now and without the edge. Move those items into a small crate lower down and the dependent stops waiting for, and rebuilding with, the big one. `cargo faster rdeps CRATE` lists every dependent of that crate with its item count; `?` means a glob or alias hid what's used. See [Cutting a dependency edge](guide.md#cutting-a-dependency-edge).
+For the crates that rebuild the most, `rdeps` also reads each direct dependent's source and counts the distinct items it uses from the crate (`app_config::config::Project` and `app_config::state::Room` are two). When a dependent uses at most 5 items from a crate of 5,000 lines or more, and dropping the edge would spare at least 3 crates on an edit (or the edge holds up the critical path for 2 s or more), it reports a `cheap-to-cut-edge` finding with what an edit rebuilds now and without the edge. Move those items into a small crate lower down and the dependent stops waiting for, and rebuilding with, the big one. `cargo faster rdeps CRATE` lists every dependent of that crate with its item count; `?` means a glob or alias hid what's used. See [Cutting a dependency edge](guide.md#cutting-a-dependency-edge).
 
 Before you split a crate, though, run `check-cost` on it. The crate in the case study looked too big, and splitting it would not have fixed anything. See [The shape of your workspace](guide.md#the-shape-of-your-workspace).
 

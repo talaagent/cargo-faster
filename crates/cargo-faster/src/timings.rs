@@ -127,7 +127,7 @@ impl Unit {
         self.rmeta_time.map(|r| self.duration - r)
     }
 
-    /// `name target` for display, e.g. `tala-agent (check-test)`.
+    /// `name target` for display, e.g. `app-agent (check-test)`.
     #[must_use]
     pub fn label(&self) -> String {
         format!("{}{}", self.name, self.target)
@@ -399,7 +399,7 @@ pub struct UnitOf {
     pub krate: String,
     /// The package version.
     pub version: String,
-    /// Cargo's target label (`tala-agent "bin" (check)`), empty for a
+    /// Cargo's target label (`app-agent "bin" (check)`), empty for a
     /// library build.
     pub target: String,
     /// Cargo's mode (`build`, `check`, `test`, `run-custom-build`).
@@ -1119,7 +1119,7 @@ mod tests {
         assert_eq!(k(" (check)"), Kind::Check);
         assert_eq!(k(" x \"test\" (check-test)"), Kind::Check);
         assert_eq!(k(""), Kind::Lib);
-        assert_eq!(k(" tala-agent \"bin\""), Kind::Link);
+        assert_eq!(k(" app-agent \"bin\""), Kind::Link);
         assert_eq!(k(" (test)"), Kind::Link);
         assert_eq!(k(" build-script (run)"), Kind::BuildScript);
     }
@@ -1127,7 +1127,7 @@ mod tests {
     /// A check unit's part after metadata is analysis, not codegen (#11).
     #[test]
     fn check_units_have_no_codegen() {
-        let mut u = unit(1, "tala-config", 0.0, 14.8, &[], &[]);
+        let mut u = unit(1, "app-config", 0.0, 14.8, &[], &[]);
         u.sections = Some(vec![
             (
                 "frontend".into(),
@@ -1162,7 +1162,7 @@ mod tests {
         assert!(!ids(&a).contains(&"post-metadata-analysis"));
     }
 
-    /// The real build after a one-line tala-core edit, joined with kache's
+    /// The real build after a one-line app-core edit, joined with kache's
     /// records and compared with the check of the same edit (#12, #13).
     #[test]
     #[allow(clippy::many_single_char_names, reason = "t: timings, a: analysis")]
@@ -1176,16 +1176,16 @@ mod tests {
         let matched = wrapper::join(&mut t, &events);
         let compiled = t.ran().filter(|u| u.kind() != Kind::BuildScript).count();
         assert_eq!(matched, compiled);
-        // Everything that depends on tala-core.
+        // Everything that depends on app-core.
         let ws = Workspace {
             deps: t
                 .ran()
-                .filter(|u| u.name.starts_with("tala-"))
+                .filter(|u| u.name.starts_with("app-"))
                 .map(|u| {
-                    let deps = if u.name == "tala-core" {
+                    let deps = if u.name == "app-core" {
                         alloc::collections::BTreeSet::default()
                     } else {
-                        ["tala-core".to_owned()].into()
+                        ["app-core".to_owned()].into()
                     };
                     (u.name.clone(), deps)
                 })
@@ -1207,17 +1207,17 @@ mod tests {
                 .all(|p| p.cache == Some(Outcome::Incr))
         );
         assert!(a.critical_path.last().unwrap().unit.ends_with("\"bin\""));
-        // The fixture's graph has every crate on tala-core only, so the one
+        // The fixture's graph has every crate on app-core only, so the one
         // workspace edge on the path is the first step.
         let edges = path_edges(&a, &ws);
         assert_eq!(edges.len(), 1);
         assert_eq!(
             (edges[0].0.as_str(), edges[0].1.as_str()),
-            ("tala-config", "tala-core")
+            ("app-config", "app-core")
         );
         assert!((edges[0].2.unwrap() - a.critical_path[0].duration).abs() < 1e-9);
         let r = a.rebuilt.as_ref().unwrap();
-        assert_eq!(r.roots, ["tala-core"]);
+        assert_eq!(r.roots, ["app-core"]);
         assert!(r.crates >= 80);
         let sd = a.slowdown.as_ref().unwrap();
         assert!(sd.baseline_check && sd.compared >= 50);
@@ -1242,22 +1242,22 @@ mod tests {
         assert!(d["wall_s"].as_f64().unwrap() > 150.0);
         assert_eq!(d["jobs"]["jobs"], 16);
         let p = d["critical_path"].as_array().unwrap();
-        assert_eq!(p[0]["unit"], "tala-core");
-        assert_eq!(p[0]["crate"], "tala-core");
+        assert_eq!(p[0]["unit"], "app-core");
+        assert_eq!(p[0]["crate"], "app-core");
         assert_eq!(p[0]["kind"], "lib");
         assert_eq!(p[0]["waited"], "full");
         assert_eq!(p[0]["cache"], "incr");
         assert_eq!(p[1]["waited"], "meta");
         let last = p.last().unwrap();
-        assert_eq!(last["crate"], "tala-agent-bin");
-        assert_eq!(last["target"], "tala-agent \"bin\"");
+        assert_eq!(last["crate"], "app-agent-bin");
+        assert_eq!(last["target"], "app-agent \"bin\"");
         assert!(last["start_s"].as_f64().unwrap() > 100.0);
         assert!(last["took_s"].as_f64().unwrap() > 1.0);
         let slow = &d["slowest_units"][0];
-        assert_eq!(slow["crate"], "tala-agent");
+        assert_eq!(slow["crate"], "app-agent");
         assert!(slow["took_s"].as_f64().unwrap() > 50.0);
         assert_eq!(d["wrapper"]["incremental"]["units"], 94);
-        assert_eq!(d["rebuilt"]["roots"][0], "tala-core");
+        assert_eq!(d["rebuilt"]["roots"][0], "app-core");
         assert!(d["slowdown"]["top"][0]["before_s"].is_f64());
         assert!(d["linked"]["slowest"][0]["took_s"].is_f64());
     }
@@ -1281,14 +1281,14 @@ mod tests {
         let mut units = Vec::new();
         let mut checks = Vec::new();
         for n in 0..6_u8 {
-            let name = format!("tala-lib{n}");
+            let name = format!("app-lib{n}");
             let start = 60.0 * f64::from(n);
             let i = usize::from(n);
             units.push(lib(i, &name, "", start, 60.0, &[i + 1]));
             checks.push(lib(i, &name, " (check)", 6.0 * f64::from(n), 6.0, &[]));
         }
         for b in 0..6_u8 {
-            let name = format!("tala-tool-{b}");
+            let name = format!("app-tool-{b}");
             units.push(lib(
                 10 + usize::from(b),
                 &name,
