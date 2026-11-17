@@ -71,6 +71,9 @@ pub struct Dependency {
     pub uses_default_features: bool,
     /// Path dependencies have a path.
     pub path: Option<PathBuf>,
+    /// Whether the dependency is optional (enabled through a feature).
+    #[serde(default)]
+    pub optional: bool,
 }
 
 fn yes() -> bool {

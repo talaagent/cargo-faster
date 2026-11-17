@@ -28,6 +28,67 @@ pub struct Analysis {
     pub async_trait_in: Vec<String>,
     /// `#[async_trait]` uses in the workspace's sources, when they were read.
     pub async_trait: Option<Scan>,
+    /// Normal and build dependencies that turn on test-only features.
+    pub test_features: Vec<TestFeature>,
+    /// Test-only features turned on in `[workspace.dependencies]`, which every
+    /// crate inheriting the entry gets, in its normal builds too.
+    pub workspace_test_features: Vec<WorkspaceTestFeature>,
+}
+
+/// A `[workspace.dependencies]` entry enabling test-only features.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WorkspaceTestFeature {
+    /// The dependency.
+    pub dependency: String,
+    /// Its test-only features that are enabled.
+    pub features: Vec<String>,
+    /// Workspace crates with a normal or build dependency on it.
+    pub inherited_by: usize,
+}
+
+/// A workspace crate enabling a test-only feature of a non-dev dependency.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TestFeature {
+    /// The workspace crate whose manifest asks for it.
+    pub krate: String,
+    /// The dependency.
+    pub dependency: String,
+    /// Its test-only features that are enabled.
+    pub features: Vec<String>,
+}
+
+/// Whether a feature name reads as test-only: `testing`, `test-util(s)`,
+/// `test-helpers`, `mock*`, `fake*` and the like.
+fn is_test_feature(f: &str) -> bool {
+    let f = f.to_ascii_lowercase();
+    matches!(f.as_str(), "test" | "tests" | "testing")
+        || f.starts_with("test-")
+        || f.starts_with("test_")
+        || f.starts_with("testutil")
+        || f.starts_with("mock")
+        || f.starts_with("fake")
+}
+
+/// Whether a workspace crate is itself test support (`foo-test-utils`,
+/// `foo-testing`, `mock-server`), whose normal dependencies may well need
+/// test features.
+fn is_test_crate(name: &str) -> bool {
+    name.split(['-', '_']).any(|w| {
+        matches!(
+            w.to_ascii_lowercase().as_str(),
+            "test"
+                | "tests"
+                | "testing"
+                | "testutil"
+                | "testutils"
+                | "mock"
+                | "mocks"
+                | "fake"
+                | "fakes"
+                | "fixture"
+                | "fixtures"
+        )
+    })
 }
 
 /// [`analyze`], plus a scan of the workspace's sources for `#[async_trait]`.
@@ -35,7 +96,58 @@ pub struct Analysis {
 pub fn analyze_with_sources(m: &Metadata) -> Analysis {
     let mut a = analyze(m);
     a.async_trait = Some(asynctrait::scan_workspace(m));
+    if let Some(root) = std::fs::read_to_string(m.workspace_root.join("Cargo.toml"))
+        .ok()
+        .and_then(|t| t.parse::<toml::Table>().ok())
+    {
+        attribute_workspace_features(&mut a, &root);
+    }
     a
+}
+
+/// Move test features that come from `[workspace.dependencies]` out of the
+/// per-crate list: `cargo metadata` shows them on every inheriting crate, but
+/// there is one place to fix them.
+pub fn attribute_workspace_features(a: &mut Analysis, root: &toml::Table) {
+    let Some(deps) =
+        crate::context::lookup(root, "workspace.dependencies").and_then(toml::Value::as_table)
+    else {
+        return;
+    };
+    for (key, entry) in deps {
+        let Some(t) = entry.as_table() else { continue };
+        let name = t
+            .get("package")
+            .and_then(toml::Value::as_str)
+            .unwrap_or(key);
+        let features: Vec<String> = t
+            .get("features")
+            .and_then(toml::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(toml::Value::as_str)
+            .filter(|f| is_test_feature(f))
+            .map(str::to_owned)
+            .collect();
+        if features.is_empty() {
+            continue;
+        }
+        let mut inherited_by = BTreeSet::new();
+        for tf in a
+            .test_features
+            .iter_mut()
+            .filter(|tf| tf.dependency == name)
+        {
+            inherited_by.insert(tf.krate.clone());
+            tf.features.retain(|f| !features.contains(f));
+        }
+        a.workspace_test_features.push(WorkspaceTestFeature {
+            dependency: name.to_owned(),
+            features,
+            inherited_by: inherited_by.len(),
+        });
+    }
+    a.test_features.retain(|tf| !tf.features.is_empty());
 }
 
 /// From this many `#[async_trait]` uses on, replacing them is worth a plan.
@@ -106,8 +218,27 @@ pub fn analyze(m: &Metadata) -> Analysis {
             if d.name == "async-trait" {
                 a.async_trait_in.push(p.name.clone());
             }
+            if d.optional || is_test_crate(&p.name) {
+                continue;
+            }
+            let features: Vec<String> = d
+                .features
+                .iter()
+                .filter(|f| is_test_feature(f))
+                .cloned()
+                .collect();
+            if !features.is_empty() {
+                a.test_features.push(TestFeature {
+                    krate: p.name.clone(),
+                    dependency: d.name.clone(),
+                    features,
+                });
+            }
         }
     }
+    a.test_features
+        .sort_by(|x, y| (&x.krate, &x.dependency).cmp(&(&y.krate, &y.dependency)));
+    a.test_features.dedup();
     a.tokio_full_in.dedup();
     a.async_trait_in.dedup();
     a
@@ -264,6 +395,69 @@ fn async_trait_finding(a: &Analysis) -> Option<Finding> {
     )
 }
 
+/// From this many manifest entries on, test features in normal builds are
+/// a medium finding.
+const TEST_FEATURES_MANY: usize = 5;
+
+/// The `test-features-in-dependencies` finding.
+fn test_features_finding(a: &Analysis) -> Option<Finding> {
+    let (direct, ws) = (&a.test_features, &a.workspace_test_features);
+    if direct.is_empty() && ws.is_empty() {
+        return None;
+    }
+    let crates: BTreeSet<&str> = direct.iter().map(|x| x.krate.as_str()).collect();
+    let mut shown: Vec<String> = ws
+        .iter()
+        .map(|x| {
+            format!(
+                "[workspace.dependencies] {} [{}] (inherited by {} crates)",
+                x.dependency,
+                x.features.join(", "),
+                x.inherited_by
+            )
+        })
+        .collect();
+    shown.extend(direct.iter().take(8).map(|x| {
+        format!(
+            "{} -> {} [{}]",
+            x.krate,
+            x.dependency,
+            x.features.join(", ")
+        )
+    }));
+    let more = match direct.len().saturating_sub(8) {
+        0 => String::new(),
+        n => format!(" and {n} more"),
+    };
+    let inherited: usize = ws.iter().map(|x| x.inherited_by).sum();
+    let sev = if direct.len() + inherited >= TEST_FEATURES_MANY {
+        Severity::Medium
+    } else {
+        Severity::Low
+    };
+    let title = match (ws.len(), direct.len()) {
+        (0, n) => format!(
+            "{n} [dependencies] entries in {} workspace crates enable test-only features",
+            crates.len()
+        ),
+        (k, 0) => format!("{k} [workspace.dependencies] entries enable test-only features"),
+        (k, n) => format!(
+            "{k} [workspace.dependencies] and {n} [dependencies] entries enable test-only features"
+        ),
+    };
+    let ws_fix = if ws.is_empty() {
+        ""
+    } else {
+        " For a [workspace.dependencies] entry, drop the feature there and add `features = [...]` to the crates' [dev-dependencies] entries that need it."
+    };
+    Some(
+        Finding::new("test-features-in-dependencies", sev, title, "keep-test-features-out-of-normal-builds")
+            .saw(format!("{}{more}.", shown.join(", ")))
+            .why("Features are unified across the build, so a test feature enabled from [dependencies] compiles the test helpers (mocks, fakes, fixtures, tokio's test-util) into every normal build of that crate and everything above it, and an edit to a test helper rebuilds libraries instead of only test targets.")
+            .fix(format!("If only tests need it, move the feature to [dev-dependencies] (`dep = {{ workspace = true, features = [\"testing\"] }}` there, plain in [dependencies]); cargo turns it on for test builds only.{ws_fix} If another crate's tests need this crate's helpers, give this crate its own `testing = [\"dep/testing\"]` feature and enable it from that crate's [dev-dependencies]. Tradeoff: `cargo test` and `cargo build` then resolve different feature sets, so switching between them rebuilds the affected crates once each. If the feature is needed at runtime (a mock backend you ship, a `fake` data generator), it isn't test-only: leave it.")),
+    )
+}
+
 /// "3 held as `dyn` (`A`, `B`, `C`)".
 fn dyn_held(scan: &Scan) -> String {
     if scan.dyn_traits.is_empty() {
@@ -325,6 +519,7 @@ pub fn section(a: &Analysis) -> Section {
                 .fix("Find who still uses syn 1 with `cargo tree -i syn@1 -e normal,build` and upgrade those macros."),
         );
     }
+    f.extend(test_features_finding(a));
     f.extend(async_trait_finding(a));
     s.extend(f);
     s.data = serde_json::to_value(a).unwrap_or_default();
@@ -368,6 +563,158 @@ mod tests {
                 "uses-async-trait"
             ]
         );
+    }
+
+    fn test_feature_fixture() -> Metadata {
+        Metadata::parse(r#"{
+          "workspace_root": "/w", "target_directory": "/w/target",
+          "workspace_members": ["core", "bridges", "bin", "core-test-utils"],
+          "packages": [
+            {"id": "core", "name": "core", "version": "0.1.0", "manifest_path": "/w/core/Cargo.toml",
+             "dependencies": [
+               {"name": "config", "kind": null, "features": ["testing", "json"]},
+               {"name": "tokio", "kind": null, "features": ["rt", "test-util"]},
+               {"name": "store", "kind": "dev", "features": ["testing"]},
+               {"name": "client", "kind": null, "features": ["mock-server"], "optional": true}
+             ]},
+            {"id": "bridges", "name": "bridges", "version": "0.1.0", "manifest_path": "/w/bridges/Cargo.toml",
+             "dependencies": [
+               {"name": "provision", "kind": null, "features": ["testing", "qr"]},
+               {"name": "gen", "kind": "build", "features": ["fake"]},
+               {"name": "attest", "kind": null, "features": ["attestation", "contest"]}
+             ]},
+            {"id": "bin", "name": "bin", "version": "0.1.0", "manifest_path": "/w/bin/Cargo.toml",
+             "dependencies": [{"name": "core", "kind": "dev", "features": ["testing"]}]},
+            {"id": "core-test-utils", "name": "core-test-utils", "version": "0.1.0", "manifest_path": "/w/tu/Cargo.toml",
+             "dependencies": [{"name": "core", "kind": null, "features": ["testing"]}]}
+          ]
+        }"#).unwrap()
+    }
+
+    #[test]
+    fn workspace_dependencies_test_features_are_reported_once() {
+        let mut a = analyze(&test_feature_fixture());
+        // tokio's test-util comes from [workspace.dependencies]: one entry
+        // there, not one per inheriting crate.
+        let root: toml::Table = r#"
+            [workspace.dependencies]
+            tokio = { version = "1", features = ["rt", "test-util"] }
+            cfg = { package = "config", version = "1", features = ["json"] }
+            serde = "1"
+        "#
+        .parse()
+        .unwrap();
+        attribute_workspace_features(&mut a, &root);
+        assert_eq!(
+            a.workspace_test_features,
+            [WorkspaceTestFeature {
+                dependency: "tokio".into(),
+                features: vec!["test-util".into()],
+                inherited_by: 1,
+            }]
+        );
+        assert!(a.test_features.iter().all(|t| t.dependency != "tokio"));
+        let f = test_features_finding(&a).unwrap();
+        assert_eq!(
+            f.title,
+            "1 [workspace.dependencies] and 3 [dependencies] entries enable test-only features"
+        );
+        assert!(f.saw.starts_with(
+            "[workspace.dependencies] tokio [test-util] (inherited by 1 crates), bridges -> gen [fake]"
+        ));
+        assert!(f.fix.contains("For a [workspace.dependencies] entry"));
+    }
+
+    #[test]
+    fn flags_test_features_in_normal_dependencies() {
+        let a = analyze(&test_feature_fixture());
+        let got: Vec<(&str, &str, Vec<&str>)> = a
+            .test_features
+            .iter()
+            .map(|t| {
+                (
+                    t.krate.as_str(),
+                    t.dependency.as_str(),
+                    t.features.iter().map(String::as_str).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("bridges", "gen", vec!["fake"]),
+                ("bridges", "provision", vec!["testing"]),
+                ("core", "config", vec!["testing"]),
+                ("core", "tokio", vec!["test-util"]),
+            ]
+        );
+        let f = test_features_finding(&a).unwrap();
+        assert_eq!(
+            (f.id, f.severity),
+            ("test-features-in-dependencies", Severity::Low)
+        );
+        assert_eq!(
+            f.title,
+            "4 [dependencies] entries in 2 workspace crates enable test-only features"
+        );
+        assert_eq!(
+            f.saw,
+            "bridges -> gen [fake], bridges -> provision [testing], core -> config [testing], core -> tokio [test-util]."
+        );
+        assert!(f.fix.contains("[dev-dependencies]"));
+
+        // Many entries: medium, with the rest counted.
+        let many: Vec<TestFeature> = (0..10)
+            .map(|i| TestFeature {
+                krate: format!("c{i}"),
+                dependency: "core".into(),
+                features: vec!["testing".into()],
+            })
+            .collect();
+        let f = test_features_finding(&Analysis {
+            test_features: many,
+            ..Analysis::default()
+        })
+        .unwrap();
+        assert_eq!(f.severity, Severity::Medium);
+        assert!(f.saw.ends_with(" and 2 more."));
+        assert!(test_features_finding(&Analysis::default()).is_none());
+    }
+
+    #[test]
+    fn test_feature_names() {
+        for f in [
+            "testing",
+            "test",
+            "test-util",
+            "test-utils",
+            "test_helpers",
+            "testutils",
+            "mock",
+            "mocks",
+            "mock-server",
+            "fake",
+            "faker",
+            "Testing",
+        ] {
+            assert!(is_test_feature(f), "{f}");
+        }
+        for f in [
+            "attestation",
+            "contest",
+            "testnet-free",
+            "default",
+            "rustls-tls",
+            "full",
+        ] {
+            assert!(!is_test_feature(f), "{f}");
+        }
+        for c in ["core-test-utils", "tala_testing", "mock-server", "fixtures"] {
+            assert!(is_test_crate(c), "{c}");
+        }
+        for c in ["core", "attestation", "contest", "testnet-node"] {
+            assert!(!is_test_crate(c), "{c}");
+        }
     }
 
     #[test]
