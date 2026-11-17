@@ -782,7 +782,13 @@ fn test_timings(path: &Path) -> Option<(Vec<testrun::TestUnit>, bool)> {
     let html = std::fs::read_to_string(path).ok()?;
     let t = timings::Timings::parse_html(&html).ok()?;
     let a = timings::analyze(&t);
-    Some((testrun::test_units(&t, &a.critical_path), a.compiled == 0))
+    Some((
+        testrun::test_units(
+            &t,
+            &a.critical_path.iter().map(|p| &p.of).collect::<Vec<_>>(),
+        ),
+        a.compiled == 0,
+    ))
 }
 
 /// `tests`: the configuration checks; with `--run`, also time the test

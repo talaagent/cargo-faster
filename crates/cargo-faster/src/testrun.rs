@@ -7,7 +7,7 @@
 use crate::finding::{Finding, Section, Severity, table};
 use crate::fmt::{ellipsize, secs};
 use crate::tests::ProcessCost;
-use crate::timings::{PathStep, Timings};
+use crate::timings::{Timings, UnitOf};
 use alloc::collections::BTreeMap;
 
 /// How many of the slowest tests and binaries to list.
@@ -315,7 +315,7 @@ pub struct TestUnit {
 /// The `(test)` units of a timings report: cargo labels them
 /// `NAME "KIND" (test)`.
 #[must_use]
-pub fn test_units(t: &Timings, path: &[PathStep]) -> Vec<TestUnit> {
+pub fn test_units(t: &Timings, path: &[&UnitOf]) -> Vec<TestUnit> {
     t.ran()
         .filter_map(|u| {
             let target = u.target.trim();
@@ -330,9 +330,7 @@ pub fn test_units(t: &Timings, path: &[PathStep]) -> Vec<TestUnit> {
                 name,
                 kind,
                 secs: u.duration,
-                on_path: path
-                    .iter()
-                    .any(|p| p.of.krate == u.name && p.of.target == target),
+                on_path: path.iter().any(|p| p.krate == u.name && p.target == target),
             })
         })
         .collect()
@@ -772,17 +770,8 @@ not json
             ],
             ..Timings::default()
         };
-        let path = vec![PathStep {
-            unit: "agent".into(),
-            of: t.units[2].of(),
-            start: 0.0,
-            duration: 35.3,
-            via_rmeta: false,
-            gap: 0.0,
-            cache: None,
-            wait: 0.0,
-        }];
-        let units = test_units(&t, &path);
+        let on_path = t.units[2].of();
+        let units = test_units(&t, &[&on_path]);
         assert_eq!(units.len(), 3);
         assert_eq!((units[0].kind.as_str(), units[0].on_path), ("lib", false));
         assert!(units[2].on_path);
