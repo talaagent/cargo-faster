@@ -27,6 +27,42 @@ pub struct Inputs {
     pub script_hits: Vec<ScriptHit>,
     /// What the workspace already does to make test databases cheap.
     pub db_setup: DbSetup,
+    /// What a measured run (`tests --run`) says a test process costs.
+    pub process_cost: Option<ProcessCost>,
+}
+
+/// The per-process cost a measured test run bounds: under nextest every
+/// test is a process, so the fastest test's time is at least what starting
+/// one (runner included) costs.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ProcessCost {
+    /// Tests that ran.
+    pub tests: usize,
+    /// The fastest test's time, in seconds.
+    pub fastest: f64,
+    /// The test threads in effect.
+    pub threads: usize,
+    /// Wall time of the run, in seconds.
+    pub run_secs: f64,
+}
+
+impl ProcessCost {
+    /// The most wall time a per-process cost of [`Self::fastest`] can add:
+    /// tests × fastest / threads, in seconds.
+    #[must_use]
+    pub fn wall(&self) -> f64 {
+        self.tests as f64 * self.fastest / self.threads.max(1) as f64
+    }
+
+    /// [`Self::wall`] as a share of the run.
+    #[must_use]
+    pub fn share(&self) -> f64 {
+        if self.run_secs > 0.0 {
+            (self.wall() / self.run_secs).min(1.0)
+        } else {
+            0.0
+        }
+    }
 }
 
 /// Where the workspace already makes test databases cheap, as `file:line`.
@@ -311,6 +347,7 @@ impl Inputs {
             runner_scripts,
             script_hits,
             db_setup,
+            process_cost: None,
         }
     }
 }
@@ -614,6 +651,45 @@ fn database_tests(ctx: &Context, i: &Inputs, s: &mut Section, f: &mut Vec<Findin
     }
 }
 
+/// How much a runner that doesn't step aside costs, and the sentence that
+/// says so. Without a measured run it is at most medium: the cost depends
+/// on what the runner does. With one, the fastest test bounds the
+/// per-process cost, and the finding is high only when tests × that /
+/// threads is a real share of the run.
+fn runner_cost(uses_nextest: bool, cost: Option<&ProcessCost>) -> (Severity, String) {
+    let Some(c) = cost.filter(|c| c.tests > 0) else {
+        return (
+            Severity::Medium,
+            if uses_nextest {
+                " Not measured: `cargo faster tests --run` runs the suite and bounds the runner's cost from the fastest tests."
+            } else {
+                ""
+            }
+            .to_owned(),
+        );
+    };
+    let share = c.share();
+    let severity = if share >= 0.25 {
+        Severity::High
+    } else if share >= 0.1 {
+        Severity::Medium
+    } else {
+        Severity::Low
+    };
+    (
+        severity,
+        format!(
+            " Measured: the fastest of {} tests took {}, so a process, runner included, costs at most that; across {} threads that is at most {} of the {} run ({:.0}%).",
+            c.tests,
+            crate::fmt::secs(c.fastest),
+            c.threads,
+            crate::fmt::secs(c.wall()),
+            crate::fmt::secs(c.run_secs),
+            share * 100.0
+        ),
+    )
+}
+
 /// Run the check.
 #[must_use]
 #[allow(
@@ -701,8 +777,9 @@ pub fn check(ctx: &Context, i: &Inputs) -> Section {
                 .why("A runner wraps every execution of a test binary, and nextest starts one process per test. A runner that execs the test straight away under nextest costs next to nothing; one that does real work (takes a slot, a lock, a fifo) is paid once per test.")
                 .fix(format!("Nothing for this runner.{} To see what any runner costs, run one quick test a few times through `cargo nextest run` with and without it, back to back.", if busy_overrides.is_empty() { "" } else { " Measure the runners the scripts set, or have them step aside under nextest too." }))
         } else {
-            Finding::new("target-runner-wraps-tests", if uses_nextest { Severity::High } else { Severity::Medium }, format!("Every test process runs under `{prog}`"), "test-runners-that-wrap-every-test")
-                .saw(format!("A target runner is configured ({src}): `{r}`.{}{override_note}", if uses_nextest { " nextest starts one process per test, so the runner starts once per test." } else { "" }))
+            let (severity, measured) = runner_cost(uses_nextest, i.process_cost.as_ref());
+            Finding::new("target-runner-wraps-tests", severity, format!("Every test process runs under `{prog}`"), "test-runners-that-wrap-every-test")
+                .saw(format!("A target runner is configured ({src}): `{r}`.{}{measured}{override_note}", if uses_nextest { " nextest starts one process per test, so the runner starts once per test." } else { "" }))
                 .why("A runner wraps every execution of a test binary. Under nextest that's every single test: its startup cost is paid thousands of times, and if it holds a slot or a lock, tests queue behind it. In one workspace, a cache's test runner made 0.00 s tests wait 3-8 s each and took about 44% of all test-seconds.")
                 .fix("Remove the runner for test runs, or scope it to the targets that need it (e.g. a cross-compilation triple). If the runner is a script, have it step aside under nextest: `[ \"$NEXTEST_EXECUTION_MODE\" = process-per-test ] && exec \"$@\"`. If you need a wrapper for nextest, use a nextest setup script or wrapper script that runs once per run, not per test. Measure `cargo nextest run` with and without it, back to back.")
         };
@@ -805,7 +882,31 @@ mod unit {
                 .into(),
         );
         let s = check(&runner_ctx(), &i);
-        assert_eq!(s.findings[0].severity, Severity::High);
+        assert_eq!(s.findings[0].severity, Severity::Medium);
+        assert!(s.findings[0].saw.contains("Not measured"));
+        // app-agent: 3969 tests, the fastest 8ms, 8 threads, 55s.
+        i.process_cost = Some(ProcessCost {
+            tests: 3969,
+            fastest: 0.008,
+            threads: 8,
+            run_secs: 55.0,
+        });
+        let f = &check(&runner_ctx(), &i).findings[0];
+        assert_eq!(f.severity, Severity::Low);
+        assert!(
+            f.saw.contains("at most 3.97s of the 55.0s run (7%)"),
+            "{}",
+            f.saw
+        );
+        // A runner that holds every test for a second.
+        i.process_cost = Some(ProcessCost {
+            fastest: 1.0,
+            ..i.process_cost.unwrap()
+        });
+        assert_eq!(
+            check(&runner_ctx(), &i).findings[0].severity,
+            Severity::High
+        );
     }
 
     #[test]

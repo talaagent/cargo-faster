@@ -366,7 +366,7 @@ fn run(opts: &Opts) -> Result<Report, Error> {
     {
         return Ok(Report {
             workspace: None,
-            sections: vec![timings_file_section(None, file, baseline.as_deref())?],
+            sections: vec![timings_file_section(None, file, baseline.as_deref(), None)?],
             skipped: Vec::new(),
         });
     }
@@ -595,7 +595,7 @@ fn timings_section(
             Some(f) => f.to_path_buf(),
             None => timings::newest_report(&ctx.target_dir()).ok_or(Error::NoTimings)?,
         };
-        let mut s = timings_file_section(Some(ctx), &path, baseline)?;
+        let mut s = timings_file_section(Some(ctx), &path, baseline, None)?;
         let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
         if let Some(written) = modified(&path) {
             let age = SystemTime::now()
@@ -622,8 +622,8 @@ fn timings_section(
         }
         return Ok(s);
     };
-    let (path, facts, failed) = timings_run(ctx, r)?;
-    let mut s = timings_file_section(Some(ctx), &path, baseline)?;
+    let (path, facts, failed, first_build) = timings_run(ctx, r)?;
+    let mut s = timings_file_section(Some(ctx), &path, baseline, first_build)?;
     for (i, f) in facts.into_iter().enumerate() {
         s.facts.insert(i, f);
     }
@@ -648,8 +648,12 @@ type Failed = Option<(i32, String)>;
 
 /// Run the build with `--timings` (after the probe edit, for `--edit`)
 /// and return the report it wrote, with facts saying what was measured,
-/// and how the build failed if it did.
-fn timings_run(ctx: &Context, r: &TimingsRun) -> Result<(PathBuf, Vec<Fact>, Failed), Error> {
+/// how the build failed if it did, and whether it was the first build in
+/// its target directory (see [`timings::Extra::first_build`]).
+fn timings_run(
+    ctx: &Context,
+    r: &TimingsRun,
+) -> Result<(PathBuf, Vec<Fact>, Failed, Option<bool>), Error> {
     use timings::run::{Edit, Probe, edit_target, probe_text};
     let nextest = tests::Inputs::gather(ctx).nextest_installed;
     let args = r.build.args(nextest);
@@ -711,6 +715,7 @@ fn timings_run(ctx: &Context, r: &TimingsRun) -> Result<(PathBuf, Vec<Fact>, Fai
             ),
         });
     }
+    let fingerprints_before = fingerprinted(ctx);
     let start = SystemTime::now();
     let out = build(ctx, r.nice, &cargo)
         .args(&args)
@@ -745,7 +750,25 @@ fn timings_run(ctx: &Context, r: &TimingsRun) -> Result<(PathBuf, Vec<Fact>, Fai
             .into(),
         });
     };
-    Ok((path, facts, failed))
+    // No fingerprints before and some after: this build made the first
+    // ones. None after either: they live elsewhere (a build-dir), so say
+    // nothing and let the report tell.
+    let first_build = if target.is_some() {
+        Some(false)
+    } else {
+        (!fingerprints_before && fingerprinted(ctx)).then_some(true)
+    };
+    Ok((path, facts, failed, first_build))
+}
+
+/// Whether the target directory has fingerprints for a workspace member.
+fn fingerprinted(ctx: &Context) -> bool {
+    let members: Vec<&str> = ctx
+        .metadata
+        .as_ref()
+        .map(|m| m.members().map(|p| p.name.as_str()).collect())
+        .unwrap_or_default();
+    timings::run::has_fingerprints(&ctx.target_dir(), &members)
 }
 
 /// The newest report in the target directory, if it was written after
@@ -761,6 +784,36 @@ fn fresh_report(ctx: &Context, since: SystemTime) -> Option<PathBuf> {
         })
 }
 
+/// Each test binary's test count, from `cargo nextest list` after the
+/// `--no-run` build (so it only lists); empty if listing fails.
+fn list_binaries(ctx: &Context, nice: i32, args: &[String]) -> Result<Vec<testrun::Listed>, Error> {
+    let listed = build(ctx, nice, cargo_bin(&ctx.env))
+        .args(["nextest", "list", "--workspace", "--message-format", "json"])
+        .args(testrun::build_args(args))
+        .current_dir(ctx.root())
+        .output()?;
+    Ok(if listed.success() {
+        testrun::parse_list(&listed.stdout_lossy())
+    } else {
+        Vec::new()
+    })
+}
+
+/// The test units of a `--no-run` build's timings report, and whether the
+/// build compiled nothing.
+fn test_timings(path: &Path) -> Option<(Vec<testrun::TestUnit>, bool)> {
+    let html = std::fs::read_to_string(path).ok()?;
+    let t = timings::Timings::parse_html(&html).ok()?;
+    let a = timings::analyze(&t);
+    Some((
+        testrun::test_units(
+            &t,
+            &a.critical_path.iter().map(|p| &p.of).collect::<Vec<_>>(),
+        ),
+        a.compiled == 0,
+    ))
+}
+
 /// `tests`: the configuration checks; with `--run`, also time the test
 /// build, run the tests, report both, then the build's timings.
 fn tests_sections(
@@ -770,9 +823,9 @@ fn tests_sections(
     args: &[String],
     report: &mut Report,
 ) -> Result<(), Error> {
-    let inputs = tests::Inputs::gather(ctx);
-    report.sections.push(tests::check(ctx, &inputs));
+    let mut inputs = tests::Inputs::gather(ctx);
     if !run {
+        report.sections.push(tests::check(ctx, &inputs));
         return Ok(());
     }
     if !inputs.nextest_installed {
@@ -782,17 +835,19 @@ fn tests_sections(
     let started = Instant::now();
     let built = build(ctx, nice, cargo_bin(&ctx.env))
         .args(["nextest", "run", "--workspace", "--no-run", "--timings"])
-        .args(args)
+        .args(testrun::build_args(args))
         .current_dir(ctx.root())
         .output()?;
     let build_secs = started.elapsed().as_secs_f64();
     if !built.success() {
         return Err(format!("building the tests failed\n{}", built.stderr_lossy().trim()).into());
     }
+    let binaries = list_binaries(ctx, nice, args)?;
     let started = Instant::now();
     let ran = build(ctx, nice, cargo_bin(&ctx.env))
         .env("NEXTEST_EXPERIMENTAL_LIBTEST_JSON", "1")
-        .args(["nextest", "run", "--workspace", "--no-fail-fast"])
+        .args(["nextest", "run", "--workspace"])
+        .args(testrun::fail_fast_arg(args))
         .args(["--message-format", "libtest-json-plus"])
         .args(testrun::no_tests_arg(args))
         .args(args)
@@ -812,9 +867,14 @@ fn tests_sections(
         )
         .into());
     }
-    let config = inputs.nextest_config.as_ref();
+    // Only the report this build wrote, not an older one.
+    let timings_path = fresh_report(ctx, build_start);
+    let timings = timings_path.as_deref().and_then(test_timings);
+    let build_fresh = timings.as_ref().is_some_and(|t| t.1);
+    let config = inputs.nextest_config.clone();
+    let config = config.as_ref();
     let profile = testrun::profile(args, ctx.var("NEXTEST_PROFILE"));
-    let mut s = testrun::section(&testrun::Inputs {
+    let run_inputs = testrun::Inputs {
         build_secs: Some(build_secs),
         run_secs,
         threads: testrun::threads(
@@ -826,7 +886,13 @@ fn tests_sections(
         ),
         slow_timeout: testrun::slow_timeout(config, &profile),
         run,
-    });
+        binaries,
+        units: timings.map(|t| t.0).unwrap_or_default(),
+        build_fresh,
+    };
+    inputs.process_cost = testrun::process_cost(&run_inputs);
+    report.sections.push(tests::check(ctx, &inputs));
+    let mut s = testrun::section(&run_inputs);
     s.facts.insert(
         0,
         Fact {
@@ -835,11 +901,12 @@ fn tests_sections(
         },
     );
     report.sections.push(s);
-    // Only the report this build wrote, not an older one.
-    match fresh_report(ctx, build_start) {
+    match timings_path {
+        // The test run section says the build was fresh.
+        Some(_) if build_fresh => {}
         Some(path) => report
             .sections
-            .push(timings_file_section(Some(ctx), &path, None)?),
+            .push(timings_file_section(Some(ctx), &path, None, None)?),
         None => report.skipped.push(Fact {
             key: "timings".into(),
             value: "the test build wrote no cargo-timing.html".into(),
@@ -851,28 +918,33 @@ fn tests_sections(
 /// Read a report; with a workspace, join the cache wrapper's records,
 /// compare with a baseline (given, or the newest earlier check report when
 /// this one is a build) and count the workspace crates it rebuilt.
+/// `first_build` is what the run knows about the target directory (see
+/// [`timings::Extra::first_build`]).
 fn timings_file_section(
     ctx: Option<&Context>,
     path: &Path,
     baseline: Option<&Path>,
+    first_build: Option<bool>,
 ) -> Result<Section, Error> {
     let read = |p: &Path| -> Result<timings::Timings, Error> {
         let html =
             std::fs::read_to_string(p).map_err(|e| format!("reading {}: {e}", p.display()))?;
-        Ok(timings::Timings::parse_html(&html)?)
+        Ok(timings::Timings::parse_html(&html).map_err(|e| e.to_string())?)
     };
-    let mut t = read(path)?;
+    let t = read(path)?;
     let base = match baseline {
         Some(b) => Some((b.to_path_buf(), read(b)?)),
         None if !t.is_check() => timings::check_before(path),
         None => None,
     };
-    let ws = ctx.and_then(|c| c.metadata.as_ref().map(timings::Workspace::from_metadata));
+    let ws = ctx.and_then(|c| c.metadata.as_ref().map(timings::workspace_from_metadata));
     let mut joined = None;
+    let mut runs = Vec::new();
     if let (Some(c), Some(start)) = (ctx, t.start_unix_ms) {
         let events = timings::wrapper::gather(c, start);
         if !events.is_empty() {
-            joined = Some(timings::wrapper::join(&mut t, &events));
+            runs = timings::wrapper::join(&t, &events);
+            joined = Some(runs.iter().flatten().count());
         }
     }
     let a = timings::analyze_with(
@@ -880,7 +952,9 @@ fn timings_file_section(
         timings::Extra {
             baseline: base.as_ref().map(|(_, b)| b),
             workspace: ws.as_ref(),
+            first_build,
         },
+        &runs,
     );
     let mut s = timings::section(&a, &path.display().to_string());
     if let Some((p, _)) = &base {

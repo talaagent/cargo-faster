@@ -1,0 +1,38 @@
+[package]
+name = "cargo-timings-parse"
+description = "Parse cargo --timings HTML reports into typed units and analyze them: critical path, serial crates, codegen, linking, slowdowns"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+readme = "README.md"
+keywords = ["cargo", "timings", "build-time", "critical-path", "compile-time"]
+categories = ["development-tools::cargo-plugins", "development-tools::profiling", "parser-implementations", "no-std"]
+include = ["src/**/*.rs", "examples/**", "tests/*.rs", "/README.md", "/LICENSE", "/NOTICE"]
+
+[features]
+default = ["std"]
+## `reports`, `newest_report` and `check_before`: find and read reports in a
+## target directory (needs std). Parsing and analysis work without it.
+std = ["serde/std", "serde_json/std"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
+
+[[test]]
+name = "fixtures"
+required-features = ["std"]
+
+[[example]]
+name = "analyze"
+required-features = ["std"]

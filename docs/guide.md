@@ -494,19 +494,30 @@ That gives you a simple rule: **the crates you edit most should have the fewest 
 
 To measure the rebuild instead of estimating it, `cargo faster timings --edit <crate>` makes the edit for you. It brings the build up to date, adds a public function to the crate, times the build that follows, and then removes the function. With `--body`, the edit changes only a private function's body, so the crate's API stays the same. Dependents still rebuild after a body edit, but the gap between the two times is what changing the API costs them. Use `--cmd build`, `--cmd clippy` or `--cmd test` to time the build you actually wait on.
 
+A timeline from a first build in a new target directory compiles every workspace crate, so it looks like an edit that rebuilt everything. `cargo faster timings` says so (`first-build`) instead of reporting fan-out: when it ran the build and found no fingerprints for workspace crates before it, or when the rebuilt crates start from several workspace leaves and none of them was fresh. Time a real edit with `--edit`.
+
 ### Cutting a dependency edge
 
 A dependency is all or nothing. If `app-config` uses one type from a 24,000-line `app-session-store`, it still waits for all of `app-session-store` to compile. Every edit to `app-session-store` also rebuilds `app-config`, and everything that depends on `app-config`. When that one edge is how most of the workspace reaches the big crate, it's also why an edit to the big crate rebuilds most of the workspace.
 
 You can often cut an edge like that cheaply. Move the few items the dependent uses (an ID type, an error enum, a constant) down into a small crate that both sides can depend on, or into a crate the dependent already uses. Then remove the dependency. In one workspace, that took an edit to a session store from rebuilding 79 crates to rebuilding 28. The tradeoff is one more crate, or a type living away from the code it belongs with.
 
+The size of the dependency doesn't decide whether a cut is worth it: what an edit to it rebuilds does. A 100-line crate of constants that 90 crates rebuild with is as worth cutting loose as a big one. When the dependent uses a single constant, copying it (with a test that the copies agree) is often the cheapest cut of all.
+
 `cargo faster rdeps` looks for these edges. It checks the direct dependents of the crates whose edits rebuild the most, and `rdeps <crate>` checks every dependent of that crate. `cargo faster timings` checks each edge on the critical path. For each edge, cargo-faster counts the distinct items the dependent's source names through the dependency's paths (`store::SessionId`, `use store::{config::Limits, open}`). Then it works out how many crates an edit to the dependency would rebuild without that edge. It reports `cheap-to-cut-edge` when:
 
 - the dependent uses at most five items;
-- the dependency is at least 5,000 lines;
 - the cut saves at least three rebuilds, or the dependency spent at least two seconds on the critical path.
 
+The edges are ranked by rebuilds saved, then by fewest items used.
+
 A module imported with `use store::db;` (or re-exported with `pub use` and reached as `crate::db::...`) counts what is used through it, `db::open` and so on. Globs (`use store::*`) and aliases (`use store as s`) hide how much is used, so edges that use them show `?` and aren't flagged. Macros that expand to paths into the dependency aren't seen either. Read the dependent's code before you move anything.
+
+A re-export is a different kind of edge. When `integrations` has `pub use email::{mailer, templates};` and five crates use `integrations::mailer`, dropping the dependency doesn't take an edit to `email` down to zero rebuilds: those five crates still need `email`. cargo-faster finds the dependents that use a re-export, works out what an edit would rebuild if they depended on the owning crate directly, and reports `reexported-dependency` when that still saves rebuilds. The fix is to import from the owning crate directly (`use email::mailer`) and drop the re-export. Moving the items into a small crate doesn't fit here.
+
+### Unused dependencies
+
+A dependency the dependent's source never names is the cheapest edge to cut: delete the line. It still makes the dependent wait for the dependency to compile, and rebuild with it. These lines pile up as code moves between crates. `cargo faster rdeps` and `timings` report `unused-dependency` for an edge with no item used. A macro that expands to paths into the dependency, or code that only a test, example or bench uses, makes a dependency look unused when it isn't, so build after deleting it. [cargo-machete](https://github.com/bnjbvr/cargo-machete) (fast, reads the source) and [cargo-udeps](https://github.com/est31/cargo-udeps) (nightly, asks the compiler) check the whole workspace. If only tests use it, move it to `[dev-dependencies]`.
 
 ### Splitting a big crate
 
@@ -586,6 +597,16 @@ app-core = { workspace = true, features = ["testing"] }
 cargo enables dev-dependency features only when it builds that crate's tests, examples and benches. If one crate's tests need another crate's helpers transitively, give the middle crate its own `testing = ["app-core/testing"]` feature and turn it on from `[dev-dependencies]` too. The tradeoff: `cargo build` and `cargo test` now resolve different feature sets for those crates, so each is compiled once per set. That's one extra build of a few crates, against rebuilding the whole stack whenever a helper changes.
 
 `cargo faster deps` flags non-optional normal and build dependencies that enable features named `testing`, `test-*`, `mock*` or `fake*`, and skips workspace crates that are themselves test support (`*-test-utils`, `*-testing`). A test feature in the root's `[workspace.dependencies]` is reported once, with the number of crates that inherit it: every one of them gets it in normal builds, so take it out there and add it to the `[dev-dependencies]` entries that need it. If a feature with such a name is needed at runtime, it isn't test-only; leave it.
+
+Moving the feature only helps builds without tests: release and production builds such as `cargo build --release` or `cargo build -p app`. A `cargo clippy --workspace --all-targets` or `cargo nextest run --workspace` builds every crate's dev-dependencies, which turns the feature on again, so those gain nothing from the move. `cargo faster deps` says so in the finding.
+
+### Dev-dependency features split the build
+
+The other side of the same coin: a `[dev-dependencies]` entry that turns on a feature of another workspace crate (`app-core = { path = "../core", features = ["testing"] }` in the binary's dev-dependencies) gives that crate two feature sets. Builds that include the binary's tests (`--all-targets`, `cargo test`, nextest) compile `app-core` with `testing`; builds that don't (`cargo build --release`, a production `cargo clippy -p app --lib --bins`) compile it without. Each set is a separate compile of `app-core` and of every workspace crate that depends on it, with its own cache keys. A gate that runs both a production check and a `--workspace --all-targets` build compiles those crates twice; on one workspace the production clippy took 213 s of a 387 s gate because nothing it built was shared.
+
+If the repo runs only one kind of build, this costs nothing. If it runs both, pick one feature set: make the feature additive and cheap enough to leave on everywhere (enable it from `[dependencies]` and accept the helpers in normal builds), or drop the separate production step and let the `--workspace --all-targets` build cover it, checking the production-only code (`cfg(not(feature = "testing"))`) some other way, such as a release build in CI only.
+
+`cargo faster deps` lists each such dev-dependency with the workspace crates it splits: the feature's crate and its workspace reverse dependencies, counted from `cargo metadata`.
 
 ## Caching
 
@@ -799,6 +820,8 @@ That costs one extra `exec` per test, about a millisecond. `cargo faster tests` 
 
 If you have a runner configured, check whether it's needed for tests, and whether it's set somewhere you didn't expect: a global `~/.cargo/config.toml`, or an environment variable. `CARGO_TARGET_<TRIPLE>_RUNNER` set by a script (a CI or pre-merge script, a Makefile) beats the config's runner for that run, so the runner that wraps your CI tests may not be the one in `.cargo/config.toml`. `cargo faster tests` reports runners, the lines in `scripts/`, Makefiles, justfiles and CI workflows that override them, nextest configuration, and relevant environment variables. The surest way to know what a runner costs is to run one quick test a few times through `cargo nextest run` with and without it, back to back.
 
+A runner that does real work isn't necessarily slow. `cargo faster tests` alone can't tell, so it grades such a runner `medium` and says it is unmeasured. `cargo faster tests --run` sizes it: every test is a process, so the fastest test's time is at least what one process costs, runner included, and tests × that / threads bounds what the runner adds to the run's wall time. The finding is `high` only when that bound is a quarter of the run or more; in one workspace, 3,969 tests whose fastest took 8 ms on 8 threads bound a timeout-wrapper runner at 4 s of a 55 s run, and timing the run with and without it showed no difference.
+
 ### Database-backed tests
 
 Tests that talk to a real database are often slow for reasons that have nothing to do with Rust. If your tests use PostgreSQL, a few changes can make a big difference:
@@ -852,6 +875,29 @@ mod billing;
 
 Cargo picks up `tests/it/main.rs` as a single integration test target named `it`. Now there's one crate to compile and one binary to link. You can still run a subset by name: `cargo test --test it auth::`, or with nextest's filters.
 
+### Test binaries without tests
+
+Cargo builds a test binary for every lib and bin target, and for every file in `tests/`, whether or not it holds a `#[test]`. Each one compiles its crate again in test mode and links the whole dependency graph. In one workspace, `cargo nextest run --no-run` spent 65.9 s on a 345-line lib's test binary and 63.8 s on an 81-line `main.rs`'s, about 220 s of unit time across four binaries that ran no tests.
+
+Turn the test binary off on the target in its Cargo.toml:
+
+```toml
+[lib]
+test = false
+
+# An implicit bin (src/main.rs) needs an explicit entry to carry the setting.
+[[bin]]
+name = "my-tool"
+path = "src/main.rs"
+test = false
+```
+
+Delete an empty file under `tests/`. Doc tests aren't affected (that is `doctest`). The tradeoff: a `#[test]` added to that target later doesn't run until `test = false` comes off, so a CI check that fails when a `test = false` target gains tests is worth the few lines.
+
+A bin with one or two tests is the same problem in a smaller form. If its test unit is on the critical path of the test build, the whole build waits for a binary that runs one test. Move the tests, and the code they test, into the package's lib, and set `test = false` on the `[[bin]]`.
+
+`cargo faster tests --run` lists each binary's tests with `cargo nextest list` after the `--no-run` build, reports the ones with none and what building them cost (from the build's timings), and flags bin test targets with one or two tests on the critical path.
+
 ### Measuring a test run
 
 A slow test suite is two problems that look like one: **building** the test binaries, and **running** them. Measure them separately before fixing either:
@@ -861,10 +907,11 @@ $ cargo nextest run --workspace --no-run --timings   # the build
 $ cargo nextest run --workspace                      # the run
 ```
 
-`cargo faster tests --run` does both. Arguments after `--` go to both commands, e.g. `cargo faster tests --run -- --profile ci`. It reports:
+`cargo faster tests --run` does both. Arguments after `--` go to both commands, e.g. `cargo faster tests --run -- --profile ci`, except that the `--no-run` build drops the ones nextest only accepts for a run (`--no-fail-fast`, `--test-threads`, `--retries`, `-E` and other filters, reporter options, test binary arguments after a second `--`), so a gate's command line can be pasted as is. It reports:
 
-- **build vs run wall time.** In big workspaces the build is often most of the wait: in one workspace, building the tests took 9 minutes cold and 98 s after a one-line edit, and running all 3,885 of them took 66 s. Faster tests wouldn't have helped; the timings section (from the `--no-run` build) shows which units to work on.
+- **build vs run wall time.** In big workspaces the build is often most of the wait: in one workspace, building the tests took 9 minutes cold and 98 s after a one-line edit, and running all 3,885 of them took 66 s. Faster tests wouldn't have helped; the timings section (from the `--no-run` build) shows which units to work on. When the build compiled nothing, the section says `fresh, nothing compiled` and the timings section is left out.
 - **the slowest tests and test binaries.** Under nextest every test is a process, so a binary's fastest test is roughly what it costs to start one of its processes.
+- **test binaries with no tests**, and what building them cost (see [Test binaries without tests](#test-binaries-without-tests)).
 - **tests near the slow-timeout**, the ones a loaded machine pushes over it.
 - **how busy the test threads were**: total test time over wall time × threads. A low number means the run waits on a few long tests at the end, a test group with a low thread limit, or setup outside the tests.
 
@@ -889,7 +936,7 @@ Finally, the build runs on a computer, and that computer may be busier than you 
 
 **Contention shows up in timings.** When the same crate takes three times longer in a build than its check took minutes earlier, the code didn't change; the machine did. `cargo faster timings` compares a build with an earlier check report and says so.
 
-`cargo faster machine` reports load, memory, swap, and disk, and whether your cache and target directories share a filesystem.
+`cargo faster machine` reports load, memory, swap, and disk, and whether your cache and target directories share a filesystem. When the load is high, it samples `/proc` for half a second on Linux and names the processes using the most CPU (grouped by name, in CPUs), so you can tell another build from a nix build or a test suite.
 
 ## Case study: a 312 second check
 

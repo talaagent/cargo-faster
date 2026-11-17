@@ -6,6 +6,8 @@
 
 use crate::finding::{Finding, Section, Severity, table};
 use crate::fmt::{ellipsize, secs};
+use crate::tests::ProcessCost;
+use crate::timings::{Timings, UnitOf};
 use alloc::collections::BTreeMap;
 
 /// How many of the slowest tests and binaries to list.
@@ -40,6 +42,123 @@ pub fn duration_secs(s: &str) -> Option<f64> {
         any = true;
     }
     any.then_some(total)
+}
+
+/// `cargo nextest run` options that only affect running tests, with a
+/// value. nextest rejects them (and test filters) next to `--no-run`.
+const RUN_ONLY_VALUE: &[&str] = &[
+    "-E",
+    "--filterset",
+    "--filter-expr",
+    "--run-ignored",
+    "--partition",
+    "-j",
+    "--test-threads",
+    "--retries",
+    "--max-fail",
+    "--no-tests",
+    "--stress-count",
+    "--stress-duration",
+    "--debugger",
+    "--tracer",
+    "--failure-output",
+    "--success-output",
+    "--status-level",
+    "--final-status-level",
+    "--show-progress",
+    "--max-progress-running",
+    "--message-format",
+    "--message-format-version",
+];
+
+/// Run-only switches.
+const RUN_ONLY_SWITCH: &[&str] = &[
+    "--ignore-default-filter",
+    "--fail-fast",
+    "--no-fail-fast",
+    "--hide-progress-bar",
+    "--no-output-indent",
+    "--no-capture",
+    "--nocapture",
+    "--no-run",
+];
+
+/// Build options that take a separate value, so the value isn't mistaken
+/// for a test filter.
+const BUILD_VALUE: &[&str] = &[
+    "-P",
+    "--profile",
+    "-p",
+    "--package",
+    "--exclude",
+    "-F",
+    "--features",
+    "--cargo-profile",
+    "--target",
+    "--target-dir",
+    "--manifest-path",
+    "--bin",
+    "--example",
+    "--test",
+    "--bench",
+    "--config",
+    "--config-file",
+    "--tool-config-file",
+    "--color",
+    "-Z",
+    "--build-jobs",
+    "--archive-file",
+    "--archive-format",
+    "--extract-to",
+    "--workspace-remap",
+    "--binaries-metadata",
+    "--cargo-metadata",
+    "--target-dir-remap",
+    "--user-config-file",
+];
+
+/// The arguments for the `cargo nextest run --no-run` build: `args` without
+/// run-only options (with their values), test filters, and anything after
+/// `--` (test binary arguments). The run step gets all of `args`.
+#[must_use]
+pub fn build_args(args: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let flag = a.split_once('=').map_or(a.as_str(), |(f, _)| f);
+        let short_joined = |set: &[&str]| {
+            set.iter()
+                .any(|f| f.len() == 2 && a.len() > 2 && !a.starts_with("--") && a.starts_with(f))
+        };
+        if a == "--" {
+            break;
+        } else if RUN_ONLY_SWITCH.contains(&a.as_str()) {
+        } else if RUN_ONLY_VALUE.contains(&flag) || short_joined(RUN_ONLY_VALUE) {
+            if flag == a.as_str() && !short_joined(RUN_ONLY_VALUE) {
+                it.next();
+            }
+        } else if !a.starts_with('-') {
+            // A test filter.
+        } else {
+            out.push(a.clone());
+            if BUILD_VALUE.contains(&a.as_str())
+                && let Some(v) = it.next()
+            {
+                out.push(v.clone());
+            }
+        }
+    }
+    out
+}
+
+/// `--no-fail-fast` for the run, unless the arguments already pick a
+/// fail-fast mode.
+#[must_use]
+pub fn fail_fast_arg(args: &[String]) -> Option<&'static str> {
+    (!args
+        .iter()
+        .any(|a| a == "--no-fail-fast" || a == "--fail-fast" || a.starts_with("--max-fail")))
+    .then_some("--no-fail-fast")
 }
 
 /// The value of `--flag v` or `--flag=v` in nextest arguments.
@@ -126,6 +245,182 @@ fn profile_key<'a>(
     config?.get("profile")?.get(profile)?.get(key)
 }
 
+/// A test binary from `cargo nextest list --message-format json`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Listed {
+    /// The package.
+    pub krate: String,
+    /// The target's name.
+    pub name: String,
+    /// `lib` (also for proc-macro crates), `bin`, `test`, `bench`, `example`.
+    pub kind: String,
+    /// Tests the binary holds, filtered or not.
+    pub tests: usize,
+}
+
+/// The test binaries in `cargo nextest list --message-format json` output;
+/// empty if it doesn't parse.
+#[must_use]
+pub fn parse_list(json: &str) -> Vec<Listed> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
+        return Vec::new();
+    };
+    let Some(suites) = v.get("rust-suites").and_then(|s| s.as_object()) else {
+        return Vec::new();
+    };
+    let field = |b: &serde_json::Value, k: &str| {
+        b.get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    suites
+        .values()
+        // A binary nextest skipped (another platform) lists no tests.
+        .filter(|b| b.get("status").and_then(|s| s.as_str()) != Some("skipped"))
+        .map(|b| {
+            let kind = field(b, "kind");
+            Listed {
+                krate: field(b, "package-name"),
+                name: field(b, "binary-name"),
+                kind: if kind == "proc-macro" {
+                    "lib".into()
+                } else {
+                    kind
+                },
+                tests: b
+                    .get("testcases")
+                    .and_then(|t| t.as_object())
+                    .map_or(0, serde_json::Map::len),
+            }
+        })
+        .collect()
+}
+
+/// A test unit of the `--no-run` build, from its timings.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TestUnit {
+    /// The package.
+    pub krate: String,
+    /// The target's name (the package name for a lib).
+    pub name: String,
+    /// `lib`, `bin`, `test`, ...
+    pub kind: String,
+    /// How long the unit took to build, in seconds.
+    pub secs: f64,
+    /// Whether the unit is on the build's critical path.
+    pub on_path: bool,
+}
+
+/// The `(test)` units of a timings report: cargo labels them
+/// `NAME "KIND" (test)`.
+#[must_use]
+pub fn test_units(t: &Timings, path: &[&UnitOf]) -> Vec<TestUnit> {
+    t.ran()
+        .filter_map(|u| {
+            let target = u.target.trim();
+            let what = target.strip_suffix("(test)")?.trim();
+            let (name, kind) = match what.rsplit_once(' ') {
+                Some((n, k)) => (n.trim().to_owned(), k.trim_matches('"').to_owned()),
+                None if what.is_empty() => (u.name.clone(), "lib".to_owned()),
+                None => (u.name.clone(), what.trim_matches('"').to_owned()),
+            };
+            Some(TestUnit {
+                krate: u.name.clone(),
+                name,
+                kind,
+                secs: u.duration,
+                on_path: path.iter().any(|p| p.krate == u.name && p.target == target),
+            })
+        })
+        .collect()
+}
+
+/// What the run says a test process costs, for the target runner check.
+#[must_use]
+pub fn process_cost(i: &Inputs) -> Option<ProcessCost> {
+    let fastest = i.run.tests.iter().map(|t| t.secs).min_by(f64::total_cmp)?;
+    Some(ProcessCost {
+        tests: i.run.tests.len(),
+        fastest,
+        threads: i.threads.0,
+        run_secs: i.run_secs,
+    })
+}
+
+/// The unit that builds a listed binary.
+fn unit_of<'a>(units: &'a [TestUnit], b: &Listed) -> Option<&'a TestUnit> {
+    units
+        .iter()
+        .find(|u| u.krate == b.krate && u.kind == b.kind && (b.kind == "lib" || u.name == b.name))
+}
+
+fn binary_label(b: &Listed) -> String {
+    if b.kind == "lib" {
+        format!("{} (lib)", b.krate)
+    } else {
+        format!("{} {} \"{}\"", b.krate, b.kind, b.name)
+    }
+}
+
+/// Test binaries with no tests, and bin targets with one or two tests on
+/// the critical path.
+fn binary_findings(binaries: &[Listed], units: &[TestUnit]) -> Vec<Finding> {
+    let mut out = Vec::new();
+    let empty: Vec<(&Listed, Option<f64>)> = binaries
+        .iter()
+        .filter(|b| b.tests == 0 && matches!(b.kind.as_str(), "lib" | "bin" | "test"))
+        .map(|b| (b, unit_of(units, b).map(|u| u.secs)))
+        .collect();
+    if !empty.is_empty() {
+        let mut sorted = empty.clone();
+        sorted.sort_by(|a, b| b.1.unwrap_or(0.0).total_cmp(&a.1.unwrap_or(0.0)));
+        let cost: f64 = sorted.iter().filter_map(|(_, c)| *c).sum();
+        let listed = sorted
+            .iter()
+            .take(8)
+            .map(|(b, c)| match c {
+                Some(c) => format!("{} (built in {})", binary_label(b), secs(*c)),
+                None => binary_label(b),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let more = sorted.len().saturating_sub(8);
+        out.push(
+            Finding::new("test-binary-without-tests", if cost >= 30.0 { Severity::Medium } else { Severity::Low }, format!("{} test binar{} hold no tests", sorted.len(), if sorted.len() == 1 { "y" } else { "ies" }), "test-binaries-without-tests")
+                .saw(format!("`cargo nextest list` found 0 tests in: {listed}{}.{}", if more > 0 { format!(" and {more} more") } else { String::new() }, if cost > 0.0 { format!(" Building them took {} of unit time in the --no-run build.", secs(cost)) } else { String::new() }))
+                .why("Cargo compiles and links a test binary for every lib and bin target (and every tests/ file) whether or not it holds a #[test], and each links the whole dependency graph.")
+                .fix("Set `test = false` on the target in its Cargo.toml: under `[lib]`, or the `[[bin]]` entry (add one with `name` and `path` if the bin is implicit); delete an empty tests/ file. Tradeoff: a #[test] added there later won't run until `test = false` comes off, so a check in CI that fails when such a target gains tests helps. Doc tests are separate (`doctest`)."),
+        );
+    }
+    let few: Vec<(&Listed, &TestUnit)> = binaries
+        .iter()
+        .filter(|b| b.kind == "bin" && (1..=2).contains(&b.tests))
+        .filter_map(|b| unit_of(units, b).filter(|u| u.on_path).map(|u| (b, u)))
+        .collect();
+    if !few.is_empty() {
+        let listed = few
+            .iter()
+            .map(|(b, u)| {
+                format!(
+                    "{} ({} test(s), built in {})",
+                    binary_label(b),
+                    b.tests,
+                    secs(u.secs)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push(
+            Finding::new("bin-tests-on-critical-path", Severity::Low, format!("{} bin test target(s) with one or two tests are on the critical path", few.len()), "test-binaries-without-tests")
+                .saw(format!("{listed}: the unit is on the --no-run build's critical path."))
+                .why("A bin's unit tests are a binary of their own that compiles the whole bin crate again in test mode and links it; for one or two tests the whole build waits on it.")
+                .fix("Move the tests (and the code they test) into the package's lib, then set `test = false` on the `[[bin]]`. Tradeoff: code that only the bin uses moves into the lib's API."),
+        );
+    }
+    out
+}
+
 /// Everything the report needs.
 #[derive(Debug, Clone, Default)]
 pub struct Inputs {
@@ -139,6 +434,12 @@ pub struct Inputs {
     pub slow_timeout: f64,
     /// The parsed run.
     pub run: Run,
+    /// The test binaries `cargo nextest list` found, with their test counts.
+    pub binaries: Vec<Listed>,
+    /// The test units of the `--no-run` build, from its timings.
+    pub units: Vec<TestUnit>,
+    /// Whether the `--no-run` build was all fresh (nothing compiled).
+    pub build_fresh: bool,
 }
 
 /// Per-binary totals.
@@ -219,6 +520,17 @@ pub fn no_tests_arg(args: &[String]) -> Option<&'static str> {
     (!args.iter().any(|a| a.starts_with("--no-tests"))).then_some("--no-tests=warn")
 }
 
+/// Building the tests takes much longer than running them.
+fn build_finding(i: &Inputs) -> Option<Finding> {
+    let b = i
+        .build_secs
+        .filter(|b| *b >= 60.0 && *b > i.run_secs * 2.0)?;
+    Some(Finding::new("test-build-dominates", Severity::Medium, format!("Building the tests takes {} and running them {}", secs(b), secs(i.run_secs)), "measuring-a-test-run")
+            .saw(format!("`cargo nextest run --no-run` took {}; the run itself took {}.", secs(b), secs(i.run_secs)))
+            .why("Faster tests won't help much here: most of the wait is compiling and linking test binaries. Every integration test file and every crate's unit tests are a separate binary that links the whole dependency graph.")
+            .fix("Read the timings section below for the units on the critical path. Common fixes: fewer test binaries (one tests/ binary per crate), less debug info, a faster linker, and splitting the crate whose `lib (test)` unit dominates."))
+}
+
 /// The `test run` section: build and run time, the slowest tests and
 /// binaries, how busy the threads were.
 #[must_use]
@@ -229,7 +541,12 @@ pub fn section(i: &Inputs) -> Section {
     let test_secs: f64 = tests.iter().map(|t| t.secs).sum();
     let (threads, threads_src) = (&i.threads.0, &i.threads.1);
     if let Some(b) = i.build_secs {
-        s.fact("build (--no-run)", secs(b));
+        let fresh = if i.build_fresh {
+            ": fresh, nothing compiled"
+        } else {
+            ""
+        };
+        s.fact("build (--no-run)", format!("{}{fresh}", secs(b)));
     }
     s.fact("run", secs(i.run_secs));
     if tests.is_empty() && i.run.ignored == 0 {
@@ -303,16 +620,9 @@ pub fn section(i: &Inputs) -> Section {
             table(&["total", "tests", "slowest", "fastest", "binary"], &rows)
         ));
     }
-    if let Some(b) = i.build_secs
-        && b >= 60.0
-        && b > i.run_secs * 2.0
-    {
-        s.extend([Finding::new("test-build-dominates", Severity::Medium, format!("Building the tests takes {} and running them {}", secs(b), secs(i.run_secs)), "measuring-a-test-run")
-            .saw(format!("`cargo nextest run --no-run` took {}; the run itself took {}.", secs(b), secs(i.run_secs)))
-            .why("Faster tests won't help much here: most of the wait is compiling and linking test binaries. Every integration test file and every crate's unit tests are a separate binary that links the whole dependency graph.")
-            .fix("Read the timings section below for the units on the critical path. Common fixes: fewer test binaries (one tests/ binary per crate), less debug info, a faster linker, and splitting the crate whose `lib (test)` unit dominates.")]);
-    }
+    s.extend(build_finding(i));
     s.extend(timeout_finding(&slowest, i.slow_timeout));
+    s.extend(binary_findings(&i.binaries, &i.units));
     let longest = slowest.first().map_or(0.0, |t| t.secs);
     if i.run_secs >= 10.0 && *threads > 1 && used < 0.5 {
         s.extend([Finding::new("test-threads-idle", Severity::Info, format!("Test threads were busy {:.0}% of the run", used * 100.0), "measuring-a-test-run")
@@ -382,6 +692,140 @@ not json
     }
 
     #[test]
+    fn build_args_drop_run_only_options() {
+        let args = |a: &[&str]| a.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        let gate = args(&[
+            "--profile",
+            "gate",
+            "--no-fail-fast",
+            "--test-threads",
+            "8",
+            "-j4",
+            "--retries=2",
+            "-E",
+            "package(app)",
+            "-p",
+            "app",
+            "--features",
+            "db",
+            "--cargo-profile=ci",
+            "db::",
+            "--run-ignored",
+            "all",
+            "--",
+            "--exact",
+        ]);
+        assert_eq!(
+            build_args(&gate),
+            args(&[
+                "--profile",
+                "gate",
+                "-p",
+                "app",
+                "--features",
+                "db",
+                "--cargo-profile=ci"
+            ])
+        );
+        assert_eq!(fail_fast_arg(&gate), None);
+        assert_eq!(fail_fast_arg(&args(&["--max-fail=3"])), None);
+        assert_eq!(fail_fast_arg(&args(&["-P", "ci"])), Some("--no-fail-fast"));
+        assert_eq!(
+            build_args(&args(&["-P", "ci", "--release"])),
+            args(&["-P", "ci", "--release"])
+        );
+    }
+
+    const LIST: &str = r#"{"rust-build-meta":{},"test-count":2,"rust-suites":{
+"bridges":{"package-name":"bridges","binary-id":"bridges","binary-name":"bridges","kind":"lib","status":"listed","testcases":{}},
+"persona::bin/persona":{"package-name":"persona","binary-id":"persona::bin/persona","binary-name":"persona","kind":"bin","status":"listed","testcases":{}},
+"agent::bin/agent":{"package-name":"agent","binary-id":"agent::bin/agent","binary-name":"agent","kind":"bin","status":"listed","testcases":{"parses":{"kind":"test","ignored":false,"filter-match":{"status":"matches"}}}},
+"agent":{"package-name":"agent","binary-id":"agent","binary-name":"agent","kind":"lib","status":"listed","testcases":{"a":{},"b":{},"c":{}}},
+"macros":{"package-name":"macros","binary-id":"macros","binary-name":"macros","kind":"proc-macro","status":"skipped","testcases":{}}}}"#;
+
+    #[test]
+    fn binaries_without_tests() {
+        let binaries = parse_list(LIST);
+        assert_eq!(binaries.len(), 4);
+        assert!(binaries.contains(&Listed {
+            krate: "persona".into(),
+            name: "persona".into(),
+            kind: "bin".into(),
+            tests: 0
+        }));
+        assert_eq!(parse_list("not json"), []);
+        let unit = |name: &str, target: &str, duration: f64| crate::timings::Unit {
+            name: name.into(),
+            target: target.into(),
+            mode: "test".into(),
+            duration,
+            ..crate::timings::Unit::default()
+        };
+        let t = Timings {
+            units: vec![
+                unit("bridges", " bridges \"lib\" (test)", 65.9),
+                unit("persona", " persona \"bin\" (test)", 63.8),
+                unit("agent", " agent \"bin\" (test)", 35.3),
+                unit("agent", "", 20.0),
+            ],
+            ..Timings::default()
+        };
+        let on_path = t.units[2].of();
+        let units = test_units(&t, &[&on_path]);
+        assert_eq!(units.len(), 3);
+        assert_eq!((units[0].kind.as_str(), units[0].on_path), ("lib", false));
+        assert!(units[2].on_path);
+        let s = section(&Inputs {
+            run_secs: 5.0,
+            threads: (8, "CPUs".into()),
+            slow_timeout: 60.0,
+            run: parse(RUN.replace("40.5", "0.5").as_str()),
+            binaries,
+            units,
+            ..Inputs::default()
+        });
+        let ids: Vec<_> = s.findings.iter().map(|f| f.id).collect();
+        assert_eq!(
+            ids,
+            ["test-binary-without-tests", "bin-tests-on-critical-path"]
+        );
+        let f = &s.findings[0];
+        assert_eq!(f.severity, Severity::Medium);
+        assert_eq!(f.title, "2 test binaries hold no tests");
+        assert!(
+            f.saw.contains(
+                "bridges (lib) (built in 65.9s), persona bin \"persona\" (built in 63.8s)"
+            ) && f.saw.contains("took 130s of unit time"),
+            "{}",
+            f.saw
+        );
+        assert!(
+            s.findings[1]
+                .saw
+                .contains("agent bin \"agent\" (1 test(s), built in 35.3s)")
+        );
+    }
+
+    #[test]
+    fn fresh_build() {
+        let s = section(&Inputs {
+            build_secs: Some(0.4),
+            build_fresh: true,
+            run: parse(RUN),
+            ..Inputs::default()
+        });
+        assert_eq!(s.facts[0].value, "0.40s: fresh, nothing compiled");
+        let cost = process_cost(&Inputs {
+            run_secs: 66.0,
+            threads: (8, "CPUs".into()),
+            run: parse(RUN),
+            ..Inputs::default()
+        })
+        .unwrap();
+        assert_eq!((cost.tests, cost.fastest), (3, 0.004));
+    }
+
+    #[test]
     fn durations() {
         assert_eq!(duration_secs("60s"), Some(60.0));
         assert_eq!(duration_secs("1m 30s"), Some(90.0));
@@ -397,6 +841,7 @@ not json
             threads: (8, "--test-threads".into()),
             slow_timeout: 60.0,
             run: parse(RUN),
+            ..Inputs::default()
         });
         let ids: Vec<_> = s.findings.iter().map(|f| f.id).collect();
         assert_eq!(
@@ -432,6 +877,7 @@ not json
             threads: (8, "CPUs".into()),
             slow_timeout: 60.0,
             run: parse(""),
+            ..Inputs::default()
         });
         assert_eq!(s.facts[2].key, "tests");
         assert_eq!(s.facts[2].value, "0 tests: nextest found none to run");
@@ -457,6 +903,7 @@ not json
             threads: (8, "--test-threads".into()),
             slow_timeout: 60.0,
             run,
+            ..Inputs::default()
         });
         let f = s
             .findings
@@ -480,6 +927,7 @@ not json
             threads: (8, "num-cpus".into()),
             slow_timeout: 60.0,
             run: parse(RUN.replace("40.5", "0.5").as_str()),
+            ..Inputs::default()
         });
         assert_eq!(
             s.findings.len(),
