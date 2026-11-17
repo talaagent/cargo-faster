@@ -544,7 +544,11 @@ fn dev_feature_split_finding(a: &Analysis) -> Option<Finding> {
                 x.dependency,
                 x.features.join(", "),
                 x.rebuilt.len(),
-                if x.rebuilt.len() == 1 { "crate" } else { "crates" }
+                if x.rebuilt.len() == 1 {
+                    "crate"
+                } else {
+                    "crates"
+                }
             )
         })
         .collect();
@@ -815,7 +819,8 @@ mod tests {
 
     #[test]
     fn dev_dependency_features_of_workspace_crates_split_the_build() {
-        let m = Metadata::parse(r#"{
+        let m = Metadata::parse(
+            r#"{
           "workspace_root": "/w", "target_directory": "/w/target",
           "workspace_members": ["agent", "bin", "web", "cli"],
           "packages": [
@@ -834,7 +839,9 @@ mod tests {
              "dependencies": [{"name": "web", "kind": "dev"}]},
             {"id": "tokio", "name": "tokio", "version": "1.48.0", "manifest_path": "/r/t"}
           ]
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
         let a = analyze(&m);
         // tokio isn't a workspace crate, and cli's dev-dependency asks for
         // no features.
