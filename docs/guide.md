@@ -548,7 +548,7 @@ Incremental compilation saves the results of `rustc`'s queries between builds, i
 
 Some things to know about it:
 
-- **It's on by default for the `dev` and `test` profiles, and off for `release`.** You can change that with `incremental = true` or `false` in a profile, or override it with `CARGO_INCREMENTAL=0` or `1`.
+- **It's on by default for the `dev` and `test` profiles, and off for `release`.** You can change that with `incremental = true` or `false` in a profile. `build.incremental` in your Cargo config (or `CARGO_BUILD_INCREMENTAL`) overrides every profile, and `CARGO_INCREMENTAL=0` or `1` overrides both.
 - **It's only used for workspace members and path dependencies.** Crates from crates.io are compiled once and not recompiled when you edit your code, so there's nothing to gain.
 - **It's still a rerun of the crate.** `rustc` still has to parse and expand the whole crate, and check what changed. For a big crate, an incremental rebuild after a small edit is much faster than a full one, but not free.
 - **It's tied to its target directory.** The saved state lives inside `target/` and refers to your sources and output by path. Copying it into a different checkout doesn't reliably give you incremental reuse; we'll come back to this below.
@@ -607,6 +607,8 @@ rustflags = ["-C", "link-arg=-fuse-ld=mold"]
 ```
 
 Or, without changing your config, run Cargo under mold: `mold -run cargo build`.
+
+The same settings can come from the environment (a nix or direnv shell often sets them): `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS` and `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER`. Cargo takes rustflags from exactly one place: `CARGO_ENCODED_RUSTFLAGS`, else `RUSTFLAGS`, else the target's rustflags (config and environment together), else `build.rustflags`. So setting `RUSTFLAGS`, or any target rustflags, silently drops a mold flag kept in `build.rustflags`.
 
 On macOS, Apple's newer linker (introduced with Xcode 15, sometimes called `ld-prime`) is much faster than the old one and is the default with current Xcode. If linking on macOS is slow, check that your Xcode command line tools are up to date.
 

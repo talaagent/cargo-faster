@@ -210,21 +210,28 @@ impl CargoConfig {
         self.get(path).and_then(|(v, f)| v.as_str().map(|s| (s, f)))
     }
 
-    /// Every flag from `build.rustflags` and `target.<triple>.rustflags`
-    /// (string or array form), with the file each came from.
+    /// The rustflags cargo takes from config: `target.<triple>.rustflags`
+    /// and matching `[target.'cfg(..)']` rustflags if any are set, else
+    /// `build.rustflags` (cargo ignores `build.rustflags` when a target
+    /// sets rustflags). String or array form, with the file each came from.
     #[must_use]
     pub fn rustflags(&self, host: &str) -> Vec<(String, PathBuf)> {
+        let target = self.target_rustflags(host);
+        if target.is_empty() {
+            self.build_rustflags()
+        } else {
+            target
+        }
+    }
+
+    /// `target.<triple>.rustflags` and `[target.'cfg(..)'] rustflags`.
+    #[must_use]
+    pub fn target_rustflags(&self, host: &str) -> Vec<(String, PathBuf)> {
         let mut out = Vec::new();
+        let path = format!("target.{host}.rustflags");
         for (f, t) in &self.files {
-            for path in [
-                format!("target.{host}.rustflags"),
-                "build.rustflags".to_owned(),
-            ] {
-                if let Some(v) = lookup(t, &path) {
-                    for flag in flags(v) {
-                        out.push((flag, f.clone()));
-                    }
-                }
+            if let Some(v) = lookup(t, &path) {
+                out.extend(flags(v).into_iter().map(|fl| (fl, f.clone())));
             }
             // `[target.'cfg(..)'] rustflags` applies when the cfg matches;
             // include them all (we can't evaluate cfgs cheaply).
@@ -236,6 +243,18 @@ impl CargoConfig {
                         out.extend(flags(v).into_iter().map(|fl| (fl, f.clone())));
                     }
                 }
+            }
+        }
+        out
+    }
+
+    /// `build.rustflags` from every config file.
+    #[must_use]
+    pub fn build_rustflags(&self) -> Vec<(String, PathBuf)> {
+        let mut out = Vec::new();
+        for (f, t) in &self.files {
+            if let Some(v) = lookup(t, "build.rustflags") {
+                out.extend(flags(v).into_iter().map(|fl| (fl, f.clone())));
             }
         }
         out
@@ -502,15 +521,13 @@ mod tests {
             "/w/.cargo/config.toml",
             "[target.x86_64-unknown-linux-gnu]\nrustflags = [\"-C\", \"link-arg=-fuse-ld=mold\"]\n[build]\nrustflags = \"-C target-cpu=native\"\n",
         )]);
-        let f: Vec<String> = c
-            .rustflags("x86_64-unknown-linux-gnu")
-            .into_iter()
-            .map(|x| x.0)
-            .collect();
+        let f = |host| -> Vec<String> { c.rustflags(host).into_iter().map(|x| x.0).collect() };
+        // Target rustflags win; build.rustflags is ignored then.
         assert_eq!(
-            f,
-            ["-C", "link-arg=-fuse-ld=mold", "-C", "target-cpu=native"]
+            f("x86_64-unknown-linux-gnu"),
+            ["-C", "link-arg=-fuse-ld=mold"]
         );
+        assert_eq!(f("aarch64-unknown-linux-gnu"), ["-C", "target-cpu=native"]);
     }
 
     #[test]
