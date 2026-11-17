@@ -284,7 +284,14 @@ pub fn run(ctx: &Context, opts: &Options) -> Result<Run, Error> {
     } else {
         let tmp = std::env::temp_dir();
         remove_stale_temp_dirs(&tmp);
-        tmp.join(format!("{TEMP_PREFIX}{}", std::process::id()))
+        let dir = tmp.join(format!("{TEMP_PREFIX}{}", std::process::id()));
+        // Removed on Ctrl-C; the caller removes it after the analysis.
+        bpaf_kit::interrupt::on_interrupt({
+            let dir = dir.clone();
+            move || drop(std::fs::remove_dir_all(dir))
+        })
+        .keep();
+        dir
     };
     std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
     eprintln!(
@@ -301,15 +308,15 @@ pub fn run(ctx: &Context, opts: &Options) -> Result<Run, Error> {
     );
     let started = Instant::now();
     // The exact environment cargo used, at a lower priority, without
-    // touching our own process. The command line is long; the line above
-    // says what it is.
+    // touching our own process. The command line runs to hundreds of
+    // arguments: echo its start and end, with the environment collapsed.
     let replay = build(ctx, opts.nice, &inv.rustc)
         .args(replay_args(&inv.args, &dir))
         .envs(inv.env.iter().map(|(k, v)| (k, v)))
         .env("RUSTC_BOOTSTRAP", "1")
         .env("CARGO_INCREMENTAL", "0")
         .current_dir(&root)
-        .echo(false)
+        .echo_width(REPLAY_ECHO_WIDTH)
         .output()?;
     let wall_secs = started.elapsed().as_secs_f64();
     let profile = newest_profile(&dir).ok_or_else(|| -> Error {
@@ -328,12 +335,16 @@ pub fn run(ctx: &Context, opts: &Options) -> Result<Run, Error> {
     })
 }
 
+/// How much of the replayed rustc command line is echoed, in characters.
+const REPLAY_ECHO_WIDTH: usize = 160;
+
 /// Temporary profile directories are `<tmp>/cargo-faster-<pid>`.
 pub const TEMP_PREFIX: &str = "cargo-faster-";
 
 /// Remove the temporary profile directories of runs that are gone. Ctrl-C
-/// exits at once (bpaf-kit's handler), so an interrupted run leaves its
-/// directory behind; the next run cleans it up. Only on systems with
+/// removes the run's own directory (an `on_interrupt` cleanup), but a run
+/// that is killed (`SIGKILL`, the OOM killer, a crash) leaves it behind;
+/// the next run cleans it up. Only on systems with
 /// `/proc`, where we can tell whether the process is still running.
 pub fn remove_stale_temp_dirs(tmp: &Path) {
     let proc = Path::new("/proc");
