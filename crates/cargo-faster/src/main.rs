@@ -885,20 +885,22 @@ fn timings_file_section(
     let read = |p: &Path| -> Result<timings::Timings, Error> {
         let html =
             std::fs::read_to_string(p).map_err(|e| format!("reading {}: {e}", p.display()))?;
-        Ok(timings::Timings::parse_html(&html)?)
+        Ok(timings::Timings::parse_html(&html).map_err(|e| e.to_string())?)
     };
-    let mut t = read(path)?;
+    let t = read(path)?;
     let base = match baseline {
         Some(b) => Some((b.to_path_buf(), read(b)?)),
         None if !t.is_check() => timings::check_before(path),
         None => None,
     };
-    let ws = ctx.and_then(|c| c.metadata.as_ref().map(timings::Workspace::from_metadata));
+    let ws = ctx.and_then(|c| c.metadata.as_ref().map(timings::workspace_from_metadata));
     let mut joined = None;
+    let mut runs = Vec::new();
     if let (Some(c), Some(start)) = (ctx, t.start_unix_ms) {
         let events = timings::wrapper::gather(c, start);
         if !events.is_empty() {
-            joined = Some(timings::wrapper::join(&mut t, &events));
+            runs = timings::wrapper::join(&t, &events);
+            joined = Some(runs.iter().flatten().count());
         }
     }
     let a = timings::analyze_with(
@@ -908,6 +910,7 @@ fn timings_file_section(
             workspace: ws.as_ref(),
             first_build,
         },
+        &runs,
     );
     let mut s = timings::section(&a, &path.display().to_string());
     if let Some((p, _)) = &base {

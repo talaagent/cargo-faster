@@ -21,7 +21,11 @@ release_always = false
 [[package]]
 name = "cargo-faster"
 version_group = "cargo-faster"
-changelog_include = ["nextest-libtest-json", "rustc-self-profile"]
+changelog_include = [
+  "nextest-libtest-json",
+  "rustc-self-profile",
+  "cargo-timings-parse",
+]
 
 [[package]]
 name = "nextest-libtest-json"
@@ -32,6 +36,13 @@ git_release_enable = false
 
 [[package]]
 name = "rustc-self-profile"
+version_group = "cargo-faster"
+changelog_update = false
+git_tag_enable = false
+git_release_enable = false
+
+[[package]]
+name = "cargo-timings-parse"
 version_group = "cargo-faster"
 changelog_update = false
 git_tag_enable = false
