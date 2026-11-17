@@ -432,7 +432,8 @@ pub fn check(m: &Inputs) -> Section {
         } else {
             Severity::Medium
         };
-        f.push(
+        // A condition of the moment, not a fix for the project.
+        s.conditions.push(
             Finding::new("busy-machine", sev, "The machine is busy: timings will be noisy and slower", "the-machine")
                 .saw(format!("Load average {:.1} on {} CPUs, with {} rustc and {} cargo processes running besides this one.", m.load1, m.cpus, m.rustc_procs, m.cargo_procs))
                 .why("Builds compete for cores, memory bandwidth and disk. A build that takes 60 s on an idle machine can take twice that next to two others, so one-off timings say more about the neighbours than about your change.")
@@ -620,8 +621,12 @@ mod tests {
             ],
             ..Inputs::default()
         };
-        let ids: Vec<_> = check(&m).findings.iter().map(|f| f.id).collect();
-        assert_eq!(ids, ["busy-machine", "disk-full"]);
+        let s = check(&m);
+        let ids: Vec<_> = s.findings.iter().map(|f| f.id).collect();
+        assert_eq!(ids, ["disk-full"]);
+        // Busy is a condition of the moment, not a finding.
+        let ids: Vec<_> = s.conditions.iter().map(|f| f.id).collect();
+        assert_eq!(ids, ["busy-machine"]);
     }
 
     #[test]
