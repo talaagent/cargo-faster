@@ -84,18 +84,34 @@ enum Command {
         krate: Option<String>,
     },
     /// Read a --timings report: critical path, where the time went, cache hits and waits, slow links, contention
-    #[bpaf(command)]
+    #[bpaf(
+        command,
+        footer(
+            "--run times `cargo check --workspace --timings`; --cmd picks the build: build (`cargo build`), clippy, or test (`cargo nextest run --no-run`, or `cargo test --no-run` without nextest). Extra cargo arguments go after `--`. --edit CRATE measures what an edit to CRATE costs: it runs the build once to bring the tree up to date, appends a probe function to CRATE's lib.rs (a new public one; with --body, a private one whose body changes), times the build, and restores the file. Cargo always gets --workspace, never -p."
+        )
+    )]
     Timings {
-        /// Run `cargo check --workspace --timings` first
+        /// Run the build with --timings first, then read its report
         run: bool,
+        /// The build --run and --edit time: check (the default), build, clippy or test
+        #[bpaf(argument("CMD"))]
+        cmd: Option<timings::run::Build>,
+        /// Measure an edit to this workspace crate: warm up, add a probe, time the build, restore
+        #[bpaf(argument("CRATE"))]
+        edit: Option<String>,
+        /// With --edit, change a private function's body instead of the crate's API
+        body: bool,
         #[bpaf(external(nice))]
         nice: Nice,
         /// An earlier report to compare unit times with (default for a build: the newest earlier check report)
         #[bpaf(argument("FILE"))]
         baseline: Option<PathBuf>,
         /// A cargo-timing.html report (default: the newest in target/cargo-timings)
-        #[bpaf(positional("FILE"))]
+        #[bpaf(positional("FILE"), non_strict, optional)]
         file: Option<PathBuf>,
+        /// Extra cargo arguments for --run and --edit, after `--` (e.g. -- --profile gate)
+        #[bpaf(positional("CARGO_ARGS"), strict, many)]
+        cargo_args: Vec<String>,
     },
     /// Self-profile type checking of one crate: top queries, trait solving by type and body, proc macros
     #[bpaf(
@@ -194,6 +210,7 @@ fn print(s: &str) -> ExitCode {
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "one match arm per subcommand")]
 fn run(opts: &Opts) -> Result<Report, Error> {
     // An explicit profile file needs no workspace.
     if let Command::CheckCost {
@@ -211,6 +228,8 @@ fn run(opts: &Opts) -> Result<Report, Error> {
     if let Command::Timings {
         file: Some(file),
         run: false,
+        cmd: None,
+        edit: None,
         baseline,
         ..
     } = &opts.cmd
@@ -254,14 +273,31 @@ fn run(opts: &Opts) -> Result<Report, Error> {
         Command::Timings {
             file,
             run,
+            cmd,
+            edit,
+            body,
             nice,
             baseline,
+            cargo_args,
         } => {
+            let run =
+                (*run || cmd.is_some() || edit.is_some() || !cargo_args.is_empty()).then(|| {
+                    TimingsRun {
+                        build: cmd.unwrap_or_default(),
+                        edit: edit.clone(),
+                        probe: if *body {
+                            timings::run::Probe::Body
+                        } else {
+                            timings::run::Probe::Api
+                        },
+                        nice: nice.n,
+                        cargo_args: cargo_args.clone(),
+                    }
+                });
             report.sections.push(timings_section(
                 &ctx,
                 file.as_deref(),
-                *run,
-                nice.n,
+                run.as_ref(),
                 baseline.as_deref(),
             )?);
         }
@@ -362,7 +398,7 @@ fn full_report(ctx: &Context, m: &cargo_faster::context::Metadata, report: &mut 
     report
         .sections
         .push(graph::section(&graph::gather(m), None));
-    match timings_section(ctx, None, false, 0, None) {
+    match timings_section(ctx, None, None, None) {
         Ok(s) => report.sections.push(s),
         Err(e) => report.skipped.push(Fact {
             key: "timings".into(),
@@ -405,30 +441,139 @@ fn profile_section(
     Ok(s)
 }
 
+/// What `timings --run` (or `--edit`) builds.
+struct TimingsRun {
+    build: timings::run::Build,
+    edit: Option<String>,
+    probe: timings::run::Probe,
+    nice: i32,
+    cargo_args: Vec<String>,
+}
+
 fn timings_section(
     ctx: &Context,
     file: Option<&Path>,
-    run: bool,
-    nice: i32,
+    run: Option<&TimingsRun>,
     baseline: Option<&Path>,
 ) -> Result<Section, Error> {
-    if run {
-        let out = build(ctx, nice, cargo_bin(&ctx.env))
-            .args(["check", "--workspace", "--timings"])
+    let Some(r) = run else {
+        let path = match file {
+            Some(f) => f.to_path_buf(),
+            None => timings::newest_report(&ctx.target_dir()).ok_or(Error::NoTimings)?,
+        };
+        return timings_file_section(Some(ctx), &path, baseline);
+    };
+    let (path, facts) = timings_run(ctx, r)?;
+    let mut s = timings_file_section(Some(ctx), &path, baseline)?;
+    for (i, f) in facts.into_iter().enumerate() {
+        s.facts.insert(i, f);
+    }
+    Ok(s)
+}
+
+/// Run the build with `--timings` (after the probe edit, for `--edit`)
+/// and return the report it wrote, with facts saying what was measured.
+fn timings_run(ctx: &Context, r: &TimingsRun) -> Result<(PathBuf, Vec<Fact>), Error> {
+    use timings::run::{Edit, Probe, edit_target, probe_text};
+    let nextest = tests::Inputs::gather(ctx).nextest_installed;
+    let args = r.build.args(nextest);
+    let cargo = cargo_bin(&ctx.env);
+    let mut shown = args.clone();
+    shown.push("--timings");
+    shown.extend(r.cargo_args.iter().map(String::as_str));
+    let mut facts = vec![Fact {
+        key: "build".into(),
+        value: format!("cargo {}", shown.join(" ")),
+    }];
+    let target = match &r.edit {
+        Some(name) => Some(edit_target(
+            ctx.metadata.as_ref().ok_or(Error::NoTimings)?,
+            name,
+        )?),
+        None => None,
+    };
+    let mut edit = None;
+    if let Some(t) = &target {
+        // Bring the tree up to date first, so the timed build only pays
+        // for the probe (and not for earlier edits, or the last restore).
+        let warm = build(ctx, r.nice, &cargo)
+            .args(&args)
+            .args(&r.cargo_args)
             .current_dir(ctx.root())
             .output()?;
-        if !out.success() {
-            eprintln!(
-                "cargo faster: the build failed; reading whatever timings it wrote\n{}",
-                out.stderr_lossy().trim()
-            );
+        if !warm.success() {
+            return Err(format!(
+                "the warm-up build failed, so an edit can't be measured\n{}",
+                warm.stderr_lossy().trim()
+            )
+            .into());
         }
+        let probe = if t.proc_macro { Probe::Body } else { r.probe };
+        let n = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        if cmd::dry_run_enabled() {
+            eprintln!(
+                "cargo faster: --dry-run: would append a probe to {} and restore it after the build",
+                t.file.display()
+            );
+        } else {
+            edit = Some(Edit::apply(&t.file, &probe_text(probe, n))?);
+        }
+        facts.push(Fact {
+            key: "edit".into(),
+            value: format!(
+                "{}: {} in {}{}, restored after the build",
+                t.krate,
+                probe.describe(),
+                t.file.strip_prefix(ctx.root()).unwrap_or(&t.file).display(),
+                if t.proc_macro && r.probe == Probe::Api {
+                    " (a proc-macro crate can't export functions)"
+                } else {
+                    ""
+                }
+            ),
+        });
     }
-    let path = match file {
-        Some(f) => f.to_path_buf(),
-        None => timings::newest_report(&ctx.target_dir()).ok_or(Error::NoTimings)?,
-    };
-    timings_file_section(Some(ctx), &path, baseline)
+    let start = SystemTime::now();
+    let out = build(ctx, r.nice, &cargo)
+        .args(&args)
+        .arg("--timings")
+        .args(&r.cargo_args)
+        .current_dir(ctx.root())
+        .output();
+    if let Some(e) = edit {
+        e.restore()?;
+    }
+    let out = out?;
+    if cmd::dry_run_enabled() {
+        return Err(Error::DryRun(
+            "--dry-run: nothing was built, so there is nothing to time".into(),
+        ));
+    }
+    if !out.success() {
+        eprintln!(
+            "cargo faster: the build failed; reading whatever timings it wrote\n{}",
+            out.stderr_lossy().trim()
+        );
+    }
+    let path = fresh_report(ctx, start).ok_or_else(|| {
+        Error::from(format!(
+            "the build wrote no cargo-timing.html\n{}",
+            out.stderr_lossy().trim()
+        ))
+    })?;
+    Ok((path, facts))
+}
+
+/// The newest report in the target directory, if it was written after
+/// `since` (by the build we just ran, not an older one).
+fn fresh_report(ctx: &Context, since: SystemTime) -> Option<PathBuf> {
+    timings::newest_report(&ctx.target_dir()).filter(|p| {
+        std::fs::metadata(p)
+            .and_then(|m| m.modified())
+            .is_ok_and(|t| t >= since)
+    })
 }
 
 /// `tests`: the configuration checks; with `--run`, also time the test
@@ -502,12 +647,7 @@ fn tests_sections(
     );
     report.sections.push(s);
     // Only the report this build wrote, not an older one.
-    let fresh = timings::newest_report(&ctx.target_dir()).filter(|p| {
-        std::fs::metadata(p)
-            .and_then(|m| m.modified())
-            .is_ok_and(|t| t >= build_start)
-    });
-    match fresh {
+    match fresh_report(ctx, build_start) {
         Some(path) => report
             .sections
             .push(timings_file_section(Some(ctx), &path, None)?),

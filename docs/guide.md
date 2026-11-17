@@ -492,6 +492,8 @@ That gives you a simple rule: **the crates you edit most should have the fewest 
 
 `cargo faster rdeps <crate>` lists what rebuilds when you edit a given crate, and how long those units took in your last timeline.
 
+To measure the rebuild instead of estimating it, `cargo faster timings --edit <crate>` makes the edit for you. It brings the build up to date, adds a public function to the crate, times the build that follows, and then removes the function. With `--body`, the edit changes only a private function's body, so the crate's API stays the same. Dependents still rebuild after a body edit, but the gap between the two times is what changing the API costs them. Use `--cmd build`, `--cmd clippy` or `--cmd test` to time the build you actually wait on.
+
 ### Splitting a big crate
 
 Splitting a big crate into several smaller ones can help in two ways:
