@@ -243,14 +243,14 @@ fn jobs(cell: &str) -> Option<(u32, u32)> {
     Some((num("jobs=")?, num("ncpu=")?))
 }
 
-/// `2026-11-17T09:57:58.540254618Z` → Unix milliseconds (UTC only, which
-/// is what cargo writes).
+/// `2026-11-17T09:57:58.540254618Z` (or `+00:00`) → Unix milliseconds (UTC
+/// only, which is what cargo and kache write).
 #[allow(
     clippy::many_single_char_names,
     reason = "the civil-date formula's names"
 )]
-fn unix_ms(ts: &str) -> Option<f64> {
-    let ts = ts.strip_suffix('Z')?;
+pub(crate) fn unix_ms(ts: &str) -> Option<f64> {
+    let ts = ts.strip_suffix('Z').or_else(|| ts.strip_suffix("+00:00"))?;
     let (date, time) = ts.split_once('T')?;
     let mut d = date.splitn(3, '-').map(str::parse::<i64>);
     let (y, m, day) = (d.next()?.ok()?, d.next()?.ok()?, d.next()?.ok()?);
