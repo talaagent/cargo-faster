@@ -3,18 +3,26 @@
 
 use bpaf::Bpaf;
 use bpaf_kit::log::LogArgs;
-use bpaf_kit::suggest::UnknownValue;
 use bpaf_kit::{Cli, cmd};
 use cargo_faster::context::{Context, build, cargo_bin};
 use cargo_faster::error::Error;
-use cargo_faster::finding::{Fact, Report, Section};
+use cargo_faster::error::UnknownName;
+use cargo_faster::finding::{Fact, Report, Section, Severity};
 use cargo_faster::{
     cache, checkcost, deps, graph, machine, profile, setup, testrun, tests, timings,
 };
+use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Instant, SystemTime};
+
+/// The global options, for the footer of each subcommand's help.
+macro_rules! global_help {
+    () => {
+        "Global options (before or after the subcommand): --json, --manifest-path PATH, --fail-on LEVEL, --dry-run, -v, -q. See `cargo faster --help`."
+    };
+}
 
 /// Find out why your Rust build is slow and how to make it faster
 #[derive(Debug, Clone, Bpaf, Cli)]
@@ -22,12 +30,18 @@ use std::time::{Instant, SystemTime};
     options("faster"),
     header(
         "Every finding says what we saw, why it matters, the fix, and a link into the guide:\nhttps://github.com/talaagent/cargo-faster/blob/main/docs/guide.md"
+    ),
+    footer(
+        "Exit status: 0 on success, findings included; 1 on an error, a failed build, or a finding at or above --fail-on; 2 on a usage error."
     )
 )]
 #[cli(log = "warn")]
 struct Opts {
     /// Print the report as JSON
     json: bool,
+    /// Exit 1 when any finding is at least this severe: high, medium or low (for CI)
+    #[bpaf(argument("LEVEL"))]
+    fail_on: Option<FailOn>,
     /// Path to the workspace Cargo.toml
     #[bpaf(argument("PATH"))]
     manifest_path: Option<PathBuf>,
@@ -46,25 +60,29 @@ struct Opts {
 #[derive(Debug, Clone, Bpaf)]
 enum Command {
     /// A quick overall report: setup, cache, machine, deps, tests, crates (the default)
-    #[bpaf(command)]
+    #[bpaf(command, footer(global_help!()))]
     Report,
     /// Audit profiles, linker, debuginfo, codegen units, jobs and rustflags
-    #[bpaf(command)]
+    #[bpaf(command, footer(global_help!()))]
     Setup,
     /// Check the compiler cache (sccache, kache), incremental and cold worktrees
-    #[bpaf(command)]
+    #[bpaf(command, footer(global_help!()))]
     Cache,
     /// Check load, concurrent builds, memory and disk
-    #[bpaf(command)]
+    #[bpaf(command, footer(global_help!()))]
     Machine,
     /// Check heavy features, duplicate versions and proc macros
-    #[bpaf(command)]
+    #[bpaf(command, footer(global_help!()))]
     Deps,
     /// Check nextest, target runners, thread limits and database-backed tests
     #[bpaf(
         command,
         footer(
-            "With --run: times `cargo nextest run --workspace --no-run --timings`, then runs the tests with NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 and `--message-format libtest-json-plus`, and reports build vs run time, the slowest tests and binaries, and how busy the test threads were."
+            concat!(
+                "With --run: times `cargo nextest run --workspace --no-run --timings`, then runs the tests with NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 and `--message-format libtest-json-plus`, and reports build vs run time, the slowest tests and binaries, and how busy the test threads were.",
+                "\n",
+                global_help!()
+            )
         )
     )]
     Tests {
@@ -77,9 +95,12 @@ enum Command {
         nextest_args: Vec<String>,
     },
     /// What rebuilds when a crate changes, and which crates are worth splitting
-    #[bpaf(command)]
+    #[bpaf(command, footer(global_help!()))]
     Rdeps {
         /// Only this workspace crate
+        #[bpaf(short('p'), long("package"), argument("CRATE"))]
+        package: Option<String>,
+        /// Only this workspace crate (the same as -p)
         #[bpaf(positional("CRATE"))]
         krate: Option<String>,
     },
@@ -87,7 +108,11 @@ enum Command {
     #[bpaf(
         command,
         footer(
-            "--run times `cargo check --workspace --timings`; --cmd picks the build: build (`cargo build`), clippy, or test (`cargo nextest run --no-run`, or `cargo test --no-run` without nextest). Extra cargo arguments go after `--`. --edit CRATE measures what an edit to CRATE costs: it runs the build once to bring the tree up to date, appends a probe function to CRATE's lib.rs (a new public one; with --body, a private one whose body changes), times the build, and restores the file. Cargo always gets --workspace, never -p."
+            concat!(
+                "--run times `cargo check --workspace --timings`; --cmd picks the build: build (`cargo build`), clippy, or test (`cargo nextest run --no-run`, or `cargo test --no-run` without nextest). Extra cargo arguments go after `--`. --edit CRATE measures what an edit to CRATE costs: it runs the build once to bring the tree up to date, appends a probe function to CRATE's lib.rs (a new public one; with --body, a private one whose body changes), times the build, and restores the file. Cargo always gets --workspace, never -p.",
+                "\n",
+                global_help!()
+            )
         )
     )]
     Timings {
@@ -117,7 +142,11 @@ enum Command {
     #[bpaf(
         command,
         footer(
-            "Uses RUSTC_BOOTSTRAP=1 so a stable rustc accepts -Zself-profile. `-p` picks the package and --lib/--bin/--test/--example/--bench the target; the rustc command is captured from `cargo check --workspace -vv` with the matching filter (--lib, --bin NAME, ...; with --tests also --profile test), which first checks the selected targets in every member and what they depend on. Cargo always gets --workspace, never -p, so caches keyed on the package set (kache) stay warm. Target flags in CARGO_ARGS (-- --tests) replace the filter; the lib's --test build is then profiled when they include --tests."
+            concat!(
+                "Uses RUSTC_BOOTSTRAP=1 so a stable rustc accepts -Zself-profile. `-p` picks the package and --lib/--bin/--test/--example/--bench the target; the rustc command is captured from `cargo check --workspace -vv` with the matching filter (--lib, --bin NAME, ...; with --tests also --profile test), which first checks the selected targets in every member and what they depend on. Cargo always gets --workspace, never -p, so caches keyed on the package set (kache) stay warm. Target flags in CARGO_ARGS (-- --tests) replace the filter; the lib's --test build is then profiled when they include --tests.",
+                "\n",
+                global_help!()
+            )
         )
     )]
     CheckCost {
@@ -135,7 +164,7 @@ enum Command {
         nice: Nice,
         /// Analyze an existing .mm_profdata file instead of building
         #[bpaf(argument("FILE"))]
-        profile: Option<PathBuf>,
+        profdata: Option<PathBuf>,
         /// Extra `cargo check` arguments, after `--` (e.g. -- --features x)
         #[bpaf(positional("CARGO_ARGS"), strict, many)]
         cargo_args: Vec<String>,
@@ -171,6 +200,23 @@ enum TargetSel {
     },
 }
 
+/// `--fail-on LEVEL`: the least severe finding that fails the run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FailOn(Severity);
+
+impl core::str::FromStr for FailOn {
+    type Err = bpaf_kit::suggest::UnknownValue;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        const LEVELS: &[(&str, Severity)] = &[
+            ("high", Severity::High),
+            ("medium", Severity::Medium),
+            ("low", Severity::Low),
+        ];
+        bpaf_kit::suggest::parse_choice("severity", s, LEVELS).map(Self)
+    }
+}
+
 // `--nice N`, for the subcommands that build. No doc comment: bpaf would
 // make it a help section of its own.
 #[derive(Debug, Clone, Copy, Bpaf)]
@@ -181,7 +227,10 @@ struct Nice {
 }
 
 fn main() -> ExitCode {
-    let opts = Opts::cli();
+    let opts = match parse() {
+        Ok(o) => o,
+        Err(e) => return bpaf_kit::report::report_as("cargo faster", &e),
+    };
     if opts.dry_run {
         cmd::set_dry_run(true);
     }
@@ -192,13 +241,72 @@ fn main() -> ExitCode {
             } else {
                 report.render_text(bpaf_kit::color_enabled(&std::io::stdout()))
             };
-            print(&text)
+            let printed = print(&text);
+            if printed != ExitCode::SUCCESS {
+                return printed;
+            }
+            match opts.fail_on {
+                Some(FailOn(level)) if report.findings().iter().any(|f| f.severity >= level) => {
+                    eprintln!(
+                        "cargo faster: failing: a finding is {} or worse (--fail-on {})",
+                        level.name(),
+                        level.name()
+                    );
+                    ExitCode::FAILURE
+                }
+                _ => ExitCode::SUCCESS,
+            }
         }
         Err(Error::DryRun(msg)) => {
             eprintln!("cargo faster: {msg}");
             ExitCode::SUCCESS
         }
         Err(e) => bpaf_kit::report::report_as("cargo faster", &e),
+    }
+}
+
+/// Parse the command line. Help says `cargo faster`, and a usage error is
+/// an `error[usage]` with exit status 2, like every other error but for
+/// the status. `--man` and `--version` are left to bpaf-kit.
+fn parse() -> Result<Opts, Error> {
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    let first = args.iter().find(|a| *a != "faster");
+    let meta = first.is_some_and(|a| a == "--man" || a == "--version" || a == "-V");
+    if !meta {
+        let named = bpaf::Args::current_args().set_name("cargo faster");
+        match Opts::parser().run_inner(named) {
+            Ok(_) => {}
+            Err(bpaf::ParseFailure::Stderr(doc)) => {
+                return Err(Error::Usage(doc.monochrome(true)));
+            }
+            Err(f) => {
+                f.print_message(100);
+                std::process::exit(0);
+            }
+        }
+    }
+    let opts = Opts::cli();
+    check_usage(&opts.cmd)?;
+    Ok(opts)
+}
+
+/// Combinations the parser accepts but that make no sense.
+fn check_usage(cmd: &Command) -> Result<(), Error> {
+    match cmd {
+        Command::Timings {
+            body: true,
+            edit: None,
+            ..
+        } => Err(Error::Usage(
+            "--body changes what `--edit CRATE` appends; it needs --edit".into(),
+        )),
+        Command::Rdeps {
+            package: Some(p),
+            krate: Some(k),
+        } if p != k => Err(Error::Usage(format!(
+            "rdeps takes one crate: -p {p} or {k}, not both"
+        ))),
+        _ => Ok(()),
     }
 }
 
@@ -214,7 +322,7 @@ fn print(s: &str) -> ExitCode {
 fn run(opts: &Opts) -> Result<Report, Error> {
     // An explicit profile file needs no workspace.
     if let Command::CheckCost {
-        profile: Some(file),
+        profdata: Some(file),
         ..
     } = &opts.cmd
     {
@@ -269,7 +377,9 @@ fn run(opts: &Opts) -> Result<Report, Error> {
             nice,
             nextest_args,
         } => tests_sections(&ctx, *run, nice.n, nextest_args, &mut report)?,
-        Command::Rdeps { krate } => report.sections.push(rdeps_section(&m, krate.as_deref())?),
+        Command::Rdeps { package, krate } => report
+            .sections
+            .push(rdeps_section(&m, package.as_deref().or(krate.as_deref()))?),
         Command::Timings {
             file,
             run,
@@ -307,7 +417,7 @@ fn run(opts: &Opts) -> Result<Report, Error> {
             tests,
             keep,
             nice,
-            profile: _,
+            profdata: _,
             cargo_args,
         } => {
             let o = checkcost::Options {
@@ -339,12 +449,11 @@ fn rdeps_section(
     if let Some(k) = krate
         && !crates.iter().any(|c| graph::is_named(c, k))
     {
-        return Err(UnknownValue::new(
-            "workspace crate",
-            k,
-            crates.iter().map(|c| c.name.as_str()),
-        )
-        .into());
+        return Err(
+            UnknownName::new("workspace crate", k, crates.iter().map(|c| c.name.as_str()))
+                .list_with("cargo faster rdeps")
+                .into(),
+        );
     }
     let mut s = graph::section(&crates, krate);
     graph::add_edges(m, &crates, krate, &mut s);

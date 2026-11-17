@@ -3,7 +3,7 @@
 
 use crate::context::Metadata;
 use crate::error::Error;
-use bpaf_kit::suggest::UnknownValue;
+use crate::error::UnknownName;
 use core::fmt;
 use core::str::FromStr;
 use std::path::{Path, PathBuf};
@@ -128,11 +128,12 @@ pub fn edit_target(m: &Metadata, name: &str) -> Result<EditTarget, Error> {
         .members()
         .find(|p| p.name == name || p.name.replace('_', "-") == want)
     else {
-        return Err(UnknownValue::new(
+        return Err(UnknownName::new(
             "workspace crate",
             name,
             m.members().map(|p| p.name.as_str()),
         )
+        .list_with("cargo faster rdeps")
         .into());
     };
     let has = |k: &str| {
