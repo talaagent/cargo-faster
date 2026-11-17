@@ -925,17 +925,21 @@ That's a bigger win than the theory in [What's left](#whats-left) allowed for, a
 
 Two things stand out. First, trait solving dropped by about 80%, and nearly all of what went away was work done in parameter environments carrying `#[async_trait]`'s lifetime bounds: 14,500 evaluations in the library crate before, none after. Native async functions really do let rustc share its answers. Our guess in *What's left* had the right model of each body and the wrong model of the cache.
 
-Second, on a fresh check, trait solving was only about a tenth of the library crate's time to begin with, so the fresh numbers move less than the incremental ones, and the binary crate's fresh check didn't move outside the noise. The big change was in the incremental units, the ones you wait on after every edit:
+Second, on a fresh check, trait solving was only about a tenth of the library crate's time to begin with, so the fresh numbers move less than the trait-solving ones, and the binary crate's fresh check didn't move outside the noise.
 
-| Unit (incremental `cargo check`, load 67 to 87) | Before | After |
+And the incremental probe, the one you wait on after every edit, repeated on this one commit pair, at a load average of 74 to 100 (the second of two runs in each worktree, so incremental state was warm):
+
+| Unit (append a function, rebuild) | Before | After |
 |---|---:|---:|
-| app library crate, check | 55.5 s | 37.8 s |
-| app library crate, check (test) | 72.8 s | 53.0 s |
-| app binary crate, check | 37.2 s | 13.3 s |
-| app binary crate, check (test) | 36.7 s | 14.7 s |
-| whole check run | 105 s | 74 s |
+| `cargo check`: app library crate | 15.9 s | 13.3 s |
+| `cargo check`: app binary crate | 3.1 s | 2.4 s |
+| `cargo check`: whole run | 55 s | 46 s |
+| `cargo clippy`: app library crate | 46.0 s | 47.2 s |
+| `cargo clippy`: app binary crate | 10.4 s | 6.9 s |
+| `cargo clippy`: binary crate (test) | 14.3 s | 10.4 s |
+| `cargo clippy`: whole run | 83 s | 72 s |
 
-Incremental compilation can reuse a query's result only when its inputs, including the trait-solving results it depended on, come out the same. Fewer, shared proofs mean fewer things to recompute and fewer dependencies to check.
+That's a real win, but a modest one, and it's honest to say why. By the commit before the last pull request, only 62 `#[async_trait]` attributes were left, in 9 crates; the first two pull requests had already removed the rest. The first probe's 44 to 15 seconds spans all three pull requests *and* the erasure work that landed alongside them. We can't split that number between the two after the fact. What the self-profile does show is that the trait solving that `#[async_trait]` caused went to zero, and that it was most of the trait solving left.
 
 So there are two levers, and this workspace needed both. Erasing heavy types made each `Send` proof cheap. Dropping `#[async_trait]` stopped the proofs from being repeated per method.
 
@@ -962,7 +966,7 @@ A few things to take away from this:
 1. **The obvious suspects were wrong.** Nobody guessed "trait solving" before profiling. The usual advice (split the crate, cut the derives, change the linker) would have been effort spent on the wrong thing.
 2. **Self-profiling with `args` turned a symptom into a cause.** The query totals said "trait solving". Grouping by predicate and by function body said "this one struct, proved `Send` over and over, by these methods".
 3. **Type erasure and boxing are compile-time tools.** We usually think of `dyn` and `Box` as runtime choices. In async code, they're also the way to tell the compiler "you don't need to look inside this".
-4. **Measure the advice, too.** We told ourselves, and this guide told you, that dropping `#[async_trait]` wouldn't help. A before/after profile of one commit said it cut trait solving by 80%. Theories about the compiler's caches are worth exactly as much as the profile that backs them.
+4. **Measure the advice, too.** We told ourselves, and this guide told you, that dropping `#[async_trait]` wouldn't help. A before/after profile of a single pull request, the last 62 uses, said it cut trait solving by 80%. Theories about the compiler's caches are worth exactly as much as the profile that backs them.
 
 ## Using cargo faster
 
