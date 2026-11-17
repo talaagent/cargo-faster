@@ -304,7 +304,7 @@ impl Inputs {
         }
         Self {
             nextest_config,
-            nextest_installed: on_path(&ctx.env, "cargo-nextest").is_some(),
+            nextest_installed: crate::context::has_subcommand(&ctx.env, "nextest"),
             sqlx_tests,
             test_binaries,
             integration_files,

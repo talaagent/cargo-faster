@@ -17,6 +17,9 @@ pub enum Error {
     /// The command line doesn't parse, or asks for something contradictory.
     #[error("{0}")]
     Usage(String),
+    /// `tests --run` needs cargo-nextest, and it isn't on `PATH`.
+    #[error("tests --run needs cargo-nextest: cargo install --locked cargo-nextest")]
+    NoNextest,
     /// `cargo metadata` failed, with the end of its stderr.
     #[error("cargo metadata failed (is this a Cargo workspace?):\n{0}")]
     NoWorkspace(String),
@@ -43,6 +46,7 @@ impl Error {
             Self::Unknown(e) => e.code(),
             Self::UnknownName(_) => "unknown_value",
             Self::Usage(_) => "usage",
+            Self::NoNextest => "no_nextest",
             Self::NoWorkspace(_) => "no_workspace",
             Self::NoTimings => "no_timings",
             Self::DryRun(_) => "dry_run",
