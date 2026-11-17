@@ -1,0 +1,151 @@
+{
+ "schema_version": 1,
+ "command": "explain",
+ "success": true,
+ "root": "/home/user/proj/app-worktrees/feature",
+ "recorded_at": "2026-11-17T01:58:18.228682437+00:00",
+ "recorded_versions": [
+  "2.0.1"
+ ],
+ "installed_version": "2.0.1",
+ "misses": 214,
+ "earlier_misses": 72,
+ "unexplained": 104,
+ "causes": [
+  {
+   "why": "miss details were not recorded",
+   "fix": "`kache config set cache.explain_miss true` records details for future builds; earlier details cannot be reconstructed",
+   "failure": false,
+   "count": 104,
+   "compile_ms": 284003,
+   "crates": [
+    "tala_erased",
+    "tala_agent",
+    "claude_accounts_demo"
+   ],
+   "costliest_crates": [
+    "tala_agent",
+    "tala_agent_bin",
+    "tala_admin"
+   ]
+  },
+  {
+   "why": "downstream of tala_mx, tala_admin_proto_accounts, tala_admin_proto_agents, tala_admin_proto_approvals, tala_admin_proto_artifacts, tala_admin_proto_audit, tala_admin_proto_auth, tala_admin_proto_bridges, tala_admin_proto_browsers, tala_admin_proto_chat, tala_admin_proto_claude_setup, tala_admin_prot...",
+   "fix": "every crate built on tala_mx, tala_admin_proto_accounts, tala_admin_proto_agents, tala_admin_proto_approvals, tala_admin_proto_artifacts, tala_admin_proto_audit, tala_admin_proto_auth, tala_admin_proto_bridges, tala_admin_proto_browsers, tala_admin_proto_chat, tala_admin_proto_claude_setup, tala_admin_proto_codex_setup, tala_admin_proto_config, tala_admin_proto_connection_access, tala_admin_proto_connections, tala_admin_proto_decisions, tala_admin_proto_delegates, tala_admin_proto_email_domains, tala_admin_proto_health, tala_admin_proto_integrations, tala_admin_proto_network, tala_admin_proto_onboarding, tala_admin_proto_orgs, tala_admin_proto_owner_requests, tala_admin_proto_personas, tala_admin_proto_rooms, tala_admin_proto_runners, tala_admin_proto_runtime, tala_admin_proto_schedules, tala_admin_proto_scopes, tala_admin_proto_server, tala_admin_proto_sessions, tala_admin_proto_settings, tala_admin_proto_skills, tala_admin_proto_spaces, tala_admin_proto_users, tala_admin_view, tala_approval, tala_audit, tala_blob, tala_browser_profiles, tala_claude_usage, tala_config, tala_connection_access, tala_conversations, tala_core, tala_github, tala_github_api, tala_health, tala_hook_wire, tala_ids, tala_persona_avatars recompiled after it changed; an edit low in the dependency graph rebuilds the most",
+   "failure": false,
+   "count": 2,
+   "compile_ms": 21059,
+   "crates": [
+    "tala_admin"
+   ],
+   "costliest_crates": [
+    "tala_admin"
+   ]
+  },
+  {
+   "why": "differs from the build in /home/user/proj/app-worktrees/drop-async-trait/target: link",
+   "fix": "`kache explain <crate>` names the input that differs from the other checkout; if it is a path into this checkout that kache did not map: set `KACHE_BASE_DIR` to the checkout root; if it is a C or C++ library a build script generated: use `-ffile-prefix-map=$PWD=.` in `CFLAGS` and `CXXFLAGS` for embedded paths; for archive timestamps use GNU ar's `D` mode (`HOST_ARFLAGS=D` for native builds using `cc`) or `ZERO_AR_DATE=1` with Apple tools",
+   "failure": false,
+   "count": 13,
+   "compile_ms": 18072,
+   "crates": [
+    "tala_mx",
+    "tala_matrix_posts",
+    "tala_location_runtime"
+   ],
+   "costliest_crates": [
+    "tala_conversation_matrix",
+    "tala_matrix_delivery",
+    "tala_mx"
+   ]
+  },
+  {
+   "why": "downstream of tala_config, tala_connections, tala_core, tala_spool (and more; cascade not fully resolved)",
+   "fix": "every crate built on tala_config, tala_connections, tala_core, tala_spool recompiled after it changed; an edit low in the dependency graph rebuilds the most",
+   "failure": false,
+   "count": 8,
+   "compile_ms": 15649,
+   "crates": [
+    "tala_google",
+    "tala_user_oauth",
+    "tala_youtube"
+   ],
+   "costliest_crates": [
+    "tala_user_oauth",
+    "tala_google",
+    "tala_cloudflare"
+   ]
+  },
+  {
+   "why": "downstream of tala_mx, tala_config, tala_connections, tala_core, tala_spool (and more; cascade not fully resolved)",
+   "fix": "every crate built on tala_mx, tala_config, tala_connections, tala_core, tala_spool recompiled after it changed; an edit low in the dependency graph rebuilds the most",
+   "failure": false,
+   "count": 4,
+   "compile_ms": 8380,
+   "crates": [
+    "tala_linear_api",
+    "tala_email"
+   ],
+   "costliest_crates": [
+    "tala_linear_api",
+    "tala_email"
+   ]
+  },
+  {
+   "why": "downstream of tala_mx, tala_connections, tala_core, tala_config, tala_ids, tala_spool, tala_seal, tala_orgs (and more; cascade not fully resolved)",
+   "fix": "every crate built on tala_mx, tala_connections, tala_core, tala_config, tala_ids, tala_spool, tala_seal, tala_orgs recompiled after it changed; an edit low in the dependency graph rebuilds the most",
+   "failure": false,
+   "count": 4,
+   "compile_ms": 6050,
+   "crates": [
+    "tala_credential_proxy",
+    "tala_creds"
+   ],
+   "costliest_crates": [
+    "tala_credential_proxy",
+    "tala_creds"
+   ]
+  },
+  {
+   "why": "downstream of tala_conversation_matrix, tala_location_runtime, tala_matrix_delivery, tala_matrix_posts, tala_mx, tala_pins_runtime, tala_config, tala_spool, tala_core, tala_connections, immich_tools, maps_tools, mcp_tool_args, tala_delegate_tools, tala_maps, tala_tools, artifacts_tools, tala_api_cap...",
+   "fix": "every crate built on tala_conversation_matrix, tala_location_runtime, tala_matrix_delivery, tala_matrix_posts, tala_mx, tala_pins_runtime, tala_config, tala_spool, tala_core, tala_connections, immich_tools, maps_tools, mcp_tool_args, tala_delegate_tools, tala_maps, tala_tools, artifacts_tools, tala_api_capability, tala_artifacts, tala_browser_runtime, tala_command_runtime, tala_command_worker, tala_conversation_settings, tala_conversations, tala_decisions_runtime, tala_fx, tala_ids, tala_media_runtime, tala_owner_requests, tala_print_runtime, tala_room_ops, tala_schedule_ops, tala_scheduled_tasks, tala_schedules, tala_session_delivery, tala_session_sandbox, tala_session_store, tala_stores recompiled after it changed; an edit low in the dependency graph rebuilds the most",
+   "failure": false,
+   "count": 1,
+   "compile_ms": 5486,
+   "crates": [
+    "tala_conversation_tools"
+   ],
+   "costliest_crates": [
+    "tala_conversation_tools"
+   ]
+  },
+  {
+   "why": "downstream of tala_location_runtime, tala_matrix_delivery, tala_matrix_posts, tala_mx, tala_pins_runtime, tala_config, tala_spool, tala_core, tala_connections, immich_tools, maps_tools, mcp_tool_args, tala_delegate_tools, tala_maps, tala_tools, artifacts_tools, tala_api_capability, tala_artifacts, t...",
+   "fix": "every crate built on tala_location_runtime, tala_matrix_delivery, tala_matrix_posts, tala_mx, tala_pins_runtime, tala_config, tala_spool, tala_core, tala_connections, immich_tools, maps_tools, mcp_tool_args, tala_delegate_tools, tala_maps, tala_tools, artifacts_tools, tala_api_capability, tala_artifacts, tala_browser_runtime, tala_command_runtime, tala_command_worker, tala_conversation_settings, tala_conversations, tala_decisions_runtime, tala_fx, tala_ids, tala_media_runtime, tala_owner_requests, tala_print_runtime, tala_room_ops, tala_schedule_ops, tala_scheduled_tasks, tala_schedules, tala_session_delivery, tala_session_sandbox, tala_session_store, tala_stores recompiled after it changed; an edit low in the dependency graph rebuilds the most",
+   "failure": false,
+   "count": 1,
+   "compile_ms": 5480,
+   "crates": [
+    "tala_conversation_tools"
+   ],
+   "costliest_crates": [
+    "tala_conversation_tools"
+   ]
+  }
+ ],
+ "not_cached": [
+  {
+   "kind": "",
+   "reason": "adaptive active",
+   "count": 1430,
+   "expected": false
+  },
+  {
+   "kind": "",
+   "reason": "adaptive seed",
+   "count": 704,
+   "expected": false
+  }
+ ],
+ "keeps_missing": []
+}

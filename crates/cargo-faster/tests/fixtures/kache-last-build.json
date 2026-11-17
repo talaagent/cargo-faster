@@ -1,0 +1,86 @@
+{
+ "schema_version": 1,
+ "command": "stats",
+ "success": true,
+ "summary": {
+  "cache_efficiency_pct": 66.4,
+  "dups": 36,
+  "errors": 5,
+  "fallbacks": 0,
+  "hit_rate_pct": 81.1,
+  "local_hits": 510,
+  "misses": 83,
+  "passthroughs": 1375,
+  "prefetch_hits": 0,
+  "probes": 0,
+  "remote_hits": 0,
+  "skipped": 0,
+  "store_failures": 0,
+  "time_saved_ms": 389007,
+  "total_crates": 629,
+  "total_duration_ms": 421011,
+  "weighted_hit_rate_pct": 66.4
+ },
+ "bypass": {
+  "direct_passthroughs": 1375,
+  "edit_rebuilds": 1375,
+  "fallbacks": 0,
+  "passthroughs": 1375,
+  "probes": 0,
+  "reasons": [
+   {
+    "count": 979,
+    "failures": 0,
+    "max_elapsed_ms": 45806,
+    "reason": "adaptive active",
+    "result": "passthrough",
+    "route": "direct"
+   },
+   {
+    "count": 396,
+    "failures": 0,
+    "max_elapsed_ms": 40867,
+    "reason": "adaptive seed",
+    "result": "passthrough",
+    "route": "direct"
+   }
+  ],
+  "skipped": 0,
+  "slowest": [],
+  "uncached_compile_time_ms": 2891685,
+  "uncached_compiles": 1375
+ },
+ "timing": {
+  "avg_dep_info_ms": 90.7,
+  "avg_hit_ms": 91.1,
+  "avg_hit_overhead_ms": 91.1,
+  "avg_key_ms": 11.6,
+  "avg_lookup_ms": 0.3,
+  "avg_miss_ms": 2029.8,
+  "avg_restore_ms": 0.5,
+  "avg_startup_ms": 6.5,
+  "avg_store_ms": 4.5,
+  "avg_unattributed_ms": 66.7,
+  "avg_wait_ms": 58.7,
+  "dep_info_runs": 230,
+  "hit_time_ms": 46440,
+  "miss_compile_time_ms": 196950,
+  "miss_time_ms": 241549,
+  "prediction_mismatches": 0,
+  "total_dep_info_ms": 20858,
+  "total_flight_wait_ms": 0,
+  "total_key_ms": 7324,
+  "total_lookup_ms": 165,
+  "total_permit_wait_ms": 36916,
+  "total_restore_ms": 242,
+  "total_startup_ms": 4060,
+  "total_store_ms": 536,
+  "total_unattributed_ms": 41970,
+  "total_wait_ms": 36916
+ },
+ "suggestions": [
+  "Average cache hit overhead is 91 ms: check disk I/O or consider faster storage",
+  "Prefetch contributed <20% of hits \u2014 check namespace/shard configuration",
+  "101 unexplained misses (84% of misses) have no recorded cause"
+ ]
+}
