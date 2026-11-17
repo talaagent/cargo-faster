@@ -51,6 +51,7 @@ pub const GUIDE_ANCHORS: &[&str] = &[
     "rebuild-fan-out",
     "splitting-a-big-crate",
     "dependencies-and-features",
+    "dev-dependency-features-split-the-build",
     "incremental-compilation",
     "sccache-and-kache",
     "worktrees-and-cold-target-directories",
