@@ -223,6 +223,24 @@ pub struct Rebuilt {
     /// Summed seconds of the members' units.
     #[serde(rename = "busy_s")]
     pub busy: f64,
+    /// Why this looks like a first build in its target directory rather
+    /// than an edit: then the roots are where the graph starts, not edits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_build: Option<FirstBuild>,
+}
+
+/// What says a build was a first build in its target directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum FirstBuild {
+    /// The target directory had no fingerprints for any workspace crate
+    /// before the build, and had them after (the caller knows this, see
+    /// [`Extra::first_build`]).
+    NoFingerprints,
+    /// No workspace crate in the report was fresh, and the recompiled
+    /// crates start from two or more crates with no workspace dependency.
+    FromLeaves,
 }
 
 /// What else the analysis can use besides the report.
@@ -233,6 +251,10 @@ pub struct Extra<'a> {
     pub baseline: Option<&'a Timings>,
     /// The workspace's crates and their dependencies.
     pub workspace: Option<&'a Workspace>,
+    /// Whether the build was the first in its target directory: `Some(true)`
+    /// when it had no fingerprints for the workspace before, `Some(false)`
+    /// after a known edit, `None` to tell from the report.
+    pub first_build: Option<bool>,
 }
 
 /// Analyze a report on its own.
@@ -278,7 +300,9 @@ pub fn analyze_with(t: &Timings, extra: Extra<'_>) -> Analysis {
     per_unit(&mut a, &ran);
     a.linked = linked(&ran, end);
     a.slowdown = extra.baseline.and_then(|b| slowdown(&ran, b));
-    a.rebuilt = extra.workspace.and_then(|w| rebuilt(&ran, w));
+    a.rebuilt = extra
+        .workspace
+        .and_then(|w| rebuilt(&ran, &t.units, w, extra.first_build));
     a
 }
 
@@ -538,7 +562,12 @@ fn slowdown(ran: &[&Unit], before: &Timings) -> Option<Slowdown> {
     })
 }
 
-fn rebuilt(ran: &[&Unit], ws: &Workspace) -> Option<Rebuilt> {
+fn rebuilt(
+    ran: &[&Unit],
+    units: &[Unit],
+    ws: &Workspace,
+    first_build: Option<bool>,
+) -> Option<Rebuilt> {
     let compiled: BTreeSet<&str> = ran
         .iter()
         .filter(|u| u.kind() != Kind::BuildScript && ws.deps.contains_key(&u.name))
@@ -555,10 +584,24 @@ fn rebuilt(ran: &[&Unit], ws: &Workspace) -> Option<Rebuilt> {
                 .is_none_or(|d| !d.iter().any(|d| compiled.contains(d.as_str())))
         })
         .map(|c| (*c).to_owned())
-        .collect();
+        .collect::<Vec<String>>();
+    let fresh_members = units.iter().any(|u| {
+        u.duration <= 0.0 && u.kind() != Kind::BuildScript && ws.deps.contains_key(&u.name)
+    });
+    let from_leaves = !fresh_members
+        && roots.len() >= 2
+        && roots
+            .iter()
+            .all(|r| ws.deps.get(r).is_none_or(BTreeSet::is_empty));
+    let first_build = match first_build {
+        Some(true) => Some(FirstBuild::NoFingerprints),
+        None if from_leaves => Some(FirstBuild::FromLeaves),
+        _ => None,
+    };
     Some(Rebuilt {
         crates: compiled.len(),
         roots,
+        first_build,
         busy: ran
             .iter()
             .filter(|u| compiled.contains(u.name.as_str()))
@@ -685,6 +728,7 @@ mod tests {
             Extra {
                 baseline: None,
                 workspace: Some(&ws),
+                first_build: None,
             },
         );
         let r = a.rebuilt.unwrap();
@@ -744,6 +788,7 @@ mod tests {
             Extra {
                 baseline: Some(&check),
                 workspace: None,
+                first_build: None,
             },
         );
         assert!((a.wall - 554.0).abs() < 1e-9);

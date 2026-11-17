@@ -117,6 +117,7 @@ fn build_compared_with_check() {
         Extra {
             baseline: Some(&check),
             workspace: Some(&ws),
+            first_build: None,
         },
     );
 

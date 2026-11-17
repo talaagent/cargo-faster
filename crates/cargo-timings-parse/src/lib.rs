@@ -51,8 +51,8 @@ mod analysis;
 mod files;
 
 pub use analysis::{
-    Analysis, Extra, KindTime, Linked, PathStep, Rebuilt, Serial, Slowdown, UnitSecs, UnitTime,
-    Waited, Workspace, analyze, analyze_with, critical_path, path_edges,
+    Analysis, Extra, FirstBuild, KindTime, Linked, PathStep, Rebuilt, Serial, Slowdown, UnitSecs,
+    UnitTime, Waited, Workspace, analyze, analyze_with, critical_path, path_edges,
 };
 #[cfg(feature = "std")]
 pub use files::{check_before, newest_report, reports};

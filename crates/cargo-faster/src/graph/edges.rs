@@ -1,5 +1,6 @@
 //! Dependency edges that are cheap to cut: a crate that uses only a few
-//! items from a big workspace crate it depends on.
+//! items from a workspace crate it depends on, none at all (an unused
+//! dependency), or only re-exports some of it to its own dependents.
 //!
 //! The item count reads the dependent's source for paths that start with
 //! the dependency's name (`b::x::Y`, `use b::{x, y::Z}`). An item is the
@@ -19,9 +20,6 @@ use std::path::Path;
 /// A dependent that uses at most this many items is cheap to cut loose.
 pub const FEW_ITEMS: usize = 5;
 
-/// A dependency this big is worth cutting.
-pub const CUT_LINES: usize = 5_000;
-
 /// A cut that saves this many rebuilds on an edit is worth reporting.
 pub const MIN_SAVED: usize = 3;
 
@@ -35,6 +33,9 @@ pub struct Used {
     pub items: BTreeSet<String>,
     /// A glob or an alias hides what's used.
     pub opaque: bool,
+    /// What `pub use krate::...` re-exports, as paths inside the
+    /// dependency (`email` for `pub use krate::{email, ..}`).
+    pub reexports: BTreeSet<String>,
 }
 
 /// `from -> to`: `from` depends on `to`.
@@ -48,6 +49,11 @@ pub struct Edge {
     pub items: Vec<String>,
     /// The count is unreliable (see [`Used::opaque`]).
     pub opaque: bool,
+    /// What `from` re-exports from `to` with `pub use`.
+    pub reexports: Vec<String>,
+    /// `from`'s direct dependents that use those re-exports: they would
+    /// depend on `to` themselves without this edge.
+    pub reexport_users: Vec<String>,
     /// Lines of Rust in `to`.
     pub to_lines: usize,
     /// Workspace crates an edit to `to` rebuilds now.
@@ -65,15 +71,33 @@ impl Edge {
         self.before.saturating_sub(self.after)
     }
 
-    /// Few items from a big crate, and the cut saves rebuilds or critical
-    /// path time.
+    /// The cut saves rebuilds or critical path time. The dependency's
+    /// size doesn't matter: what an edit to it rebuilds does.
+    fn worth(&self) -> bool {
+        self.saved() >= MIN_SAVED || self.critical_s.is_some_and(|s| s >= MIN_PATH_S)
+    }
+
+    /// Few items (none re-exported), and the cut is worth it.
     #[must_use]
     pub fn cheap(&self) -> bool {
         !self.opaque
             && !self.items.is_empty()
             && self.items.len() <= FEW_ITEMS
-            && self.to_lines >= CUT_LINES
-            && (self.saved() >= MIN_SAVED || self.critical_s.is_some_and(|s| s >= MIN_PATH_S))
+            && self.reexport_users.is_empty()
+            && self.worth()
+    }
+
+    /// No item used at all: the dependency line can go.
+    #[must_use]
+    pub fn unused(&self) -> bool {
+        !self.opaque && self.items.is_empty()
+    }
+
+    /// `from` re-exports some of `to` to dependents that use it, and
+    /// importing from `to` directly in those would still save rebuilds.
+    #[must_use]
+    pub fn reexported(&self) -> bool {
+        !self.opaque && !self.reexport_users.is_empty() && self.worth()
     }
 }
 
@@ -268,15 +292,33 @@ pub fn used_items(src: &str, krate: &str) -> Used {
     let mut i = 0;
     while i < toks.len() {
         let after_sep = i > 0 && toks[i - 1] == Tok::Sep;
-        // `::krate` is absolute; `a::krate` is something else.
-        let absolute = after_sep && !matches!(i.checked_sub(2).map(|j| &toks[j]), Some(Tok::Id(_)));
+        // `::krate` (and `use ::krate`) is absolute; `a::krate` is
+        // something else.
+        let absolute = after_sep
+            && !matches!(i.checked_sub(2).map(|j| &toks[j]), Some(Tok::Id(x)) if x != "use");
         if is_id(toks.get(i), krate) && (!after_sep || absolute) {
+            // `pub use krate::...` (or `pub use ::krate::...`), but not
+            // `pub(crate) use`: visible to the crate's own dependents.
+            let head = if absolute { i - 1 } else { i };
+            let public =
+                head >= 2 && is_id(toks.get(head - 1), "use") && is_id(toks.get(head - 2), "pub");
+            let linked = head >= 2
+                && is_id(toks.get(head - 1), "crate")
+                && is_id(toks.get(head - 2), "extern");
             match toks.get(i + 1) {
                 Some(Tok::Sep) => {
                     i += 2;
-                    tree(&toks, &mut i, &[], &mut used);
+                    let mut here = Used::default();
+                    tree(&toks, &mut i, &[], &mut here);
+                    if public {
+                        used.reexports.extend(here.items.iter().cloned());
+                    }
+                    used.items.extend(here.items);
+                    used.opaque |= here.opaque;
                     continue;
                 }
+                // `extern crate krate;` links it for its side effects.
+                _ if linked => used.opaque = true,
                 Some(Tok::Id(a)) if a == "as" => used.opaque = true,
                 _ => {}
             }
@@ -352,6 +394,45 @@ pub fn fanout_without(rdeps: &BTreeMap<String, BTreeSet<String>>, from: &str, to
     transitive(&cut, to).len()
 }
 
+/// Rebuilds an edit to `to` causes when `from` no longer depends on it and
+/// `users` (dependents of `from` that use what it re-exported from `to`)
+/// depend on `to` directly instead.
+#[must_use]
+pub fn fanout_rewired(
+    rdeps: &BTreeMap<String, BTreeSet<String>>,
+    from: &str,
+    to: &str,
+    users: &[String],
+) -> usize {
+    let mut cut = rdeps.clone();
+    let direct = cut.entry(to.to_owned()).or_default();
+    direct.remove(from);
+    direct.extend(users.iter().cloned());
+    transitive(&cut, to).len()
+}
+
+/// Which of `dependents` (name, what it uses from the re-exporting crate)
+/// use one of `reexports` (paths inside the dependency): a re-export is
+/// reached by its last segment, at the re-exporting crate's root or in a
+/// module of it.
+#[must_use]
+pub fn reexport_users(reexports: &[String], dependents: &[(String, Used)]) -> Vec<String> {
+    let names: BTreeSet<&str> = reexports
+        .iter()
+        .filter_map(|r| r.rsplit("::").next())
+        .collect();
+    dependents
+        .iter()
+        .filter(|(_, u)| {
+            u.opaque
+                || u.items
+                    .iter()
+                    .any(|it| it.split("::").any(|seg| names.contains(seg)))
+        })
+        .map(|(n, _)| n.clone())
+        .collect()
+}
+
 /// The name `from`'s code uses for `to`, when `from` depends on `to` as a
 /// normal dependency.
 fn extern_name(m: &Metadata, from: &Package, to: &Package) -> Option<String> {
@@ -395,14 +476,39 @@ pub fn gather(m: &Metadata, pairs: &[(String, String, Option<f64>)]) -> Vec<Edge
         let to_lines = *lines
             .entry(t.name.as_str())
             .or_insert_with(|| count_lines(&src_dir(t)).0);
+        let reexports: Vec<String> = used.reexports.into_iter().collect();
+        let mut users = Vec::new();
+        if !reexports.is_empty() {
+            let dependents: Vec<(String, Used)> = normal
+                .get(from.as_str())
+                .into_iter()
+                .flatten()
+                .filter_map(|d| {
+                    let p = *members.get(d.as_str())?;
+                    let name = extern_name(m, p, f)?;
+                    let src = sources
+                        .entry(p.name.as_str())
+                        .or_insert_with(|| read_sources(&src_dir(p)));
+                    Some((d.clone(), used_items(src, &name)))
+                })
+                .collect();
+            users = reexport_users(&reexports, &dependents);
+        }
+        let after = if users.is_empty() {
+            fanout_without(&normal, from, to)
+        } else {
+            fanout_rewired(&normal, from, to, &users)
+        };
         out.push(Edge {
             from: from.clone(),
             to: to.clone(),
             items: used.items.into_iter().collect(),
             opaque: used.opaque,
+            reexports,
+            reexport_users: users,
             to_lines,
             before: transitive(&normal, to).len(),
-            after: fanout_without(&normal, from, to),
+            after,
             critical_s: *critical_s,
         });
     }
@@ -433,74 +539,146 @@ fn lines_k(n: usize) -> String {
     }
 }
 
-/// Findings for the cheap edges, most rebuilds saved first.
+/// Most rebuilds saved first, then fewest items, then most time on the
+/// critical path.
+fn rank(a: &Edge, b: &Edge) -> core::cmp::Ordering {
+    b.saved()
+        .cmp(&a.saved())
+        .then_with(|| a.items.len().cmp(&b.items.len()))
+        .then_with(|| {
+            b.critical_s
+                .unwrap_or(0.0)
+                .total_cmp(&a.critical_s.unwrap_or(0.0))
+        })
+        .then_with(|| b.to_lines.cmp(&a.to_lines))
+        .then_with(|| (&a.from, &a.to).cmp(&(&b.from, &b.to)))
+}
+
+fn severity(e: &Edge) -> Severity {
+    if (e.saved() >= 10 && e.saved() * 2 >= e.before) || e.critical_s.is_some_and(|s| s >= 5.0) {
+        Severity::Medium
+    } else {
+        Severity::Low
+    }
+}
+
+fn rebuilds(e: &Edge) -> String {
+    format!(
+        "An edit to {} rebuilds {} workspace crates; without this edge it would rebuild {}.",
+        e.to, e.before, e.after
+    )
+}
+
+/// Findings for the edges worth cutting: unused dependencies, re-exports
+/// and cheap edges, each kind ranked by rebuilds saved, then fewest items
+/// used, at most `limit` of each.
 #[must_use]
 pub fn findings(edges: &[Edge], limit: usize) -> Vec<Finding> {
-    let mut cheap: Vec<&Edge> = edges.iter().filter(|e| e.cheap()).collect();
-    cheap.sort_by(|a, b| {
-        b.saved()
-            .cmp(&a.saved())
-            .then_with(|| {
-                b.critical_s
-                    .unwrap_or(0.0)
-                    .total_cmp(&a.critical_s.unwrap_or(0.0))
-            })
-            .then_with(|| b.to_lines.cmp(&a.to_lines))
-            .then_with(|| (&a.from, &a.to).cmp(&(&b.from, &b.to)))
-    });
-    cheap
-        .into_iter()
-        .take(limit)
-        .map(|e| {
-            let n = e.items.len();
-            let items = if n == 1 { "item" } else { "items" };
-            let path = e
-                .critical_s
-                .map(|s| format!(", {s:.1}s on the critical path"))
-                .unwrap_or_default();
-            let severity = if (e.saved() >= 10 && e.saved() * 2 >= e.before)
-                || e.critical_s.is_some_and(|s| s >= 5.0)
-            {
-                Severity::Medium
-            } else {
-                Severity::Low
-            };
-            let rust = e.to.replace('-', "_");
-            let list: Vec<String> = e.items.iter().map(|i| format!("`{rust}::{i}`")).collect();
+    let pick = |keep: fn(&Edge) -> bool| {
+        let mut v: Vec<&Edge> = edges.iter().filter(|e| keep(e)).collect();
+        v.sort_by(|a, b| rank(a, b));
+        v.truncate(limit);
+        v
+    };
+    let mut out = Vec::new();
+    for e in pick(Edge::unused) {
+        out.push(
+            Finding::new(
+                "unused-dependency",
+                severity(e),
+                format!("{} depends on {} but doesn't use it", e.from, e.to),
+                "unused-dependencies",
+            )
+            .saw(format!(
+                "{}'s source names nothing from {} ({} lines). {}",
+                e.from, e.to, e.to_lines, rebuilds(e)
+            ))
+            .why(format!(
+                "An unused dependency still makes {} wait for {} to compile, and rebuild whenever it changes.",
+                e.from, e.to
+            ))
+            .fix(format!(
+                "Delete {} from {}'s [dependencies] and build. If only its tests, examples or benches use it, move it to [dev-dependencies]. A macro that expands to paths into {} isn't seen here: `cargo machete` or `cargo +nightly udeps` confirm it's unused. The tradeoff is none, if it builds.",
+                e.to, e.from, e.to
+            )),
+        );
+    }
+    for e in pick(Edge::reexported) {
+        let rust = e.to.replace('-', "_");
+        let list: Vec<String> = e
+            .reexports
+            .iter()
+            .map(|i| format!("`{rust}::{i}`"))
+            .collect();
+        let users = e.reexport_users.len();
+        out.push(
+            Finding::new(
+                "reexported-dependency",
+                severity(e),
+                format!("{} re-exports {} from {} for {users} {}", e.from, list.join(", "), e.to, if users == 1 { "crate" } else { "crates" }),
+                "cutting-a-dependency-edge",
+            )
+            .saw(format!(
+                "{} has `pub use` of {}, used through it by {}. An edit to {} rebuilds {} workspace crates; if those crates depended on {} directly and {} didn't, it would rebuild {}.",
+                e.from, list.join(", "), e.reexport_users.join(", "), e.to, e.before, e.to, e.from, e.after
+            ))
+            .why(format!(
+                "A re-export ties every crate that depends on {} to {}, whether or not it uses the re-exported items.",
+                e.from, e.to
+            ))
+            .fix(format!(
+                "Import from the owning crate directly: in {}, depend on {} and use `{rust}::...` in place of the re-export, then drop the `pub use` and {} from {}'s [dependencies] if nothing else uses it. The tradeoff is one more dependency line in each of those crates.",
+                e.reexport_users.join(", "), e.to, e.to, e.from
+            )),
+        );
+    }
+    for e in pick(Edge::cheap) {
+        let n = e.items.len();
+        let items = if n == 1 { "item" } else { "items" };
+        let path = e
+            .critical_s
+            .map(|s| format!(", {s:.1}s on the critical path"))
+            .unwrap_or_default();
+        let rust = e.to.replace('-', "_");
+        let list: Vec<String> = e.items.iter().map(|i| format!("`{rust}::{i}`")).collect();
+        out.push(
             Finding::new(
                 "cheap-to-cut-edge",
-                severity,
+                severity(e),
                 format!("{} uses {n} {items} from {} ({}{path})", e.from, e.to, lines_k(e.to_lines)),
                 "cutting-a-dependency-edge",
             )
             .saw(format!(
-                "{} depends on {} ({} lines) but uses only {}. An edit to {} rebuilds {} workspace crates; without this edge it would rebuild {}.",
-                e.from, e.to, e.to_lines, list.join(", "), e.to, e.before, e.after
+                "{} depends on {} ({} lines) but uses only {}. {}",
+                e.from, e.to, e.to_lines, list.join(", "), rebuilds(e)
             ))
             .why(format!(
                 "A dependency makes {} wait for all of {} to compile and rebuild whenever it changes, however little of it {} uses.",
                 e.from, e.to, e.from
             ))
             .fix(format!(
-                "Move {} down into a small crate that both can depend on (or one {} already depends on), then drop {} from {}'s [dependencies]. The tradeoff is one more crate, or code living away from its neighbors.",
+                "Move {} down into a small crate that both can depend on (or one {} already depends on), or copy a constant and test that the copies agree, then drop {} from {}'s [dependencies] (if only tests use it, make it a dev-dependency). The tradeoff is one more crate, or code living away from its neighbors.",
                 if n == 1 { "it" } else { "them" }, e.from, e.to, e.from
-            ))
-        })
-        .collect()
+            )),
+        );
+    }
+    out
 }
 
-/// A table of edges: every one given, or only the cheap ones.
+/// A table of edges: every one given, or only those worth cutting.
 #[must_use]
 pub fn detail(edges: &[Edge], all: bool) -> Option<String> {
     let rows: Vec<Vec<String>> = edges
         .iter()
-        .filter(|e| all || e.cheap())
+        .filter(|e| all || e.cheap() || e.unused() || e.reexported())
         .map(|e| {
             vec![
                 if e.opaque {
                     "?".to_owned()
-                } else {
+                } else if e.reexport_users.is_empty() {
                     e.items.len().to_string()
+                } else {
+                    format!("{} (re-export)", e.items.len())
                 },
                 format!("{} -> {}", e.before, e.after),
                 format!("{} -> {}", e.from, e.to),
@@ -599,6 +777,8 @@ mod tests {
             to: "tala-session-store".into(),
             items: items.iter().map(|s| (*s).to_owned()).collect(),
             opaque: false,
+            reexports: Vec::new(),
+            reexport_users: Vec::new(),
             to_lines,
             before,
             after,
@@ -625,15 +805,14 @@ mod tests {
                 .contains("rebuilds 79 workspace crates; without this edge it would rebuild 28")
         );
         assert!(f[0].saw.contains("`tala_session_store::SessionId`"));
-        // Too many items, too small, nothing saved, or unreliable: no finding.
+        // Too many items, nothing saved, or unreliable: no finding.
         let many = edge(&["A", "B", "C", "D", "E", "F"], 24_000, 79, 28);
-        let small = edge(&["A"], 800, 79, 28);
         let same = edge(&["A"], 24_000, 79, 79);
         let opaque = Edge {
             opaque: true,
             ..edge(&["A"], 24_000, 79, 28)
         };
-        assert_eq!(findings(&[many, small, same.clone(), opaque], 5).len(), 0);
+        assert_eq!(findings(&[many, same.clone(), opaque], 5).len(), 0);
         // On the critical path, even when other crates still reach it.
         let slow = Edge {
             critical_s: Some(3.0),
@@ -644,6 +823,117 @@ mod tests {
             Severity::Low
         );
         assert!(detail(&[slow], false).unwrap().contains("79 -> 79"));
+    }
+
+    /// tala-core -> tala-hook-wire (#52): one constant from a small crate,
+    /// ranked by rebuilds saved, not by the dependency's size.
+    #[test]
+    fn small_dependencies_and_ranking() {
+        let one = Edge {
+            from: "tala-core".into(),
+            to: "tala-hook-wire".into(),
+            ..edge(&["resurrect::TOOL"], 120, 91, 78)
+        };
+        let big = edge(&["A", "B", "C"], 24_000, 79, 74);
+        let f = findings(&[big, one], 5);
+        assert_eq!(f.len(), 2);
+        assert_eq!(
+            f[0].title,
+            "tala-core uses 1 item from tala-hook-wire (120 lines)"
+        );
+        assert!(
+            f[0].saw
+                .contains("rebuilds 91 workspace crates; without this edge it would rebuild 78")
+        );
+        // Same rebuilds saved: fewer items first.
+        let two = edge(&["A", "B"], 24_000, 79, 74);
+        let one = edge(&["A"], 300, 79, 74);
+        let f = findings(&[two, one], 1);
+        assert!(f[0].title.contains("uses 1 item"), "{}", f[0].title);
+    }
+
+    #[test]
+    fn unused_dependencies() {
+        let e = Edge {
+            from: "tala-mx".into(),
+            to: "tala-spool".into(),
+            ..edge(&[], 900, 12, 11)
+        };
+        assert!(e.unused() && !e.cheap());
+        let f = findings(&[e], 5);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].id, "unused-dependency");
+        assert_eq!(
+            f[0].title,
+            "tala-mx depends on tala-spool but doesn't use it"
+        );
+        assert!(f[0].fix.contains("cargo machete"));
+        assert!(detail(&[edge(&[], 900, 12, 11)], false).is_some());
+        // A glob or `extern crate` hides what's used: not unused.
+        assert!(used_items("extern crate b;", "b").opaque);
+        let opaque = Edge {
+            opaque: true,
+            ..edge(&[], 900, 12, 11)
+        };
+        assert_eq!(findings(&[opaque], 5), []);
+    }
+
+    /// tala-integrations' `pub use tala_email::{email, mailer}` (#53).
+    #[test]
+    fn reexports() {
+        let u = used_items(
+            "pub use b::{email, mailer}; pub(crate) use b::Hidden; pub use ::b::cfg::Config; use b::Own;",
+            "b",
+        );
+        assert_eq!(
+            u.reexports.iter().collect::<Vec<_>>(),
+            ["cfg::Config", "email", "mailer"]
+        );
+        let used = |items: &[&str]| Used {
+            items: items.iter().map(|s| (*s).to_owned()).collect(),
+            ..Used::default()
+        };
+        let reexports = ["email".to_owned(), "cfg::Config".to_owned()];
+        let users = reexport_users(
+            &reexports,
+            &[
+                ("a".into(), used(&["email::send"])),
+                ("b".into(), used(&["Other"])),
+                ("c".into(), used(&["Config"])),
+            ],
+        );
+        assert_eq!(users, ["a", "c"]);
+        // email <- integrations <- {a, b}; a <- c: without the edge, and a
+        // depending on email directly, an edit to email rebuilds a and c.
+        let rdeps: BTreeMap<String, BTreeSet<String>> = [
+            ("email", &["integrations"][..]),
+            ("integrations", &["a", "b"]),
+            ("a", &["c"]),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v.iter().map(|s| (*s).to_owned()).collect()))
+        .collect();
+        assert_eq!(fanout_without(&rdeps, "integrations", "email"), 0);
+        assert_eq!(
+            fanout_rewired(&rdeps, "integrations", "email", &["a".to_owned()]),
+            2
+        );
+        let e = Edge {
+            from: "tala-integrations".into(),
+            to: "tala-email".into(),
+            reexports: vec!["email".into(), "mailer".into()],
+            reexport_users: vec!["tala-admin".into()],
+            ..edge(&["email", "mailer"], 7215, 17, 6)
+        };
+        assert!(e.reexported() && !e.cheap());
+        let f = findings(&[e], 5);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].id, "reexported-dependency");
+        assert!(
+            f[0].fix
+                .starts_with("Import from the owning crate directly")
+        );
+        assert!(f[0].saw.contains("would rebuild 6"));
     }
 
     const META: &str = r#"{
@@ -671,7 +961,7 @@ mod tests {
         let meta = META.replace("/w", &root.display().to_string());
         let m = Metadata::parse(&meta).unwrap();
         for (krate, src) in [
-            ("store", "pub struct Store;\n".repeat(CUT_LINES)),
+            ("store", "pub struct Store;\n".repeat(5000)),
             // `store` is renamed to `kv` in config's Cargo.toml.
             (
                 "config",
@@ -688,7 +978,7 @@ mod tests {
         let e = gather(&m, &pairs);
         assert_eq!(e.len(), 1);
         assert_eq!(e[0].items, ["Error", "Store"]);
-        assert_eq!(e[0].to_lines, CUT_LINES);
+        assert_eq!(e[0].to_lines, 5000);
         assert_eq!((e[0].before, e[0].after), (3, 0));
         assert_eq!(
             findings(&e, 5)[0].title,
@@ -696,5 +986,22 @@ mod tests {
         );
         // A dev-dependency isn't an edge an edit rebuilds through.
         assert_eq!(gather(&m, &[("app".into(), "store".into(), None)]).len(), 0);
+        // web uses nothing from config: an unused dependency.
+        let e = gather(&m, &[("web".into(), "config".into(), None)]);
+        assert!(e[0].unused());
+        assert_eq!((e[0].before, e[0].after), (2, 1));
+        // config re-exports a module of store that app uses: without the
+        // edge app depends on store itself, so an edit still rebuilds it.
+        std::fs::write(
+            root.join("config/src/lib.rs"),
+            "pub use kv::{mail, Store};\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("app/src/lib.rs"), "use config::mail::send;\n").unwrap();
+        let e = gather(&m, &pairs);
+        assert_eq!(e[0].reexports, ["Store", "mail"]);
+        assert_eq!(e[0].reexport_users, ["app"]);
+        assert_eq!((e[0].before, e[0].after), (3, 1));
+        assert_eq!(findings(&e, 5), []);
     }
 }

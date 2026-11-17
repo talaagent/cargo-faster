@@ -366,7 +366,7 @@ fn run(opts: &Opts) -> Result<Report, Error> {
     {
         return Ok(Report {
             workspace: None,
-            sections: vec![timings_file_section(None, file, baseline.as_deref())?],
+            sections: vec![timings_file_section(None, file, baseline.as_deref(), None)?],
             skipped: Vec::new(),
         });
     }
@@ -595,7 +595,7 @@ fn timings_section(
             Some(f) => f.to_path_buf(),
             None => timings::newest_report(&ctx.target_dir()).ok_or(Error::NoTimings)?,
         };
-        let mut s = timings_file_section(Some(ctx), &path, baseline)?;
+        let mut s = timings_file_section(Some(ctx), &path, baseline, None)?;
         let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
         if let Some(written) = modified(&path) {
             let age = SystemTime::now()
@@ -622,8 +622,8 @@ fn timings_section(
         }
         return Ok(s);
     };
-    let (path, facts, failed) = timings_run(ctx, r)?;
-    let mut s = timings_file_section(Some(ctx), &path, baseline)?;
+    let (path, facts, failed, first_build) = timings_run(ctx, r)?;
+    let mut s = timings_file_section(Some(ctx), &path, baseline, first_build)?;
     for (i, f) in facts.into_iter().enumerate() {
         s.facts.insert(i, f);
     }
@@ -648,8 +648,12 @@ type Failed = Option<(i32, String)>;
 
 /// Run the build with `--timings` (after the probe edit, for `--edit`)
 /// and return the report it wrote, with facts saying what was measured,
-/// and how the build failed if it did.
-fn timings_run(ctx: &Context, r: &TimingsRun) -> Result<(PathBuf, Vec<Fact>, Failed), Error> {
+/// how the build failed if it did, and whether it was the first build in
+/// its target directory (see [`timings::Extra::first_build`]).
+fn timings_run(
+    ctx: &Context,
+    r: &TimingsRun,
+) -> Result<(PathBuf, Vec<Fact>, Failed, Option<bool>), Error> {
     use timings::run::{Edit, Probe, edit_target, probe_text};
     let nextest = tests::Inputs::gather(ctx).nextest_installed;
     let args = r.build.args(nextest);
@@ -711,6 +715,7 @@ fn timings_run(ctx: &Context, r: &TimingsRun) -> Result<(PathBuf, Vec<Fact>, Fai
             ),
         });
     }
+    let fingerprints_before = fingerprinted(ctx);
     let start = SystemTime::now();
     let out = build(ctx, r.nice, &cargo)
         .args(&args)
@@ -745,7 +750,25 @@ fn timings_run(ctx: &Context, r: &TimingsRun) -> Result<(PathBuf, Vec<Fact>, Fai
             .into(),
         });
     };
-    Ok((path, facts, failed))
+    // No fingerprints before and some after: this build made the first
+    // ones. None after either: they live elsewhere (a build-dir), so say
+    // nothing and let the report tell.
+    let first_build = if target.is_some() {
+        Some(false)
+    } else {
+        (!fingerprints_before && fingerprinted(ctx)).then_some(true)
+    };
+    Ok((path, facts, failed, first_build))
+}
+
+/// Whether the target directory has fingerprints for a workspace member.
+fn fingerprinted(ctx: &Context) -> bool {
+    let members: Vec<&str> = ctx
+        .metadata
+        .as_ref()
+        .map(|m| m.members().map(|p| p.name.as_str()).collect())
+        .unwrap_or_default();
+    timings::run::has_fingerprints(&ctx.target_dir(), &members)
 }
 
 /// The newest report in the target directory, if it was written after
@@ -883,7 +906,7 @@ fn tests_sections(
         Some(_) if build_fresh => {}
         Some(path) => report
             .sections
-            .push(timings_file_section(Some(ctx), &path, None)?),
+            .push(timings_file_section(Some(ctx), &path, None, None)?),
         None => report.skipped.push(Fact {
             key: "timings".into(),
             value: "the test build wrote no cargo-timing.html".into(),
@@ -895,10 +918,13 @@ fn tests_sections(
 /// Read a report; with a workspace, join the cache wrapper's records,
 /// compare with a baseline (given, or the newest earlier check report when
 /// this one is a build) and count the workspace crates it rebuilt.
+/// `first_build` is what the run knows about the target directory (see
+/// [`timings::Extra::first_build`]).
 fn timings_file_section(
     ctx: Option<&Context>,
     path: &Path,
     baseline: Option<&Path>,
+    first_build: Option<bool>,
 ) -> Result<Section, Error> {
     let read = |p: &Path| -> Result<timings::Timings, Error> {
         let html =
@@ -926,6 +952,7 @@ fn timings_file_section(
         timings::Extra {
             baseline: base.as_ref().map(|(_, b)| b),
             workspace: ws.as_ref(),
+            first_build,
         },
         &runs,
     );

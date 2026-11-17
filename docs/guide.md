@@ -494,19 +494,30 @@ That gives you a simple rule: **the crates you edit most should have the fewest 
 
 To measure the rebuild instead of estimating it, `cargo faster timings --edit <crate>` makes the edit for you. It brings the build up to date, adds a public function to the crate, times the build that follows, and then removes the function. With `--body`, the edit changes only a private function's body, so the crate's API stays the same. Dependents still rebuild after a body edit, but the gap between the two times is what changing the API costs them. Use `--cmd build`, `--cmd clippy` or `--cmd test` to time the build you actually wait on.
 
+A timeline from a first build in a new target directory compiles every workspace crate, so it looks like an edit that rebuilt everything. `cargo faster timings` says so (`first-build`) instead of reporting fan-out: when it ran the build and found no fingerprints for workspace crates before it, or when the rebuilt crates start from several workspace leaves and none of them was fresh. Time a real edit with `--edit`.
+
 ### Cutting a dependency edge
 
 A dependency is all or nothing. If `tala-config` uses one type from a 24,000-line `tala-session-store`, it still waits for all of `tala-session-store` to compile. Every edit to `tala-session-store` also rebuilds `tala-config`, and everything that depends on `tala-config`. When that one edge is how most of the workspace reaches the big crate, it's also why an edit to the big crate rebuilds most of the workspace.
 
 You can often cut an edge like that cheaply. Move the few items the dependent uses (an ID type, an error enum, a constant) down into a small crate that both sides can depend on, or into a crate the dependent already uses. Then remove the dependency. In one workspace, that took an edit to a session store from rebuilding 79 crates to rebuilding 28. The tradeoff is one more crate, or a type living away from the code it belongs with.
 
+The size of the dependency doesn't decide whether a cut is worth it: what an edit to it rebuilds does. A 100-line crate of constants that 90 crates rebuild with is as worth cutting loose as a big one. When the dependent uses a single constant, copying it (with a test that the copies agree) is often the cheapest cut of all.
+
 `cargo faster rdeps` looks for these edges. It checks the direct dependents of the crates whose edits rebuild the most, and `rdeps <crate>` checks every dependent of that crate. `cargo faster timings` checks each edge on the critical path. For each edge, cargo-faster counts the distinct items the dependent's source names through the dependency's paths (`store::SessionId`, `use store::{config::Limits, open}`). Then it works out how many crates an edit to the dependency would rebuild without that edge. It reports `cheap-to-cut-edge` when:
 
 - the dependent uses at most five items;
-- the dependency is at least 5,000 lines;
 - the cut saves at least three rebuilds, or the dependency spent at least two seconds on the critical path.
 
+The edges are ranked by rebuilds saved, then by fewest items used.
+
 A module imported with `use store::db;` (or re-exported with `pub use` and reached as `crate::db::...`) counts what is used through it, `db::open` and so on. Globs (`use store::*`) and aliases (`use store as s`) hide how much is used, so edges that use them show `?` and aren't flagged. Macros that expand to paths into the dependency aren't seen either. Read the dependent's code before you move anything.
+
+A re-export is a different kind of edge. When `integrations` has `pub use email::{mailer, templates};` and five crates use `integrations::mailer`, dropping the dependency doesn't take an edit to `email` down to zero rebuilds: those five crates still need `email`. cargo-faster finds the dependents that use a re-export, works out what an edit would rebuild if they depended on the owning crate directly, and reports `reexported-dependency` when that still saves rebuilds. The fix is to import from the owning crate directly (`use email::mailer`) and drop the re-export. Moving the items into a small crate doesn't fit here.
+
+### Unused dependencies
+
+A dependency the dependent's source never names is the cheapest edge to cut: delete the line. It still makes the dependent wait for the dependency to compile, and rebuild with it. These lines pile up as code moves between crates. `cargo faster rdeps` and `timings` report `unused-dependency` for an edge with no item used. A macro that expands to paths into the dependency, or code that only a test, example or bench uses, makes a dependency look unused when it isn't, so build after deleting it. [cargo-machete](https://github.com/bnjbvr/cargo-machete) (fast, reads the source) and [cargo-udeps](https://github.com/est31/cargo-udeps) (nightly, asks the compiler) check the whole workspace. If only tests use it, move it to `[dev-dependencies]`.
 
 ### Splitting a big crate
 
