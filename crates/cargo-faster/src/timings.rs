@@ -22,7 +22,7 @@ pub use cargo_timings_parse::{
     Timings, Unit, UnitOf, UnitSecs, UnitTime, Waited, Workspace, check_before, newest_report,
     reports,
 };
-pub use findings::{build_failed, findings};
+pub use findings::{build_failed, findings, token_starved};
 use serde_json::Value;
 use wrapper::{Outcome, WrapperRun};
 
@@ -303,10 +303,13 @@ fn path_table(s: &mut Section, a: &Analysis) {
     } else {
         &["start", "took", "gap", "waited", "unit"]
     };
-    s.details.push(format!(
-        "critical path (each step waited for the one above it; gap: idle after it was ready)\n{}",
-        table(headers, &rows)
-    ));
+    let title = if findings::token_starved(a) {
+        "critical path (the build was short of job tokens, so units ran in the order tokens came, not as soon as they were ready; gap: idle after it was ready)"
+    } else {
+        "critical path (each step waited for the one above it; gap: idle after it was ready)"
+    };
+    s.details
+        .push(format!("{title}\n{}", table(headers, &rows)));
 }
 
 fn kinds_table(s: &mut Section, a: &Analysis) {
@@ -744,6 +747,43 @@ mod tests {
             unblocked_units: next.to_vec(),
             ..Unit::default()
         }
+    }
+
+    /// Independent test targets one after another with jobs=16 (#74): the
+    /// build waited for jobserver tokens, and its shape isn't blamed on a
+    /// critical path or a serial crate.
+    #[test]
+    fn token_starved_build() {
+        let units: Vec<Unit> = (0..5)
+            .map(|i| {
+                lib(
+                    i,
+                    &format!("t{i}"),
+                    " (check-test)",
+                    2.0 * i as f64,
+                    2.0 * if i == 4 { 4.0 } else { 1.0 },
+                    &[],
+                )
+            })
+            .collect();
+        let t = Timings {
+            units,
+            jobs: Some(Jobs { jobs: 16, ncpu: 32 }),
+            ..Timings::default()
+        };
+        let a = analyze(&t);
+        assert!(token_starved(&a));
+        let s = section(&a, "r.html");
+        let got: Vec<&str> = s.findings.iter().map(|f| f.id).collect();
+        assert_eq!(got, ["token-starved"], "{got:?}");
+        assert_eq!(s.findings[0].severity, crate::finding::Severity::High);
+        assert!(s.details.iter().any(|d| d.contains("short of job tokens")));
+        // The same build with jobs=1 had no tokens to spare.
+        let one = Timings {
+            jobs: Some(Jobs { jobs: 1, ncpu: 32 }),
+            ..t
+        };
+        assert!(!token_starved(&analyze(&one)));
     }
 
     /// A first build in a new target directory (#51): every workspace crate

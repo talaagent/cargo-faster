@@ -12,7 +12,19 @@ readme = "README.md"
 documentation = "https://github.com/talaagent/cargo-faster/blob/main/docs/cargo-faster.md"
 keywords = ["compile-times", "build-time", "performance", "profiling", "cargo-subcommand"]
 categories = ["development-tools::cargo-plugins", "development-tools::profiling"]
-include = ["src/**/*.rs", "build.rs", "tests/*.rs", "/README.md", "/LICENSE", "/NOTICE"]
+# The tests and the fixtures they read, so `cargo test` works from the
+# .crate. Not tests/guide_anchors.rs: it checks docs/ at the repository root.
+include = [
+    "src/**/*.rs",
+    "build.rs",
+    "tests/cli.rs",
+    "tests/profile_integration.rs",
+    "tests/timings_cli.rs",
+    "tests/fixtures/**",
+    "/README.md",
+    "/LICENSE",
+    "/NOTICE",
+]
 
 [[bin]]
 name = "cargo-faster"

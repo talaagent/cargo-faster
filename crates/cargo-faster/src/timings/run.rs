@@ -53,17 +53,42 @@ impl fmt::Display for Build {
 
 impl Build {
     /// The cargo arguments, without `--timings` and the user's extra
-    /// arguments. Always `--workspace`, never `-p`.
+    /// arguments `user`. `--workspace`, never `-p`, unless `user` already
+    /// picks the packages (see [`without_workspace_if_picked`]).
     #[must_use]
-    pub fn args(self, nextest: bool) -> Vec<&'static str> {
-        match self {
+    pub fn args(self, nextest: bool, user: &[String]) -> Vec<&'static str> {
+        let base = match self {
             Self::Check => vec!["check", "--workspace"],
             Self::Build => vec!["build", "--workspace"],
             Self::Clippy => vec!["clippy", "--workspace"],
             Self::Test if nextest => vec!["nextest", "run", "--workspace", "--no-run"],
             Self::Test => vec!["test", "--workspace", "--no-run"],
-        }
+        };
+        without_workspace_if_picked(base, user)
     }
+}
+
+/// Whether the user's cargo arguments already pick the packages:
+/// `--workspace`, `--all`, `-p`/`--package`. Arguments after `--` go to
+/// the test binaries and don't count.
+#[must_use]
+pub fn picks_packages(user: &[String]) -> bool {
+    user.iter().take_while(|a| *a != "--").any(|a| {
+        let flag = a.split_once('=').map_or(a.as_str(), |(f, _)| f);
+        matches!(flag, "--workspace" | "--all" | "-p" | "--package")
+            || (a.starts_with("-p") && !a.starts_with("--"))
+    })
+}
+
+/// `base` without its `--workspace` when `user` picks the packages
+/// itself: cargo refuses a repeated `--workspace`, and `-p` asks for
+/// those packages only.
+#[must_use]
+pub fn without_workspace_if_picked<'a>(mut base: Vec<&'a str>, user: &[String]) -> Vec<&'a str> {
+    if picks_packages(user) {
+        base.retain(|a| *a != "--workspace");
+    }
+    base
 }
 
 /// What the probe edit changes.
@@ -316,16 +341,53 @@ mod tests {
     fn build_args() {
         assert_eq!("build".parse::<Build>(), Ok(Build::Build));
         assert!("bench".parse::<Build>().is_err());
-        assert_eq!(Build::Check.args(true), ["check", "--workspace"]);
-        assert_eq!(Build::Clippy.args(false), ["clippy", "--workspace"]);
+        assert_eq!(Build::Check.args(true, &[]), ["check", "--workspace"]);
+        assert_eq!(Build::Clippy.args(false, &[]), ["clippy", "--workspace"]);
         assert_eq!(
-            Build::Test.args(true),
+            Build::Test.args(true, &[]),
             ["nextest", "run", "--workspace", "--no-run"]
         );
-        assert_eq!(Build::Test.args(false), ["test", "--workspace", "--no-run"]);
+        assert_eq!(
+            Build::Test.args(false, &[]),
+            ["test", "--workspace", "--no-run"]
+        );
         for b in [Build::Check, Build::Build, Build::Clippy, Build::Test] {
-            assert!(!b.args(true).contains(&"-p"));
+            assert!(!b.args(true, &[]).contains(&"-p"));
             assert_eq!(b.to_string().parse::<Build>(), Ok(b));
+        }
+    }
+
+    #[test]
+    fn user_args_that_pick_packages_drop_workspace() {
+        let args = |a: &[&str]| a.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        for picked in [
+            &["--workspace", "--all-targets", "--locked"][..],
+            &["--all"],
+            &["-p", "app"],
+            &["-papp"],
+            &["--package", "app"],
+            &["--package=app"],
+        ] {
+            assert_eq!(
+                Build::Check.args(true, &args(picked)),
+                ["check"],
+                "{picked:?}"
+            );
+        }
+        assert_eq!(
+            Build::Test.args(true, &args(&["--workspace"])),
+            ["nextest", "run", "--no-run"]
+        );
+        for not in [
+            &["--all-targets", "--profile", "gate"][..],
+            &["--all-features"],
+            &["--", "-p"],
+        ] {
+            assert_eq!(
+                Build::Check.args(true, &args(not)),
+                ["check", "--workspace"],
+                "{not:?}"
+            );
         }
     }
 
