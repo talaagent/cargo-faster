@@ -767,14 +767,14 @@ fn timings_run(
     Ok((path, facts, failed, first_build))
 }
 
-/// The target directory's fingerprint directories for workspace members.
+/// The build directory's fingerprint directories for workspace members.
 fn fingerprints(ctx: &Context) -> BTreeSet<PathBuf> {
     let members: Vec<&str> = ctx
         .metadata
         .as_ref()
         .map(|m| m.members().map(|p| p.name.as_str()).collect())
         .unwrap_or_default();
-    timings::run::fingerprints(&ctx.target_dir(), &members)
+    timings::run::fingerprints(&ctx.build_dir(), &members)
 }
 
 /// The newest report in the target directory, if it was written after
@@ -955,7 +955,9 @@ fn timings_file_section(
     let t = read(path)?;
     let base = match baseline {
         Some(b) => Some((b.to_path_buf(), read(b)?)),
-        None if !t.is_check() && !t.ran().any(|u| u.mode == "test") => timings::check_before(path),
+        None if !t.is_check() && !t.ran().any(timings::Unit::is_test) => {
+            timings::check_before(path)
+        }
         None => None,
     };
     let ws = ctx.and_then(|c| c.metadata.as_ref().map(timings::workspace_from_metadata));
