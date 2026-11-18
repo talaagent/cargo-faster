@@ -14,6 +14,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `timings --hot` measures an edit to each hot crate. `rdeps` lists the hot crates first.
 - `[env]` sets the profile, features and nextest profile that builds are measured with. `jobserver = "shared"` reports a token-starved build as expected.
 
-## [0.1.0](https://github.com/talaagent/cargo-faster/releases/tag/v0.1.0)
-
-First release.
