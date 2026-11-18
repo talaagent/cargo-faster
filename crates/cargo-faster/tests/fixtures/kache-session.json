@@ -1,0 +1,48 @@
+{
+  "meta": {
+    "session": {
+      "session_id": "0123456789abcdef",
+      "root": "/home/user/src/app/target",
+      "started_at": "2026-11-17T09:59:09.000+00:00",
+      "argv": [
+        "cargo",
+        "build",
+        "--timings"
+      ],
+      "cwd": "/home/user/src/app",
+      "commands": [
+        {
+          "started_at": "2026-11-17T09:59:09.000+00:00",
+          "started_unix_ms": 1794909549000,
+          "argv": [
+            "cargo",
+            "build",
+            "--timings"
+          ],
+          "cwd": "/home/user/src/app"
+        },
+        {
+          "started_at": "2026-11-17T10:00:20.000+00:00",
+          "started_unix_ms": 1794909620000,
+          "argv": [
+            "cargo",
+            "test",
+            "--workspace",
+            "--no-run"
+          ],
+          "cwd": "/home/user/src/app"
+        }
+      ]
+    }
+  },
+  "summary": {
+    "total_crates": 94,
+    "passthroughs": 94,
+    "hit_rate_pct": 0.0,
+    "weighted_hit_rate_pct": 0.0
+  },
+  "timeline": {
+    "start_time": "2026-11-17T09:59:09.000+00:00",
+    "duration_ms": 144000
+  }
+}

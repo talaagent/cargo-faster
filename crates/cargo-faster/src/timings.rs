@@ -581,6 +581,57 @@ mod tests {
         assert!(!ids(&a).contains(&"post-metadata-analysis"));
     }
 
+    /// kache's records for the real build, with the session's cargo
+    /// commands (provisional fields, kunobi-ninja/kache#1968): a `cargo
+    /// test` started while the report's units ran, so the joined records
+    /// span two commands. Without the fields, nothing changes.
+    #[test]
+    fn kache_records_from_two_commands() {
+        let t = Timings::parse_html(&fixture_file("timings-build.html")).unwrap();
+        let mut v: serde_json::Value =
+            serde_json::from_str(&fixture_file("kache-trace.json")).unwrap();
+        let plain = wrapper::Records::from_report(&v);
+        assert_eq!(plain.commands, []);
+        let idx = wrapper::join_events(&t, &plain.events);
+        let counts = wrapper::by_command(&plain.events, idx.iter().flatten().copied(), &[]);
+        assert_eq!(counts, []);
+        assert_eq!(wrapper::mixed_commands(&plain.commands, &counts), None);
+
+        let session: serde_json::Value =
+            serde_json::from_str(&fixture_file("kache-session.json")).unwrap();
+        v["meta"] = session["meta"].clone();
+        let r = wrapper::Records::from_report(&v);
+        assert_eq!(r.events, plain.events);
+        assert_eq!(r.commands.len(), 2);
+        assert_eq!(
+            r.commands[1].command_line(),
+            "cargo test --workspace --no-run"
+        );
+        assert_eq!(r.commands[1].cwd.as_deref(), Some("/home/user/src/app"));
+        let idx = wrapper::join_events(&t, &r.events);
+        let counts = wrapper::by_command(&r.events, idx.iter().flatten().copied(), &r.commands);
+        let joined = idx.iter().flatten().count();
+        assert_eq!(counts.iter().map(|(_, n)| n).sum::<usize>(), joined);
+        assert_eq!(counts[0].0, 0);
+        assert_eq!(counts[1], (1, 8));
+        let f = wrapper::mixed_commands(&r.commands, &counts).unwrap();
+        assert_eq!(f.id, "kache-records-mixed-commands");
+        assert_eq!(f.severity, crate::finding::Severity::Medium);
+        assert!(
+            f.saw.contains(&format!(
+                "`cargo build --timings`: {} records, `cargo test --workspace --no-run`: 8 records",
+                joined - 8
+            )),
+            "{}",
+            f.saw
+        );
+
+        // One command, or records only from one: no warning.
+        let one = wrapper::by_command(&r.events, idx.iter().flatten().copied(), &r.commands[..1]);
+        assert_eq!(one, [(0, joined)]);
+        assert_eq!(wrapper::mixed_commands(&r.commands[..1], &one), None);
+    }
+
     /// The real build after a one-line app-core edit, joined with kache's
     /// records and compared with the check of the same edit (#12, #13).
     #[test]
