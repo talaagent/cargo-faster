@@ -591,19 +591,19 @@ mod tests {
     #[test]
     fn kache_records_from_two_commands() {
         let t = Timings::parse_html(&fixture_file("timings-build.html")).unwrap();
-        let mut v: serde_json::Value =
+        let mut report: wrapper::KacheReport =
             serde_json::from_str(&fixture_file("kache-trace.json")).unwrap();
-        let plain = wrapper::Records::from_report(&v);
+        let plain = wrapper::Records::from_report(&report);
         assert_eq!(plain.commands, []);
         let idx = wrapper::join_events(&t, &plain.events);
         let counts = wrapper::by_command(&plain.events, idx.iter().flatten().copied(), &[]);
         assert_eq!(counts, []);
         assert_eq!(wrapper::mixed_commands(&plain.commands, &counts), None);
 
-        let session: serde_json::Value =
+        let session: wrapper::KacheReport =
             serde_json::from_str(&fixture_file("kache-session.json")).unwrap();
-        v["meta"] = session["meta"].clone();
-        let r = wrapper::Records::from_report(&v);
+        report.meta = session.meta;
+        let r = wrapper::Records::from_report(&report);
         assert_eq!(r.events, plain.events);
         assert_eq!(r.commands.len(), 2);
         assert_eq!(
@@ -644,8 +644,9 @@ mod tests {
         let check = Timings::parse_html(&fixture_file("timings-check.html")).unwrap();
         assert_eq!(t.jobs, Some(Jobs { jobs: 16, ncpu: 32 }));
         assert!(check.is_check() && !t.is_check());
-        let v: serde_json::Value = serde_json::from_str(&fixture_file("kache-trace.json")).unwrap();
-        let events = wrapper::kache_events(&v);
+        let report: wrapper::KacheReport =
+            serde_json::from_str(&fixture_file("kache-trace.json")).unwrap();
+        let events = wrapper::kache_events(&report);
         let runs = wrapper::join(&t, &events);
         let matched = runs.iter().flatten().count();
         let compiled = t.ran().filter(|u| u.kind() != Kind::BuildScript).count();

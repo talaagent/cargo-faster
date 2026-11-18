@@ -2,8 +2,9 @@
 //! items from a workspace crate it depends on, none at all (an unused
 //! dependency), or only re-exports some of it to its own dependents.
 //!
-//! The item count reads the dependent's source for paths that start with
-//! the dependency's name (`b::x::Y`, `use b::{x, y::Z}`). An item is the
+//! The item count lexes the dependent's source with proc-macro2 and walks
+//! the tokens for paths that start with the dependency's name (`b::x::Y`,
+//! `use b::{x, y::Z}`), macro bodies included. An item is the
 //! path up to its first capitalized segment (a type, trait or constant:
 //! `b::config::Config::new` is `config::Config`), or the whole path (a
 //! function or macro). Globs, aliases (`use b as c`) and modules imported
@@ -101,95 +102,6 @@ impl Edge {
     }
 }
 
-/// Source with comments, strings and char literals blanked out.
-fn strip(src: &str) -> String {
-    let b: Vec<char> = src.chars().collect();
-    let at = |i: usize| b.get(i).copied().unwrap_or('\0');
-    let ident = |c: char| c.is_alphanumeric() || c == '_';
-    let mut out = String::with_capacity(src.len());
-    let mut i = 0;
-    while i < b.len() {
-        let c = at(i);
-        let prev = if i == 0 { ' ' } else { at(i - 1) };
-        if c == '/' && at(i + 1) == '/' {
-            while i < b.len() && at(i) != '\n' {
-                i += 1;
-            }
-            continue;
-        }
-        if c == '/' && at(i + 1) == '*' {
-            let mut depth = 1;
-            i += 2;
-            while i < b.len() && depth > 0 {
-                if at(i) == '/' && at(i + 1) == '*' {
-                    depth += 1;
-                    i += 2;
-                } else if at(i) == '*' && at(i + 1) == '/' {
-                    depth -= 1;
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-            out.push(' ');
-            continue;
-        }
-        let raw_start = !ident(prev) || (prev == 'b' && (i < 2 || !ident(at(i - 2))));
-        if c == 'r' && raw_start && matches!(at(i + 1), '"' | '#') {
-            let mut j = i + 1;
-            let mut hashes = 0;
-            while at(j) == '#' {
-                hashes += 1;
-                j += 1;
-            }
-            if at(j) == '"' {
-                j += 1;
-                while j < b.len() {
-                    if at(j) == '"' && (1..=hashes).all(|k| at(j + k) == '#') {
-                        j += 1 + hashes;
-                        break;
-                    }
-                    j += 1;
-                }
-                out.push(' ');
-                i = j;
-                continue;
-            }
-        }
-        if c == '"' {
-            i += 1;
-            while i < b.len() && at(i) != '"' {
-                if at(i) == '\\' {
-                    i += 1;
-                }
-                i += 1;
-            }
-            i += 1;
-            out.push(' ');
-            continue;
-        }
-        if c == '\'' {
-            if at(i + 1) == '\\' {
-                i += 2;
-                while i < b.len() && at(i) != '\'' {
-                    i += 1;
-                }
-                i += 1;
-            } else if at(i + 2) == '\'' {
-                i += 3;
-            } else {
-                // A lifetime.
-                i += 1;
-            }
-            out.push(' ');
-            continue;
-        }
-        out.push(c);
-        i += 1;
-    }
-    out
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Tok {
     Id(String),
@@ -198,25 +110,59 @@ enum Tok {
     P(char),
 }
 
-fn tokens(src: &str) -> Vec<Tok> {
-    let mut out = Vec::new();
-    let mut chars = src.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c.is_alphanumeric() || c == '_' {
-            let mut s = String::from(c);
-            while let Some(&n) = chars.peek().filter(|n| n.is_alphanumeric() || **n == '_') {
-                s.push(n);
-                chars.next();
-            }
-            out.push(Tok::Id(s));
-        } else if c == ':' && chars.peek() == Some(&':') {
-            chars.next();
-            out.push(Tok::Sep);
-        } else if !c.is_whitespace() {
-            out.push(Tok::P(c));
+/// A crate's sources as tokens, from proc-macro2's lexer: comments are
+/// gone and literals are skipped, but macro bodies are kept (paths in
+/// `println!("{}", b::f())` count). Files that don't lex (unbalanced
+/// delimiters) make the count unreliable.
+#[derive(Debug, Clone, Default)]
+struct Tokens {
+    toks: Vec<Tok>,
+    unlexed: bool,
+}
+
+impl Tokens {
+    /// Append one file's tokens.
+    fn push_source(&mut self, src: &str) {
+        match src.parse::<proc_macro2::TokenStream>() {
+            Ok(stream) => flatten(stream, &mut self.toks),
+            Err(_) => self.unlexed = true,
         }
     }
-    out
+}
+
+fn flatten(stream: proc_macro2::TokenStream, out: &mut Vec<Tok>) {
+    use proc_macro2::{Delimiter, Spacing, TokenTree};
+    let mut joint_colon = false;
+    for tree in stream {
+        let colon = matches!(&tree, TokenTree::Punct(punct) if punct.as_char() == ':');
+        match tree {
+            TokenTree::Ident(ident) => out.push(Tok::Id(ident.to_string())),
+            TokenTree::Punct(_) if colon && joint_colon => {
+                out.pop();
+                out.push(Tok::Sep);
+                joint_colon = false;
+                continue;
+            }
+            TokenTree::Punct(punct) => {
+                out.push(Tok::P(punct.as_char()));
+                joint_colon = colon && punct.spacing() == Spacing::Joint;
+                continue;
+            }
+            TokenTree::Group(group) => {
+                let (open, close) = match group.delimiter() {
+                    Delimiter::Parenthesis => (Some('('), Some(')')),
+                    Delimiter::Brace => (Some('{'), Some('}')),
+                    Delimiter::Bracket => (Some('['), Some(']')),
+                    Delimiter::None => (None, None),
+                };
+                out.extend(open.map(Tok::P));
+                flatten(group.stream(), out);
+                out.extend(close.map(Tok::P));
+            }
+            TokenTree::Literal(_) => {}
+        }
+        joint_colon = false;
+    }
 }
 
 /// The item a path names: up to its first capitalized segment.
@@ -287,8 +233,18 @@ fn tree(toks: &[Tok], i: &mut usize, prefix: &[String], used: &mut Used) {
 /// What `src` uses from the crate it calls `krate`.
 #[must_use]
 pub fn used_items(src: &str, krate: &str) -> Used {
-    let toks = tokens(&strip(src));
-    let mut used = Used::default();
+    let mut tokens = Tokens::default();
+    tokens.push_source(src);
+    used_in(&tokens, krate)
+}
+
+/// What the lexed sources use from the crate they call `krate`.
+fn used_in(tokens: &Tokens, krate: &str) -> Used {
+    let toks = &tokens.toks;
+    let mut used = Used {
+        opaque: tokens.unlexed,
+        ..Used::default()
+    };
     let mut i = 0;
     while i < toks.len() {
         let after_sep = i > 0 && toks[i - 1] == Tok::Sep;
@@ -309,7 +265,7 @@ pub fn used_items(src: &str, krate: &str) -> Used {
                 Some(Tok::Sep) => {
                     i += 2;
                     let mut here = Used::default();
-                    tree(&toks, &mut i, &[], &mut here);
+                    tree(toks, &mut i, &[], &mut here);
                     if public {
                         used.reexports.extend(here.items.iter().cloned());
                     }
@@ -351,7 +307,7 @@ pub fn used_items(src: &str, krate: &str) -> Used {
                 j >= 2 && is_id(toks.get(j - 2), "crate") && (j < 3 || toks[j - 3] != Tok::Sep);
             if head || from_root {
                 let mut k = j + 2;
-                tree(&toks, &mut k, &segs, &mut through);
+                tree(toks, &mut k, &segs, &mut through);
             }
         }
         if !through.items.is_empty() || through.opaque {
@@ -363,23 +319,22 @@ pub fn used_items(src: &str, krate: &str) -> Used {
     used
 }
 
-/// All `.rs` source under `dir`.
-fn read_sources(dir: &Path) -> String {
-    fn walk(p: &Path, out: &mut String) {
-        if p.is_dir() {
-            if let Ok(d) = std::fs::read_dir(p) {
-                for e in d.flatten() {
-                    walk(&e.path(), out);
+/// All `.rs` source under `dir`, lexed.
+fn read_sources(dir: &Path) -> Tokens {
+    fn walk(path: &Path, out: &mut Tokens) {
+        if path.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(path) {
+                for entry in entries.flatten() {
+                    walk(&entry.path(), out);
                 }
             }
-        } else if p.extension().is_some_and(|e| e == "rs")
-            && let Ok(s) = std::fs::read_to_string(p)
+        } else if path.extension().is_some_and(|ext| ext == "rs")
+            && let Ok(src) = std::fs::read_to_string(path)
         {
-            out.push_str(&s);
-            out.push('\n');
+            out.push_source(&src);
         }
     }
-    let mut out = String::new();
+    let mut out = Tokens::default();
     walk(dir, &mut out);
     out
 }
@@ -459,7 +414,7 @@ fn extern_name(m: &Metadata, from: &Package, to: &Package) -> Option<String> {
 pub fn gather(m: &Metadata, pairs: &[(String, String, Option<f64>)]) -> Vec<Edge> {
     let (normal, _) = super::reverse_deps(m);
     let members: HashMap<&str, &Package> = m.members().map(|p| (p.name.as_str(), p)).collect();
-    let mut sources: HashMap<&str, String> = HashMap::new();
+    let mut sources: HashMap<&str, Tokens> = HashMap::new();
     let mut lines: HashMap<&str, usize> = HashMap::new();
     let mut out = Vec::new();
     for (from, to, critical_s) in pairs {
@@ -472,7 +427,7 @@ pub fn gather(m: &Metadata, pairs: &[(String, String, Option<f64>)]) -> Vec<Edge
         let src = sources
             .entry(f.name.as_str())
             .or_insert_with(|| read_sources(&src_dir(f)));
-        let used = used_items(src, &name);
+        let used = used_in(src, &name);
         let to_lines = *lines
             .entry(t.name.as_str())
             .or_insert_with(|| count_lines(&src_dir(t)).0);
@@ -489,7 +444,7 @@ pub fn gather(m: &Metadata, pairs: &[(String, String, Option<f64>)]) -> Vec<Edge
                     let src = sources
                         .entry(p.name.as_str())
                         .or_insert_with(|| read_sources(&src_dir(p)));
-                    Some((d.clone(), used_items(src, &name)))
+                    Some((d.clone(), used_in(src, &name)))
                 })
                 .collect();
             users = reexport_users(&reexports, &dependents);
@@ -756,6 +711,14 @@ mod tests {
         // Raw strings and lifetimes don't confuse it.
         let u = used_items("fn f<'a>(x: &'a str) { r#\"b::No\"#; b::Yes }", "b");
         assert_eq!(u.items.into_iter().collect::<Vec<_>>(), ["Yes"]);
+        // Paths in macro bodies count; doc comments don't.
+        let u = used_items(
+            "/// b::Doc\nfn f() { println!(\"{}\", b::shown()); vec![b::Item] }",
+            "b",
+        );
+        assert_eq!(u.items.into_iter().collect::<Vec<_>>(), ["Item", "shown"]);
+        // A file that doesn't lex makes the count unreliable.
+        assert!(used_items("fn f() { b::x( }", "b").opaque);
     }
 
     #[test]

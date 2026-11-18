@@ -277,8 +277,8 @@ struct UncachedTail {
 /// The session's compiles from `--full`'s trace events, latest last: the
 /// trailing run of passthroughs.
 fn uncached_tail(last: &Value) -> Option<UncachedTail> {
-    use crate::timings::wrapper::{Outcome, kache_events};
-    let mut ev = kache_events(last);
+    use crate::timings::wrapper::{KacheReport, Outcome, kache_events};
+    let mut ev = kache_events(&KacheReport::from_value(last));
     ev.sort_by(|a, b| a.start_ms.total_cmp(&b.start_ms));
     let lookups = |o: Outcome| matches!(o, Outcome::Hit | Outcome::Miss);
     let first = ev
@@ -342,22 +342,22 @@ fn tilde(path: &str, home: Option<&str>) -> String {
 /// <https://github.com/kunobi-ninja/kache/issues/1968>. Without them the
 /// fact is when and how long only.
 fn session_fact(last: &Value, now_ms: Option<f64>, home: Option<&str>) -> Option<String> {
-    use crate::timings::wrapper::{argv, session_commands};
-    let session = last.pointer("/meta/session");
+    use crate::timings::wrapper::{KacheReport, session_commands};
+    let report = KacheReport::from_value(last);
+    let session = report.session();
     let tl = last.get("timeline");
     let start = tl
         .and_then(|t| t.get("start_time"))
-        .or_else(|| session.and_then(|s| s.get("started_at")))?
-        .as_str()?;
+        .and_then(Value::as_str)
+        .or_else(|| session?.started_at.as_deref())?;
     let dur = tl
         .and_then(|t| f64_at(t, &["duration_ms"]))
         .map_or_else(String::new, |d| format!(", ran {}", secs(d / 1000.0)));
-    let Some(argv) = session.and_then(argv) else {
+    let Some(argv) = session.and_then(|session| session.argv()) else {
         return Some(format!("started {}{dur}", when(start, now_ms)));
     };
     let cwd = session
-        .and_then(|s| s.get("cwd"))
-        .and_then(Value::as_str)
+        .and_then(|session| session.cwd.as_deref())
         .map_or_else(String::new, |c| format!(" (in {})", tilde(c, home)));
     let clock = start
         .get(11..16)
@@ -367,7 +367,7 @@ fn session_fact(last: &Value, now_ms: Option<f64>, home: Option<&str>) -> Option
         .map_or_else(String::new, |(t, now)| {
             format!(", {}", ago((now - t) / 1000.0))
         });
-    let commands = session_commands(last);
+    let commands = session_commands(&report);
     let more = match commands.as_slice() {
         [_, .., latest] => format!(
             ", {} cargo commands in all (latest: {})",

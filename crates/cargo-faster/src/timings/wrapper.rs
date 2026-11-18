@@ -5,8 +5,7 @@
 use super::Timings;
 use crate::context::{Context, probe};
 use crate::finding::{Finding, Severity};
-use serde::Serialize;
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
 
 /// What the wrapper did with one rustc invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -78,36 +77,207 @@ fn outcome(result: &str, reason: &str) -> Option<Outcome> {
     })
 }
 
+/// The parts of a `kache stats --format json` report we read. Everything
+/// is optional: kache's JSON is not a stable interface.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct KacheReport {
+    /// Per-crate trace events (unlike `all_events`, passthroughs too).
+    /// One malformed event is skipped and counted, not the whole report.
+    #[serde(default, rename = "traceEvents")]
+    pub trace_events: Lenient<TraceEvent>,
+    /// The session(s) the report covers: `None` when absent or malformed.
+    #[serde(default, deserialize_with = "or_none")]
+    pub meta: Option<KacheMeta>,
+}
+
+/// A list read item by item: the items that deserialize, and how many
+/// didn't. `null` is empty.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Lenient<T> {
+    /// The items that deserialized, in order.
+    pub items: Vec<T>,
+    /// How many were skipped because they didn't.
+    pub skipped: usize,
+}
+
+impl<T> Default for Lenient<T> {
+    fn default() -> Self {
+        Self {
+            items: Vec::new(),
+            skipped: 0,
+        }
+    }
+}
+
+impl<'de, T: serde::de::DeserializeOwned> Deserialize<'de> for Lenient<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Each item is buffered as a JSON value so that a bad one fails on
+        // its own; works for any deserializer, a reader or a `Value`.
+        let raw = Option::<Vec<serde_json::Value>>::deserialize(deserializer)?.unwrap_or_default();
+        let mut list = Self::default();
+        for item in &raw {
+            match T::deserialize(item) {
+                Ok(parsed) => list.items.push(parsed),
+                Err(_) => list.skipped += 1,
+            }
+        }
+        Ok(list)
+    }
+}
+
+/// A list whose malformed items are dropped. `null` is empty.
+fn skip_malformed<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    Lenient::deserialize(deserializer).map(|list| list.items)
+}
+
+/// A value that is `None` when it doesn't deserialize, rather than an
+/// error for the whole report.
+fn or_none<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let raw = serde_json::Value::deserialize(deserializer)?;
+    Ok(T::deserialize(&raw).ok())
+}
+
+/// A list that may be `null`: empty.
+fn null_as_empty<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<Vec<T>>::deserialize(deserializer).map(Option::unwrap_or_default)
+}
+
+/// One trace event.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct TraceEvent {
+    /// When the wrapper started, Unix microseconds.
+    pub ts: Option<f64>,
+    /// What it did.
+    pub args: Option<TraceArgs>,
+}
+
+/// A trace event's `args`.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct TraceArgs {
+    /// The rustc crate name.
+    pub crate_name: Option<String>,
+    /// `local_hit`, `miss`, `passthrough`, ...
+    pub result: Option<String>,
+    /// Why a passthrough was one (`adaptive active`).
+    pub reason: Option<String>,
+    /// Milliseconds from the wrapper starting to it exiting.
+    pub elapsed_ms: Option<f64>,
+    /// Milliseconds rustc ran.
+    pub compile_time_ms: Option<f64>,
+    /// Milliseconds waiting for a scheduler permit.
+    pub permit_wait_ms: Option<f64>,
+    /// Milliseconds waiting for another build's compile of the same key.
+    pub flight_wait_ms: Option<f64>,
+}
+
+/// A report's `meta`.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct KacheMeta {
+    /// The latest session.
+    #[serde(default, deserialize_with = "or_none")]
+    pub session: Option<KacheSession>,
+    /// Several sessions, when the report spans them.
+    #[serde(default, deserialize_with = "skip_malformed")]
+    pub sessions: Vec<KacheSession>,
+}
+
+/// A kache session. `argv`, `cwd` and `commands` are provisional (see
+/// [`CargoCommand`]).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct KacheSession {
+    /// When it started (RFC 3339).
+    pub started_at: Option<String>,
+    /// The tree it ran in.
+    pub root: Option<String>,
+    /// The command line that started it.
+    #[serde(default, deserialize_with = "null_as_empty")]
+    pub argv: Vec<String>,
+    /// The directory that command ran in.
+    pub cwd: Option<String>,
+    /// The cargo commands it saw.
+    #[serde(default, deserialize_with = "skip_malformed")]
+    pub commands: Vec<KacheCommand>,
+}
+
+/// One cargo command of a session, as kache would record it.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct KacheCommand {
+    /// When cargo started, Unix milliseconds.
+    pub started_unix_ms: Option<f64>,
+    /// When cargo started (RFC 3339), when `started_unix_ms` is absent.
+    pub started_at: Option<String>,
+    /// Its command line, `cargo` first.
+    #[serde(default, deserialize_with = "null_as_empty")]
+    pub argv: Vec<String>,
+    /// The directory it ran in.
+    pub cwd: Option<String>,
+}
+
+impl KacheReport {
+    /// The report in a JSON value; the default (nothing recorded) when it
+    /// isn't shaped like one.
+    #[must_use]
+    pub fn from_value(value: &serde_json::Value) -> Self {
+        Self::deserialize(value).unwrap_or_default()
+    }
+
+    /// The latest session (`meta.session`).
+    #[must_use]
+    pub fn session(&self) -> Option<&KacheSession> {
+        self.meta.as_ref()?.session.as_ref()
+    }
+}
+
+impl KacheSession {
+    /// The command line that started it: `None` when kache didn't record
+    /// it (provisional, see [`CargoCommand`]).
+    #[must_use]
+    pub fn argv(&self) -> Option<&[String]> {
+        (!self.argv.is_empty()).then_some(self.argv.as_slice())
+    }
+}
+
 /// The compile events in a `kache stats --format json` report (its
 /// `traceEvents`, which unlike `all_events` include passthroughs).
 #[must_use]
-pub fn kache_events(report: &Value) -> Vec<WrapperEvent> {
-    let ms = |a: &Value, k: &str| a.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+pub fn kache_events(report: &KacheReport) -> Vec<WrapperEvent> {
     report
-        .get("traceEvents")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|e| {
-            let a = e.get("args")?;
-            let crate_name = a.get("crate_name")?.as_str()?;
-            let reason = a.get("reason").and_then(Value::as_str).unwrap_or("");
-            let outcome = outcome(a.get("result")?.as_str()?, reason)?;
+        .trace_events
+        .items
+        .iter()
+        .filter_map(|event| {
+            let args = event.args.as_ref()?;
+            let crate_name = args.crate_name.as_deref()?;
+            let reason = args.reason.as_deref().unwrap_or("");
+            let outcome = outcome(args.result.as_deref()?, reason)?;
             if crate_name.starts_with("build_script_") || crate_name == "unknown" {
                 return None;
             }
+            let secs = |ms: Option<f64>| ms.unwrap_or(0.0) / 1000.0;
             Some(WrapperEvent {
                 crate_name: crate_name.to_owned(),
-                start_ms: e.get("ts")?.as_f64()? / 1000.0,
+                start_ms: event.ts? / 1000.0,
                 run: WrapperRun {
                     outcome,
                     compile: if outcome == Outcome::Hit {
                         0.0
                     } else {
-                        ms(a, "compile_time_ms") / 1000.0
+                        secs(args.compile_time_ms)
                     },
-                    wait: (ms(a, "permit_wait_ms") + ms(a, "flight_wait_ms")) / 1000.0,
-                    elapsed: ms(a, "elapsed_ms") / 1000.0,
+                    wait: secs(args.permit_wait_ms) + secs(args.flight_wait_ms),
+                    elapsed: secs(args.elapsed_ms),
                 },
             })
         })
@@ -139,32 +309,20 @@ impl CargoCommand {
     }
 }
 
-/// The argv of a kache session or command object (provisional, see
-/// [`CargoCommand`]): `None` when absent or empty.
-#[must_use]
-pub fn argv(v: &Value) -> Option<Vec<String>> {
-    let argv: Vec<String> = v
-        .get("argv")?
-        .as_array()?
-        .iter()
-        .filter_map(|a| a.as_str().map(str::to_owned))
-        .collect();
-    (!argv.is_empty()).then_some(argv)
-}
-
-fn command(c: &Value) -> Option<CargoCommand> {
-    let started_unix_ms = c
-        .get("started_unix_ms")
-        .and_then(Value::as_f64)
-        .or_else(|| {
-            c.get("started_at")
-                .and_then(Value::as_str)
-                .and_then(cargo_timings_parse::parse_timestamp)
-        })?;
+fn command(recorded: &KacheCommand) -> Option<CargoCommand> {
+    let started_unix_ms = recorded.started_unix_ms.or_else(|| {
+        recorded
+            .started_at
+            .as_deref()
+            .and_then(cargo_timings_parse::parse_timestamp)
+    })?;
+    if recorded.argv.is_empty() {
+        return None;
+    }
     Some(CargoCommand {
         started_unix_ms,
-        argv: argv(c)?,
-        cwd: c.get("cwd").and_then(Value::as_str).map(str::to_owned),
+        argv: recorded.argv.clone(),
+        cwd: recorded.cwd.clone(),
     })
 }
 
@@ -173,20 +331,18 @@ fn command(c: &Value) -> Option<CargoCommand> {
 /// each of `meta.sessions` (both provisional, see [`CargoCommand`]).
 /// Empty when kache doesn't record them.
 #[must_use]
-pub fn session_commands(report: &Value) -> Vec<CargoCommand> {
-    let sessions = report.pointer("/meta/session").into_iter().chain(
-        report
-            .pointer("/meta/sessions")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten(),
-    );
-    let mut out: Vec<CargoCommand> = sessions
-        .filter_map(|s| s.get("commands")?.as_array())
-        .flatten()
+pub fn session_commands(report: &KacheReport) -> Vec<CargoCommand> {
+    let Some(meta) = &report.meta else {
+        return Vec::new();
+    };
+    let mut out: Vec<CargoCommand> = meta
+        .session
+        .iter()
+        .chain(&meta.sessions)
+        .flat_map(|session| &session.commands)
         .filter_map(command)
         .collect();
-    out.sort_by(|a, b| a.started_unix_ms.total_cmp(&b.started_unix_ms));
+    out.sort_by(|left, right| left.started_unix_ms.total_cmp(&right.started_unix_ms));
     out.dedup();
     out
 }
@@ -205,7 +361,7 @@ pub struct Records {
 impl Records {
     /// Read a `kache stats --format json` report.
     #[must_use]
-    pub fn from_report(report: &Value) -> Self {
+    pub fn from_report(report: &KacheReport) -> Self {
         Self {
             events: kache_events(report),
             commands: session_commands(report),
@@ -235,8 +391,8 @@ pub fn gather(ctx: &Context, start_unix_ms: f64) -> Records {
         .current_dir(root)
         .output();
     out.ok()
-        .and_then(|o| serde_json::from_slice::<Value>(&o.stdout).ok())
-        .map(|v| Records::from_report(&v))
+        .and_then(|output| serde_json::from_slice::<KacheReport>(&output.stdout).ok())
+        .map(|report| Records::from_report(&report))
         .unwrap_or_default()
 }
 
@@ -348,12 +504,13 @@ mod tests {
 
     #[test]
     fn parses_trace_events() {
-        let v: Value = serde_json::json!({"traceEvents": [
+        let v: KacheReport = serde_json::from_value(serde_json::json!({"traceEvents": [
             {"ts": 2_000_000.0, "args": {"crate_name": "a_b", "result": "local_hit", "elapsed_ms": 90, "compile_time_ms": 4000, "permit_wait_ms": 0}},
             {"ts": 3_000_000.0, "args": {"crate_name": "c", "result": "passthrough", "reason": "adaptive active", "elapsed_ms": 9000, "compile_time_ms": 3000, "permit_wait_ms": 6000}},
             {"ts": 3_000_000.0, "args": {"crate_name": "unknown", "result": "passthrough", "reason": "not-a-compile|probe"}},
             {"ts": 4_000_000.0, "args": {"crate_name": "d", "result": "dup", "elapsed_ms": 10, "compile_time_ms": 8}}
-        ]});
+        ]}))
+        .unwrap();
         let e = kache_events(&v);
         assert_eq!(e.len(), 3);
         assert_eq!(e[0].run.outcome, Outcome::Hit);
@@ -362,5 +519,31 @@ mod tests {
         assert!((e[1].run.wait - 6.0).abs() < 1e-9);
         assert!((e[1].start_ms - 3000.0).abs() < 1e-9);
         assert_eq!(e[2].run.outcome, Outcome::Miss);
+        assert_eq!(v.trace_events.skipped, 0);
+    }
+
+    #[test]
+    fn skips_a_malformed_event_and_keeps_the_rest() {
+        let report = KacheReport::from_value(&serde_json::json!({
+            "traceEvents": [
+                {"ts": 1_000_000.0, "args": {"crate_name": "good_one", "result": "miss", "compile_time_ms": 2000}},
+                {"ts": "not a number", "args": {"crate_name": "bad", "result": "miss"}},
+                {"ts": 2_000_000.0, "args": {"crate_name": "good_two", "result": "local_hit"}}
+            ],
+            "meta": {"session": {"argv": ["cargo", "build"], "commands": [{"argv": 7}, {"started_unix_ms": 5.0, "argv": ["cargo", "build"]}]}}
+        }));
+        assert_eq!(report.trace_events.skipped, 1);
+        let events = kache_events(&report);
+        let names: Vec<&str> = events
+            .iter()
+            .map(|event| event.crate_name.as_str())
+            .collect();
+        assert_eq!(names, ["good_one", "good_two"]);
+        let session = report.session().unwrap();
+        assert_eq!(
+            session.argv(),
+            Some(&["cargo".to_owned(), "build".to_owned()][..])
+        );
+        assert_eq!(session.commands.len(), 1);
     }
 }
