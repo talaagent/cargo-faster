@@ -333,14 +333,17 @@ impl Timings {
     }
 }
 
-/// The JSON array after `const NAME = `, up to the matching `];`.
+/// The JSON array after `const NAME = `, up to the matching `];`: on the
+/// same line (`const UNIT_DATA = [];`, which cargo 1.88 writes for a build
+/// that compiled nothing) or on a line of its own.
 fn js_const<'a>(html: &'a str, name: &str) -> Option<&'a str> {
     let start = html.find(&format!("const {name} = "))? + name.len() + 9;
     let rest = &html[start..];
-    let end = rest
-        .find("\n];")
-        .map(|e| e + 2)
-        .or_else(|| rest.find("];").map(|e| e + 1))?;
+    let line = &rest[..rest.find('\n').unwrap_or(rest.len())];
+    let end = line
+        .rfind("];")
+        .map(|e| e + 1)
+        .or_else(|| rest.find("\n];").map(|e| e + 2))?;
     Some(&rest[..end])
 }
 
@@ -410,6 +413,12 @@ mod tests {
             Timings::parse_html("<html></html>"),
             Err(ParseError::NoUnitData)
         );
+        // cargo 1.88 writes an empty array on one line, before other
+        // multi-line arrays.
+        let empty = "<script>\nconst UNIT_DATA = [];\nconst CONCURRENCY_DATA = [\n  {\"t\": 0.1}\n];\nconst CPU_USAGE = [\n[0.1, 40.0]\n];\n</script>";
+        let t = Timings::parse_html(empty).unwrap();
+        assert_eq!(t.units.len(), 0);
+        assert_eq!(t.cpu, [(0.1, 40.0)]);
         let bad = Timings::parse_html("const UNIT_DATA = [{\"x\": 1}];").unwrap_err();
         assert!(format!("{bad}").starts_with("parsing UNIT_DATA: "), "{bad}");
     }
