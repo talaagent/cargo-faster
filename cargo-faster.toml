@@ -1,0 +1,29 @@
+#:schema https://raw.githubusercontent.com/talaagent/cargo-faster/main/docs/cargo-faster.schema.json
+# cargo faster's settings for this repository: `cargo faster check` reads
+# them (docs/cargo-faster.md#the-configuration-file). Budgets are the
+# measured value plus about 25%.
+
+# The crates edited most: the CLI and the timings parser it is built around.
+hot = ["cargo-faster", "cargo-timings-parse"]
+
+# The parser crates are reusable on their own: no_std + alloc, no
+# cargo-faster concepts, no CLI or graph dependencies (AGENTS.md).
+[[layer]]
+crates = ["cargo-timings-parse", "nextest-libtest-json", "rustc-self-profile"]
+must_not_depend_on = ["cargo-faster", "guppy", "cargo_metadata", "toml*", "bpaf*"]
+reason = "the parser crates stay small, no_std and usable without cargo-faster"
+
+[budgets]
+cold_check_secs = 6                  # measured 4.8s
+edit_rebuild_secs = { cargo-faster = 4, cargo-timings-parse = 2 }   # 2.5s, 1.5s
+critical_path_max_crates = 2         # a parser crate, then cargo-faster
+no_new_critical_crates = ["cargo-timings-parse", "rustc-self-profile", "nextest-libtest-json", "cargo-faster"]
+max_duplicate_versions = 5           # 4: syn (serde_derive), hashbrown, foldhash, getrandom (guppy)
+
+[deps]
+# analyzeme reads both self-profile formats, so measureme and decodeme
+# come in two versions by design.
+allow_duplicates = ["measureme", "decodeme"]
+
+[env]
+nextest_profile = "ci"
