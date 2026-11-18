@@ -5,6 +5,7 @@ use crate::context::Metadata;
 use crate::finding::{Finding, Section, Severity};
 use alloc::collections::{BTreeMap, BTreeSet};
 use core::cmp::Ordering;
+use semver::Version;
 use serde::Serialize;
 
 /// What the dependency graph says.
@@ -313,52 +314,14 @@ fn dev_feature_splits(m: &Metadata) -> Vec<DevFeatureSplit> {
 /// Semver order, oldest first: `0.8.8 < 0.9.5 < 0.10.3`, and a pre-release
 /// sorts before its release (`1.0.0-alpha.2 < 1.0.0-beta < 1.0.0`). Build
 /// metadata (`+spec-1.1.0`) is ignored, with a string compare as the last
-/// tie-break so the order is total.
-fn cmp_versions(a: &str, b: &str) -> Ordering {
-    let (ka, kb) = (version_key(a), version_key(b));
-    ka.0.cmp(&kb.0)
-        .then_with(|| cmp_pre(ka.1, kb.1))
-        .then_with(|| a.cmp(b))
-}
-
-/// `1.2.3-rc.1+meta` -> (`[1, 2, 3]`, `rc.1`).
-fn version_key(v: &str) -> ([u64; 3], &str) {
-    let v = v.split_once('+').map_or(v, |(v, _)| v);
-    let (core, pre) = v.split_once('-').unwrap_or((v, ""));
-    let mut nums = [0; 3];
-    for (n, part) in nums.iter_mut().zip(core.split('.')) {
-        *n = part.parse().unwrap_or(0);
+/// tie-break so the order is total (and the only order for a version that
+/// isn't semver).
+fn cmp_versions(left: &str, right: &str) -> Ordering {
+    match (Version::parse(left), Version::parse(right)) {
+        (Ok(left_version), Ok(right_version)) => left_version.cmp_precedence(&right_version),
+        _ => Ordering::Equal,
     }
-    (nums, pre)
-}
-
-/// Pre-release order: none is greatest, then dot-separated identifiers,
-/// numeric ones as numbers and below alphanumeric ones.
-fn cmp_pre(a: &str, b: &str) -> Ordering {
-    match (a.is_empty(), b.is_empty()) {
-        (true, true) => return Ordering::Equal,
-        (true, false) => return Ordering::Greater,
-        (false, true) => return Ordering::Less,
-        (false, false) => {}
-    }
-    let mut a = a.split('.');
-    let mut b = b.split('.');
-    loop {
-        let o = match (a.next(), b.next()) {
-            (None, None) => return Ordering::Equal,
-            (None, Some(_)) => return Ordering::Less,
-            (Some(_), None) => return Ordering::Greater,
-            (Some(x), Some(y)) => match (x.parse::<u64>(), y.parse::<u64>()) {
-                (Ok(x), Ok(y)) => x.cmp(&y),
-                (Ok(_), Err(_)) => Ordering::Less,
-                (Err(_), Ok(_)) => Ordering::Greater,
-                (Err(_), Err(_)) => x.cmp(y),
-            },
-        };
-        if o != Ordering::Equal {
-            return o;
-        }
-    }
+    .then_with(|| left.cmp(right))
 }
 
 /// Crates whose duplicates are expensive enough to mention.

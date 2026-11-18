@@ -23,6 +23,7 @@ bpaf-kit = { version = "0.2.1", features = ["man", "log", "table"] }
 bpaf-kit-build = "0.2.1"
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
+semver = { version = "1", default-features = false }
 shlex = "2.0"
 # The Rust lexer syn uses, outside a proc macro.
 proc-macro2 = { version = "1", default-features = false }

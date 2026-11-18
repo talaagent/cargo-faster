@@ -128,6 +128,7 @@ dependencies = [
  "nextest-libtest-json",
  "proc-macro2",
  "rustc-self-profile",
+ "semver",
  "serde",
  "serde_json",
  "shlex",

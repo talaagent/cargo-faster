@@ -38,6 +38,7 @@ cargo-timings-parse.workspace = true
 nextest-libtest-json.workspace = true
 proc-macro2.workspace = true
 rustc-self-profile.workspace = true
+semver.workspace = true
 serde = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
 shlex.workspace = true
