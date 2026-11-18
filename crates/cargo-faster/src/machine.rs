@@ -51,6 +51,9 @@ pub struct Inputs {
     pub top_cpu: Vec<(String, f64)>,
     /// Filesystems of the build directories.
     pub mounts: Vec<Mount>,
+    /// A jobserver cargo would share with other processes: its
+    /// `--jobserver-auth` value and the variable that names it.
+    pub jobserver: Option<(String, &'static str)>,
     /// What couldn't be measured on this platform (`load`, `memory`,
     /// `other builds`, `filesystems`).
     pub unavailable: Vec<&'static str>,
@@ -437,6 +440,7 @@ impl Inputs {
             cargo_procs,
             top_cpu,
             mounts,
+            jobserver: ctx.jobserver().map(|(var, auth)| (auth.to_owned(), var)),
             unavailable,
         }
     }
@@ -502,6 +506,14 @@ fn facts(m: &Inputs, s: &mut Section) {
     }
     if !m.top_cpu.is_empty() {
         s.fact("top cpu", top_cpu_list(&m.top_cpu));
+    }
+    if let Some((auth, var)) = &m.jobserver {
+        s.fact(
+            "jobserver",
+            format!(
+                "{auth} ({var}): cargo runs a unit per token it gets, shared with every process on that jobserver"
+            ),
+        );
     }
     if !m.unavailable.is_empty() {
         s.fact(
@@ -705,7 +717,21 @@ mod tests {
         };
         let s = check(&m);
         assert_eq!(s.findings.len(), 0);
-        assert!(s.facts.iter().all(|f| f.key != "load"));
+        assert!(
+            s.facts
+                .iter()
+                .all(|f| f.key != "load" && f.key != "jobserver")
+        );
+        let shared = Inputs {
+            jobserver: Some(("fifo:/dev/js".into(), "MAKEFLAGS")),
+            ..m.clone()
+        };
+        assert!(
+            check(&shared)
+                .facts
+                .iter()
+                .any(|f| f.key == "jobserver" && f.value.starts_with("fifo:/dev/js (MAKEFLAGS)"))
+        );
         let f = s.facts.iter().find(|f| f.key == "unavailable").unwrap();
         assert!(
             f.value

@@ -978,6 +978,14 @@ fn timings_file_section(
         &runs,
     );
     let mut s = timings::section(&a, &path.display().to_string());
+    if let Some((var, auth)) = ctx.and_then(Context::jobserver)
+        && let Some(f) = s.findings.iter_mut().find(|f| f.id == "token-starved")
+    {
+        f.saw = format!(
+            "{} This environment sets {var} with --jobserver-auth={auth}: that jobserver is the likely cause.",
+            f.saw
+        );
+    }
     if let Some((p, _)) = &base {
         s.fact("baseline", p.display().to_string());
     }
