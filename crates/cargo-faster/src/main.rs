@@ -150,7 +150,7 @@ enum Command {
         command,
         footer(
             concat!(
-                "Uses RUSTC_BOOTSTRAP=1 so a stable rustc accepts -Zself-profile. `-p` picks the package and --lib/--bin/--test/--example/--bench the target; the rustc command is captured from `cargo check --workspace -vv` with the matching filter (--lib, --bin NAME, ...; with --tests also --profile test), which first checks the selected targets in every member and what they depend on. Cargo always gets --workspace, never -p, so caches keyed on the package set (kache) stay warm (unless CARGO_ARGS pick the packages themselves: --workspace, --all, -p). Target flags in CARGO_ARGS (-- --tests) replace the filter; the lib's --test build is then profiled when they include --tests.",
+                "Uses RUSTC_BOOTSTRAP=1 so a stable rustc accepts -Zself-profile. `-p` picks the package and --lib/--bin/--test/--example/--bench the target; the rustc command is captured from `cargo check --workspace -vv` with the matching filter (--lib, --bin NAME, ...; with --tests also --profile test), which first checks the selected targets in every member and what they depend on. Cargo always gets --workspace, never -p, so caches keyed on the package set (kache) stay warm, unless CARGO_ARGS pick the packages (--workspace, -p). Target flags in CARGO_ARGS (-- --tests) replace the filter; the lib's --test build is then profiled when they include --tests.",
                 "\n",
                 global_help!()
             )
