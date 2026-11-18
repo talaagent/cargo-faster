@@ -17,20 +17,47 @@ fn is_member(a: &Analysis, pkg: &str) -> Option<bool> {
         .map(|m| m.iter().any(|n| n.replace('_', "-") == want))
 }
 
+/// The `check-cost` target flags that profile the build of `unit` (a
+/// [`label`](cargo_timings_parse::Unit::label)): `--test NAME` for an
+/// integration test, `--tests` for a unit-test build, `--bin NAME` for a
+/// binary not named after its package.
+fn target_flags(unit: &str) -> String {
+    let Some(inner) = unit.split_once(" (").and_then(|(_, r)| r.strip_suffix(')')) else {
+        return String::new();
+    };
+    let mut parts = inner.split(", ");
+    let target = parts.next().unwrap_or_default();
+    let mode = parts.next().unwrap_or(target);
+    let mut flags = match target.split_once(' ') {
+        Some((kind @ ("test" | "bench" | "example" | "bin"), name)) => format!(" --{kind} {name}"),
+        _ => String::new(),
+    };
+    let unit_test =
+        mode.contains("test") && !target.starts_with("test ") && !target.starts_with("bench ");
+    if unit_test {
+        flags.push_str(" --tests");
+    }
+    flags
+}
+
 /// How to find out what's slow inside `pkg`. `check-cost -p` profiles
 /// workspace members only; for a dependency, `then` (advice that only
 /// makes sense for your own crate) is left out too.
-fn look_inside(a: &Analysis, pkg: &str, then: &str) -> String {
+fn look_inside(a: &Analysis, unit: &str, then: &str) -> String {
+    let pkg = package(unit);
+    let flags = target_flags(unit);
     let dep = format!(
         "{pkg} is a dependency, so you can't change its code: run `cargo faster deps` to see the features you enable on it and duplicate versions, turn off default features you don't use, check whether a newer version builds faster, and whether you need it at all."
     );
     match is_member(a, pkg) {
         Some(true) => {
-            format!("Find out what's slow inside it with `cargo faster check-cost -p {pkg}`.{then}")
+            format!(
+                "Find out what's slow inside it with `cargo faster check-cost -p {pkg}{flags}`.{then}"
+            )
         }
         Some(false) => dep,
         None => format!(
-            "If {pkg} is a workspace crate, find out what's slow inside it with `cargo faster check-cost -p {pkg}`.{then} If it's a dependency, run `cargo faster deps` to see the features you enable on it and duplicate versions, turn off default features you don't use, and check whether a newer version builds faster."
+            "If {pkg} is a workspace crate, find out what's slow inside it with `cargo faster check-cost -p {pkg}{flags}`.{then} If it's a dependency, run `cargo faster deps` to see the features you enable on it and duplicate versions, turn off default features you don't use, and check whether a newer version builds faster."
         ),
     }
 }
@@ -107,7 +134,7 @@ fn shape(a: &Analysis, out: &mut Vec<Finding>) {
             Finding::new("serial-crate", if pct(s.duration, a.wall) >= 50.0 { Severity::High } else { Severity::Medium }, format!("{} serializes the build", s.unit), "the-critical-path")
                 .saw(format!("{} took {} of the {} build while little else could run: {}.", s.unit, secs(s.duration), secs(a.wall), list.join("; ")))
                 .why("Cargo parallelizes across crates, but one crate is compiled by one rustc. A big crate everything else waits for (or that waits for everything) runs on a few cores while the rest idle.")
-                .fix(look_inside(a, package(&s.unit), " If it's just big, split it (see `cargo faster rdeps`) so the pieces build in parallel and edits rebuild less.")),
+                .fix(look_inside(a, &s.unit, " If it's just big, split it (see `cargo faster rdeps`) so the pieces build in parallel and edits rebuild less.")),
         );
     }
     if let Some(top) = a
@@ -122,7 +149,7 @@ fn shape(a: &Analysis, out: &mut Vec<Finding>) {
             Finding::new("critical-path-dominated", Severity::Medium, format!("{} is most of the critical path", top.unit), "the-critical-path")
                 .saw(format!("{} of the {} wall time is {} on the critical path.", secs(top.duration), secs(a.wall), top.unit))
                 .why("Speeding up crates off the critical path doesn't change the wall time. This one does.")
-                .fix(look_inside(a, package(&top.unit), "")),
+                .fix(look_inside(a, &top.unit, "")),
         );
     }
     if a.compiled >= 50 && a.parallelism < 3.0 && a.wall >= 30.0 {
@@ -163,7 +190,7 @@ fn per_unit(a: &Analysis, out: &mut Vec<Finding>) {
             Finding::new("post-metadata-analysis", Severity::Low, format!("{u} spends {} after its metadata", secs(*after)), "check-versus-build")
                 .saw(format!("{u} took {}, {} of it after writing its metadata. A check unit has no code generation: this is analysis after metadata (borrow checking, MIR checks) and, with incremental, saving the dependency graph.", secs(*d), secs(*after)))
                 .why("Dependents can start once the metadata is written, so this part is off their path, but it still holds a job slot and ends the check of anything that has to wait for the whole crate.")
-                .fix(look_inside(a, package(u), " A large incremental save shrinks when the crate is split.")),
+                .fix(look_inside(a, u, " A large incremental save shrinks when the crate is split.")),
         );
     }
     if let Some(UnitTime {
@@ -301,7 +328,7 @@ fn rebuilt(a: &Analysis, out: &mut Vec<Finding>) {
     };
     out.push(
         Finding::new("edit-rebuilt-many", if r.crates >= 40 { Severity::High } else { Severity::Medium }, format!("This build recompiled {} workspace crates", r.crates), "rebuild-fan-out")
-            .saw(format!("{} workspace crates recompiled ({} of units), starting from {roots}: an edit there rebuilds every crate that depends on it.", r.crates, secs(r.busy)))
+            .saw(format!("{} workspace crates recompiled ({} of units): {roots} and {} other workspace crates that depend on {}. An edit there rebuilds every crate that depends on it.", r.crates, secs(r.busy), r.crates.saturating_sub(r.roots.len()), if r.roots.len() == 1 { "it" } else { "them" }))
             .why("Cargo rebuilds every dependent of a changed crate. A crate low in the graph that many others use turns each edit into a rebuild of most of the workspace.")
             .fix(format!("See what depends on it and what's worth splitting out: `cargo faster rdeps {root}`. Move the often-edited parts into a crate fewer crates depend on, or the stable parts others need into a small crate below it.")),
     );
@@ -356,4 +383,24 @@ fn slow_build(a: &Analysis) -> Option<Finding> {
             .why("No single cause stood out, but the time is spent somewhere: the split above says which part of the build to look at first.")
             .fix(fix),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::target_flags;
+
+    #[test]
+    fn check_cost_target_flags() {
+        assert_eq!(target_flags("app"), "");
+        assert_eq!(target_flags("app (check)"), "");
+        assert_eq!(target_flags("app (lib, check)"), "");
+        assert_eq!(target_flags("app (bin, check-test)"), " --tests");
+        assert_eq!(target_flags("app (lib, test)"), " --tests");
+        assert_eq!(target_flags("app (test it, check-test)"), " --test it");
+        assert_eq!(target_flags("app (bin tool, check)"), " --bin tool");
+        assert_eq!(
+            target_flags("app (bin tool, check-test)"),
+            " --bin tool --tests"
+        );
+    }
 }

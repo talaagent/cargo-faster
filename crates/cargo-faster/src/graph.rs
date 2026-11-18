@@ -222,7 +222,7 @@ pub fn section(crates: &[CrateInfo], only: Option<&str>) -> Section {
             .collect();
         s.details.push(format!(
             "crates whose edits rebuild the most\n{}",
-            table(&["rebuilds", "lines", "crate"], &rows)
+            table(&["rebuilds others", "lines", "crate"], &rows)
         ));
     }
     let mut f = Vec::new();
@@ -256,7 +256,7 @@ pub fn section(crates: &[CrateInfo], only: Option<&str>) -> Section {
         }
         if members >= 6 && fanout * 2 >= members && fanout >= 5 && c.lines >= 2_000 {
             f.push(
-                Finding::new("high-fanout", Severity::Low, format!("Editing {} rebuilds {fanout} of {members} workspace crates", c.name), "rebuild-fan-out")
+                Finding::new("high-fanout", Severity::Low, format!("Editing {} rebuilds {fanout} other workspace crates (of {members})", c.name), "rebuild-fan-out")
                     .saw(format!("{fanout} workspace crates depend on {} directly or indirectly.", c.name))
                     .why("Every change to a crate near the bottom of the graph rebuilds everything above it, so its churn decides the cost of most edits.")
                     .fix(format!("Keep {} small and stable: move fast-changing code out of it, or split the parts few crates need into their own crate.", c.name)),

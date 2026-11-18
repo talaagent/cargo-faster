@@ -411,10 +411,11 @@ fn pick_last(inputs: &Inputs) -> Option<(&Value, Option<&str>)> {
 }
 
 /// Say whose session it is when it's another tree's.
-fn elsewhere_label(fact: String, elsewhere: Option<&str>) -> String {
+fn elsewhere_label(fact: String, elsewhere: Option<&str>, home: Option<&str>) -> String {
     match elsewhere {
         Some(root) => format!(
-            "{fact}, in {root}: this tree's latest session only probed, so this is the latest session with compiles"
+            "{fact}, in {} (this tree's latest session only probed)",
+            tilde(root, home)
         ),
         None => fact,
     }
@@ -422,8 +423,7 @@ fn elsewhere_label(fact: String, elsewhere: Option<&str>) -> String {
 
 fn last_build_fact(total: f64, pass: f64, hit: f64, weighted: f64) -> String {
     if total < 1.0 && pass < 1.0 {
-        "no compiles in the latest session (only probes); run a build first for per-build numbers"
-            .to_owned()
+        "no compiles in the latest session (only probes); build first".to_owned()
     } else if total < 1.0 {
         format!("no cache lookups, {pass:.0} passthroughs")
     } else {
@@ -590,7 +590,11 @@ pub fn check(ctx: &Context, inputs: &Inputs) -> Section {
         }
         s.fact(
             "kache last build",
-            elsewhere_label(last_build_fact(total, pass, hit, weighted), elsewhere),
+            elsewhere_label(
+                last_build_fact(total, pass, hit, weighted),
+                elsewhere,
+                inputs.home.as_deref(),
+            ),
         );
         if let Some(t) = uncached_tail(last) {
             s.fact("kache latest", tail_fact(&t, inputs.now_unix_ms));
@@ -869,7 +873,7 @@ mod tests {
         };
         assert_eq!(
             fact(&inputs),
-            "81% hits (87% by time) over 540 crates, 2 passthroughs, in /src/app-worktrees/feature: this tree's latest session only probed, so this is the latest session with compiles"
+            "81% hits (87% by time) over 540 crates, 2 passthroughs, in /src/app-worktrees/feature (this tree's latest session only probed)"
         );
         // Nothing compiled anywhere: say so.
         inputs.kache_last_any = inputs.kache_last.clone();

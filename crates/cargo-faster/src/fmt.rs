@@ -59,6 +59,17 @@ pub fn ellipsize(s: &str, max: usize) -> String {
     format!("{start}...{end}")
 }
 
+/// The first `n` of `items`, comma-separated, then "and N more": shortens
+/// a long list without cutting into the names.
+#[must_use]
+pub fn capped<S: AsRef<str>>(items: &[S], n: usize) -> String {
+    let shown: Vec<&str> = items.iter().take(n).map(AsRef::as_ref).collect();
+    match items.len().saturating_sub(n) {
+        0 => shown.join(", "),
+        more => format!("{} and {more} more", shown.join(", ")),
+    }
+}
+
 /// Wrap `text` to `width` columns, each line prefixed by `indent`.
 #[must_use]
 pub fn wrap(text: &str, width: usize, indent: &str) -> String {
@@ -87,6 +98,13 @@ pub fn wrap(text: &str, width: usize, indent: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn caps_lists() {
+        assert_eq!(capped(&["a", "b"], 3), "a, b");
+        assert_eq!(capped(&["a", "b", "c", "d"], 2), "a, b and 2 more");
+        assert_eq!(capped::<&str>(&[], 2), "");
+    }
 
     #[test]
     fn formats() {

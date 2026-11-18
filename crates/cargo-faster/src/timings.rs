@@ -13,7 +13,7 @@ pub mod run;
 pub mod wrapper;
 
 use crate::finding::{Section, table};
-use crate::fmt::{ellipsize, pct, secs};
+use crate::fmt::{capped, ellipsize, pct, secs};
 use alloc::collections::BTreeSet;
 use breakdown::WrapperSummary;
 pub use breakdown::workspace_from_metadata;
@@ -208,7 +208,7 @@ pub fn section(a: &Analysis, source: &str) -> Section {
                 format!(
                     "{} workspace crates, from {}",
                     r.crates,
-                    ellipsize(&r.roots.join(", "), 60)
+                    capped(&r.roots, 3)
                 )
             },
         );
@@ -676,7 +676,8 @@ mod tests {
         assert_eq!(w.hits.0 + w.misses.0, 0);
         assert_eq!(a.path.len(), a.critical_path.len());
         assert!(a.path.iter().all(|p| p.cache == Some(Outcome::Incr)));
-        assert!(a.critical_path.last().unwrap().unit.ends_with("\"bin\""));
+        let last = &a.critical_path.last().unwrap().unit;
+        assert!(last.contains("(bin"), "{last}");
         // The fixture's graph has every crate on app-core only, so the one
         // workspace edge on the path is the first step.
         let edges = path_edges(&a, &ws);

@@ -356,10 +356,10 @@ fn unit_of<'a>(units: &'a [TestUnit], b: &Listed) -> Option<&'a TestUnit> {
 }
 
 fn binary_label(b: &Listed) -> String {
-    if b.kind == "lib" {
-        format!("{} (lib)", b.krate)
+    if b.kind == "lib" || (b.kind == "bin" && b.name == b.krate) {
+        format!("{} ({})", b.krate, b.kind)
     } else {
-        format!("{} {} \"{}\"", b.krate, b.kind, b.name)
+        format!("{} ({} {})", b.krate, b.kind, b.name)
     }
 }
 
@@ -793,16 +793,16 @@ not json
         assert_eq!(f.severity, Severity::Medium);
         assert_eq!(f.title, "2 test binaries hold no tests");
         assert!(
-            f.saw.contains(
-                "bridges (lib) (built in 65.9s), persona bin \"persona\" (built in 63.8s)"
-            ) && f.saw.contains("took 130s of unit time"),
+            f.saw
+                .contains("bridges (lib) (built in 65.9s), persona (bin) (built in 63.8s)")
+                && f.saw.contains("took 130s of unit time"),
             "{}",
             f.saw
         );
         assert!(
             s.findings[1]
                 .saw
-                .contains("agent bin \"agent\" (1 test(s), built in 35.3s)")
+                .contains("agent (bin) (1 test(s), built in 35.3s)")
         );
     }
 

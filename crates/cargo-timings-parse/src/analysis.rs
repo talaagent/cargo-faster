@@ -794,7 +794,7 @@ mod tests {
         assert!((a.wall - 554.0).abs() < 1e-9);
         assert_eq!(a.linked.units, 6);
         assert!((a.linked.tail - 194.0).abs() < 1e-9);
-        assert_eq!(a.linked.slowest[0].unit, "tool-5 tool-5 \"bin\"");
+        assert_eq!(a.linked.slowest[0].unit, "tool-5 (bin)");
         assert!((a.linked.slowest[0].took - 194.0).abs() < 1e-9);
         let s = a.slowdown.unwrap();
         assert!(s.baseline_check);
