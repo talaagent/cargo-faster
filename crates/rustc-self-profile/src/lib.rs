@@ -277,7 +277,8 @@ pub struct Analysis {
     /// Obligations, most expensive first (up to 40).
     pub obligations: Vec<Obligation>,
     /// Trait solving by the crate of the type being proved, or
-    /// `async bodies` / `impl Future`.
+    /// `async bodies` / `impl Future` / `generic parameters` (see
+    /// [`category`]).
     pub trait_solving_by_category: Vec<Cost>,
     /// Types whose `Send`/`Sync` proofs add up.
     pub heavy_types: Vec<HeavyType>,
@@ -775,18 +776,23 @@ fn first_arg(s: &str) -> &str {
 }
 
 /// How [`Analysis::trait_solving_by_category`] groups a self type:
-/// `async bodies in <crate>`, `opaque impl Future`, `types from <crate>`,
-/// or `other`.
+/// `async bodies in <crate>`, `async blocks` (no source location),
+/// `opaque impl Future`, `types from <crate>`, `generic parameters`
+/// (`T`, `Self`, a derive's `__A`: a bare name with no path), or `other`
+/// (primitives, `()`, tuples, projections).
 #[must_use]
 pub fn category(ty: &str) -> String {
     if is_async_body(ty) {
-        let crate_name = ty.split_once('@').map_or("?", |(_, rest)| {
+        let crate_name = ty.split_once('@').and_then(|(_, rest)| {
             rest.trim_start_matches("crates/")
                 .split(['/', ':'])
                 .next()
-                .unwrap_or("?")
+                .filter(|c| !c.is_empty())
         });
-        return format!("async bodies in {crate_name}");
+        return crate_name.map_or_else(
+            || "async blocks".to_owned(),
+            |c| format!("async bodies in {c}"),
+        );
     }
     if ty.starts_with("impl ") || ty.starts_with("{opaque") {
         return "opaque impl Future".to_owned();
@@ -801,6 +807,17 @@ pub fn category(ty: &str) -> String {
         || !krate.starts_with(|c: char| c.is_alphanumeric() || c == '_')
     {
         return "other".to_owned();
+    }
+    // Self types print with their full path, so a bare name is a generic
+    // parameter, or a primitive.
+    if !root.contains("::") {
+        let generic = krate == "Self" || krate.starts_with(|c: char| c.is_uppercase() || c == '_');
+        return if generic {
+            "generic parameters"
+        } else {
+            "other"
+        }
+        .to_owned();
     }
     format!("types from {krate}")
 }
@@ -852,6 +869,12 @@ mod tests {
         assert_eq!(category("()"), "other");
         assert_eq!(category("!"), "other");
         assert_eq!(category("(u8, a::B)"), "other");
+        // Generic parameters and primitives aren't crates either.
+        assert_eq!(category("F"), "generic parameters");
+        assert_eq!(category("Self"), "generic parameters");
+        assert_eq!(category("&__A"), "generic parameters");
+        assert_eq!(category("u8"), "other");
+        assert_eq!(category("{async block}"), "async blocks");
     }
 
     /// 60 async bodies, each proving `Arc<Bot>: Send` and `Bot: Sync`.
