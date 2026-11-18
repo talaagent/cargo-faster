@@ -20,7 +20,7 @@ on:
 permissions: {}
 
 env:
-  RUST_TOOLCHAIN: "1.99.1"
+  RUST_TOOLCHAIN: "1.100.0"
 
 jobs:
   # The built-in GITHUB_TOKEN can maintain release PRs when repository and
