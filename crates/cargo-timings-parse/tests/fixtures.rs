@@ -97,7 +97,7 @@ fn build_after_check() {
     assert_eq!((a.compiled, a.units_fresh), (62, 0));
     assert!(close(a.wall, 7.38));
     let last = a.critical_path.last().unwrap();
-    assert_eq!(last.unit, "cargo-faster cargo-faster \"bin\"");
+    assert_eq!(last.unit, "cargo-faster (bin)");
     assert_eq!(last.of.kind, Kind::Link);
     assert_eq!(a.critical_path.len(), 7);
     assert_eq!(a.critical_path[0].unit, "regex-syntax");

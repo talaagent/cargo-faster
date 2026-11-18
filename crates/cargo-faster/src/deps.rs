@@ -566,7 +566,7 @@ fn dev_feature_split_finding(a: &Analysis) -> Option<Finding> {
     };
     Some(
         Finding::new("dev-dependency-feature-split", Severity::Low, title, "dev-dependency-features-split-the-build")
-            .saw(format!("{}{more}. Together {} workspace crates ({}) resolve one feature set in builds with dev-dependencies (tests, `--all-targets`) and another without them.", shown.join(", "), rebuilt.len(), rebuilt.iter().copied().collect::<Vec<_>>().join(", ")))
+            .saw(format!("{}{more}. Together {} workspace crates ({}) resolve one feature set in builds with dev-dependencies (tests, `--all-targets`) and another without them.", shown.join(", "), rebuilt.len(), crate::fmt::capped(&rebuilt.iter().copied().collect::<Vec<_>>(), 8)))
             .why("Builds that include the crate's tests turn the features on; builds that don't (`cargo build --release`, `cargo clippy -p bin --lib --bins`) leave them off. Each feature set is a separate compile of that crate and of every workspace crate depending on it, with its own cache keys, so a gate that runs both a production check and a `--workspace --all-targets` build or test compiles them twice and shares nothing between the two.")
             .fix("If the repo builds both, either make the feature additive and harmless enough to keep on in every build (one feature set, one build), or drop the separate production step and let `--workspace --all-targets` cover it, checking production-only code (`cfg(not(feature = ...))`) another way. If only one kind of build ever runs, this costs nothing. Tradeoff: leaving the feature on compiles test helpers into normal builds (see test-features-in-dependencies)."),
     )

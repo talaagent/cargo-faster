@@ -20,7 +20,7 @@ $ cargo faster
   [medium] 6 heavy crates are built in more than one version
   [medium] app-agent has 108449 lines of Rust
   [low] cargo is limited to 16 jobs on 32 CPUs
-  [low] Editing app-spool rebuilds 98 of 183 workspace crates
+  [low] Editing app-spool rebuilds 98 other workspace crates (of 183)
 ```
 
 The quick report reads your configuration, caches, test setup, dependency graph, and machine, and builds nothing. To see inside the compiler, find the slow crate with `cargo faster timings --run` (`--cmd build|clippy|test` for other builds, `--edit CRATE` to time the rebuild after an edit to one crate), then self-profile it:

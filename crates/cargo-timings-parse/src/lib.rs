@@ -30,7 +30,7 @@
 //! let a = analyze(&t);
 //! assert!((a.wall - 6.1).abs() < 1e-9);
 //! let path: Vec<&str> = a.critical_path.iter().map(|s| s.unit.as_str()).collect();
-//! assert_eq!(path, ["core-lib", "app-cli app \"bin\""]);
+//! assert_eq!(path, ["core-lib", "app-cli (bin app)"]);
 //! # Ok::<(), cargo_timings_parse::ParseError>(())
 //! ```
 //!
@@ -171,10 +171,37 @@ impl Unit {
         self.rmeta_time.map(|r| self.duration - r)
     }
 
-    /// `name target` for display, e.g. `app (check-test)`.
+    /// The unit for display: the package, then the target and mode in
+    /// parentheses, e.g. `app`, `app (check)`, `app-bin (bin, check)`,
+    /// `app (test it, check-test)`, `app (build-script, run)`. A lib or bin
+    /// target goes without its name; a test, example or bench keeps it.
     #[must_use]
     pub fn label(&self) -> String {
-        format!("{}{}", self.name, self.target)
+        let t = self.target.trim();
+        let (rest, mode) = match t.strip_suffix(')').and_then(|t| t.rsplit_once('(')) {
+            Some((rest, mode)) => (rest.trim(), Some(mode)),
+            None => (t, None),
+        };
+        let mut parts: Vec<String> = Vec::new();
+        match rest.split_once(' ') {
+            Some((name, kind)) if kind.starts_with('"') => {
+                let kind = kind.trim_matches('"');
+                let own = name.replace('-', "_") == self.name.replace('-', "_");
+                parts.push(if kind == "lib" || (kind == "bin" && own) {
+                    kind.to_owned()
+                } else {
+                    format!("{kind} {name}")
+                });
+            }
+            _ if !rest.is_empty() => parts.push(rest.to_owned()),
+            _ => {}
+        }
+        parts.extend(mode.map(str::to_owned));
+        if parts.is_empty() {
+            self.name.clone()
+        } else {
+            format!("{} ({})", self.name, parts.join(", "))
+        }
     }
 
     /// What the unit is, for JSON output.
@@ -458,6 +485,30 @@ mod tests {
             ..Unit::default()
         };
         assert!(run.is_build_script());
+    }
+
+    #[test]
+    fn labels() {
+        let l = |target: &str| {
+            Unit {
+                name: "app-bin".into(),
+                target: target.into(),
+                ..Unit::default()
+            }
+            .label()
+        };
+        assert_eq!(l(""), "app-bin");
+        assert_eq!(l(" (check)"), "app-bin (check)");
+        assert_eq!(l(" app-bin \"bin\" (check)"), "app-bin (bin, check)");
+        assert_eq!(l(" app \"bin\" (check)"), "app-bin (bin app, check)");
+        assert_eq!(l(" app_bin \"lib\" (test)"), "app-bin (lib, test)");
+        assert_eq!(
+            l(" it \"test\" (check-test)"),
+            "app-bin (test it, check-test)"
+        );
+        assert_eq!(l(" app-bin \"bin\""), "app-bin (bin)");
+        assert_eq!(l(" build-script (run)"), "app-bin (build-script, run)");
+        assert_eq!(l(" build-script"), "app-bin (build-script)");
     }
 
     #[test]

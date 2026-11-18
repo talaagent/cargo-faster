@@ -105,7 +105,7 @@ With no subcommand, `cargo faster` runs every check that's quick and doesn't bui
   [medium] 6 heavy crates are built in more than one version
   [medium] app-agent has 108449 lines of Rust
   [low] cargo is limited to 16 jobs on 32 CPUs
-  [low] Editing app-spool rebuilds 98 of 183 workspace crates
+  [low] Editing app-spool rebuilds 98 other workspace crates (of 183)
   [low] app-admin-proto-orgs is 43509 lines, mostly generated code
   [low] app-admin-proto-personas is 50889 lines, mostly generated code
   [low] app-room-ops uses 2 items from app-config (31k lines)
@@ -562,11 +562,11 @@ $ cargo faster rdeps app-core   # one crate (or -p app-core)
   workspace crates  183
 
   crates whose edits rebuild the most
-  rebuilds  lines  crate
-        98   6417  app-spool
-        95    150  app-ids
-        91   2640  app-hook-wire
-        87  11878  app-core
+  rebuilds others  lines  crate
+               98   6417  app-spool
+               95    150  app-ids
+               91   2640  app-hook-wire
+               87  11878  app-core
         ...
 
   dependency edges that are cheap to cut
@@ -576,7 +576,7 @@ $ cargo faster rdeps app-core   # one crate (or -p app-core)
   [medium] app-agent has 108449 lines of Rust
     saw: app-agent is 108449 lines; its biggest modules are delegates (14378 lines), agent
          (11366 lines), personas (9094 lines), guests.rs (3243 lines).
-  [low] Editing app-spool rebuilds 98 of 183 workspace crates
+  [low] Editing app-spool rebuilds 98 other workspace crates (of 183)
   [low] app-admin-proto-personas is 50889 lines, mostly generated code
   [low] app-room-ops uses 2 items from app-config (31k lines)
     saw: app-room-ops depends on app-config (31107 lines) but uses only
