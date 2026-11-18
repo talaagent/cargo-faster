@@ -24,6 +24,8 @@ bpaf-kit-build = "0.2.1"
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
 shlex = "2.0"
+# The Rust lexer syn uses, outside a proc macro.
+proc-macro2 = { version = "1", default-features = false }
 # Parsing only: no printing or proc-macro support, and `full` for items.
 syn = { version = "3", default-features = false, features = ["full", "parsing", "visit"] }
 thiserror = "2"

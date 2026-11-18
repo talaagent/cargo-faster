@@ -126,6 +126,7 @@ dependencies = [
  "cargo-timings-parse",
  "guppy",
  "nextest-libtest-json",
+ "proc-macro2",
  "rustc-self-profile",
  "serde",
  "serde_json",
