@@ -147,7 +147,7 @@ $ cargo faster timings --cmd clippy                 # cargo clippy --workspace -
 $ cargo faster timings --cmd test -- --profile ci   # cargo nextest run --workspace --no-run --timings --profile ci
 ```
 
-`--cmd test` times the test build: `cargo nextest run --no-run` when nextest is installed, `cargo test --no-run` otherwise. Every build is `--workspace`, never `-p`, so it resolves features and cache keys the way your usual build does. Clippy runs rustc through `clippy-driver`, so its units don't share artifacts or cache entries with `cargo check`: time the one you wait on.
+`--cmd test` times the test build: `cargo nextest run --no-run` when nextest is installed, `cargo test --no-run` otherwise. Every build is `--workspace`, never `-p`, so it resolves features and cache keys the way your usual build does. If the arguments after `--` already pick the packages (`--workspace`, `--all`, `-p`), cargo faster leaves its own `--workspace` out, so a gate command like `-- --workspace --all-targets` can be pasted as is. Clippy runs rustc through `clippy-driver`, so its units don't share artifacts or cache entries with `cargo check`: time the one you wait on.
 
 ### What an edit to one crate costs
 
