@@ -12,7 +12,7 @@ documentation = "https://docs.rs/cargo-timings-parse"
 readme = "README.md"
 keywords = ["cargo", "timings", "build-time", "critical-path", "compile-time"]
 categories = ["development-tools::cargo-plugins", "development-tools::profiling", "parser-implementations", "no-std"]
-include = ["src/**/*.rs", "examples/**", "tests/*.rs", "/README.md", "/LICENSE", "/NOTICE"]
+include = ["src/**/*.rs", "examples/**", "tests/*.rs", "tests/fixtures/**", "/README.md", "/LICENSE", "/NOTICE"]
 
 [features]
 default = ["std"]
