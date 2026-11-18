@@ -180,14 +180,15 @@ pub fn edit_target(m: &Metadata, name: &str) -> Result<EditTarget, Error> {
     })
 }
 
-/// The cargo fingerprint directories (`<package>-<hash>`) of `members`
-/// (package names) in the target directory, in any profile
-/// (`debug/.fingerprint`) or target
-/// (`x86_64-unknown-linux-gnu/debug/.fingerprint`). Each is one unit: a
-/// package's target in one mode, profile and feature set, so a check, a
-/// test build and a release build of a crate each have their own.
+/// The cargo fingerprint directories of `members` (package names) in the
+/// build directory, in any profile (`debug/`) or target
+/// (`x86_64-unknown-linux-gnu/debug/`): `.fingerprint/<package>-<hash>`
+/// before cargo 1.100, `build/<package>/<hash>` (holding `fingerprint/`)
+/// from 1.100 on. Each is one unit: a package's target in one mode,
+/// profile and feature set, so a check, a test build and a release build
+/// of a crate each have their own.
 #[must_use]
-pub fn fingerprints(target_dir: &Path, members: &[&str]) -> BTreeSet<PathBuf> {
+pub fn fingerprints(build_dir: &Path, members: &[&str]) -> BTreeSet<PathBuf> {
     let subdirs = |p: &Path| -> Vec<PathBuf> {
         std::fs::read_dir(p)
             .map(|d| {
@@ -198,23 +199,32 @@ pub fn fingerprints(target_dir: &Path, members: &[&str]) -> BTreeSet<PathBuf> {
             })
             .unwrap_or_default()
     };
-    let mut dirs = Vec::new();
-    for profile in subdirs(target_dir) {
-        dirs.push(profile.join(".fingerprint"));
-        dirs.extend(
-            subdirs(&profile)
-                .into_iter()
-                .map(|p| p.join(".fingerprint")),
-        );
+    let mut profiles = Vec::new();
+    for profile in subdirs(build_dir) {
+        profiles.extend(subdirs(&profile));
+        profiles.push(profile);
     }
-    dirs.iter()
-        .flat_map(|d| subdirs(d))
-        .filter(|d| package(d).is_some_and(|pkg| members.contains(&pkg)))
-        .collect()
+    let old = profiles
+        .iter()
+        .flat_map(|p| subdirs(&p.join(".fingerprint")))
+        .filter(|d| package(d).is_some_and(|pkg| members.contains(&pkg)));
+    let new = profiles.iter().flat_map(|p| {
+        members
+            .iter()
+            .flat_map(|m| subdirs(&p.join("build").join(m)))
+            .filter(|d| d.join("fingerprint").is_dir())
+            .collect::<Vec<_>>()
+    });
+    old.chain(new).collect()
 }
 
-/// The package of a fingerprint directory, `app-core` for `app-core-9f8e`.
+/// The package of a fingerprint directory: `app-core` for
+/// `.fingerprint/app-core-9f8e` and for `build/app-core/9f8e`.
 fn package(dir: &Path) -> Option<&str> {
+    let parent = dir.parent()?;
+    if parent.parent()?.file_name()? == "build" {
+        return parent.file_name()?.to_str();
+    }
     dir.file_name()?
         .to_str()?
         .rsplit_once('-')
@@ -467,6 +477,32 @@ mod tests {
         assert_eq!(same.resolve(["app"]), None);
         assert_eq!(FirstBuildHint::Edit.resolve(["app"]), Some(false));
         assert_eq!(FirstBuildHint::Unknown.resolve(["app"]), None);
+    }
+
+    #[test]
+    fn first_build_per_mode_in_the_1_100_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = dir.path();
+        let fp = |d: &str| std::fs::create_dir_all(t.join(d).join("fingerprint")).unwrap();
+        let members = ["app-core", "app"];
+        fp("debug/build/serde/0123abcd");
+        // A unit dir without a fingerprint isn't one.
+        std::fs::create_dir_all(t.join("debug/build/app/77aa/out")).unwrap();
+        assert!(fingerprints(t, &members).is_empty());
+        // A check of both crates.
+        fp("debug/build/app/1111");
+        fp("x86_64-unknown-linux-gnu/debug/build/app-core/9f8e");
+        let checked = fingerprints(t, &members);
+        assert_eq!(checked.len(), 2);
+        // Then a first test build: new units for both.
+        fp("debug/build/app/2222");
+        fp("debug/build/app-core/3333");
+        let hint = FirstBuildHint::new(&checked, &fingerprints(t, &members));
+        assert_eq!(
+            hint,
+            FirstBuildHint::New(["app".into(), "app-core".into()].into())
+        );
+        assert_eq!(hint.resolve(["app", "app-core"]), Some(true));
     }
 
     #[test]

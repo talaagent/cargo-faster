@@ -18,6 +18,11 @@ pub struct Metadata {
     pub workspace_root: PathBuf,
     /// Target directory.
     pub target_directory: PathBuf,
+    /// Build directory (`build.build-dir`, cargo 1.91 on): where cargo
+    /// keeps intermediate artifacts and fingerprints. Older cargo leaves
+    /// it out; it's the target directory then.
+    #[serde(default)]
+    pub build_directory: Option<PathBuf>,
     /// Package ids of workspace members.
     pub workspace_members: Vec<String>,
     /// All packages in the dependency graph.
@@ -410,6 +415,16 @@ impl Context {
         self.metadata
             .as_ref()
             .map_or_else(|| self.cwd.join("target"), |m| m.target_directory.clone())
+    }
+
+    /// The build directory: intermediate artifacts and fingerprints
+    /// (`build.build-dir`), the target directory unless set.
+    #[must_use]
+    pub fn build_dir(&self) -> PathBuf {
+        self.metadata
+            .as_ref()
+            .and_then(|m| m.build_directory.clone())
+            .unwrap_or_else(|| self.target_dir())
     }
 
     /// An environment variable.
