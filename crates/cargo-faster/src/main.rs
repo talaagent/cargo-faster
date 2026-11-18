@@ -7,13 +7,14 @@ use alloc::collections::BTreeSet;
 use bpaf::Bpaf;
 use bpaf_kit::log::LogArgs;
 use bpaf_kit::{Cli, cmd};
+use cargo_faster::config::Config;
 use cargo_faster::context::{Context, build, cargo_bin};
 use cargo_faster::error::Error;
 use cargo_faster::error::UnknownName;
 use cargo_faster::finding::{Fact, Report, Section, Severity};
 use cargo_faster::timings::run::{FirstBuildHint, without_workspace_if_picked};
 use cargo_faster::{
-    cache, checkcost, deps, graph, machine, profile, setup, testrun, tests, timings,
+    cache, check, checkcost, config, deps, graph, machine, profile, setup, testrun, tests, timings,
 };
 use std::ffi::OsString;
 use std::io::Write;
@@ -134,6 +135,8 @@ enum Command {
         edit: Option<String>,
         /// With --edit, change a private function's body instead of the crate's API
         body: bool,
+        /// Measure an edit to each hot crate (`hot` in cargo-faster.toml), one after another
+        hot: bool,
         /// Exit 0 when the timed build fails (the report covers what it compiled); without it, exit 3
         allow_failed_build: bool,
         #[bpaf(external(nice))]
@@ -147,6 +150,26 @@ enum Command {
         /// Extra cargo arguments for --run and --edit, after `--` (e.g. -- --profile gate)
         #[bpaf(positional("CARGO_ARGS"), strict, many)]
         cargo_args: Vec<String>,
+    },
+    /// Check the configuration's rules (cargo-faster.toml): layering, flagged and duplicate dependencies; with --timings, the time budgets
+    #[bpaf(
+        command,
+        footer(
+            concat!(
+                "Reads cargo-faster.toml at the workspace root, or [workspace.metadata.cargo-faster] in Cargo.toml. Without --timings nothing is built: the dependency rules run on `cargo metadata --all-features`, resolved like cargo would (features, platform-specific dependencies). --timings also times a cold `cargo check --workspace --timings` in a separate target directory (removed afterwards) for cold_check_secs and the critical-path budgets, and an edit to each hot crate with an edit_rebuild_secs budget. Exit status 1 when a rule is broken (findings `[[accept]]` covers don't count).",
+                "\n",
+                global_help!()
+            )
+        )
+    )]
+    Check {
+        /// Also measure the time budgets: a cold check and an edit to each budgeted hot crate
+        timings: bool,
+        /// Output: text (the default) or github (workflow annotations, ::error ...)
+        #[bpaf(argument("FORMAT"))]
+        format: Option<CheckFormat>,
+        #[bpaf(external(nice))]
+        nice: Nice,
     },
     /// Self-profile type checking of one crate: top queries, trait solving by type and body, proc macros
     #[bpaf(
@@ -210,6 +233,26 @@ enum TargetSel {
     },
 }
 
+/// `check --format`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum CheckFormat {
+    /// The usual report.
+    #[default]
+    Text,
+    /// GitHub Actions workflow commands.
+    Github,
+}
+
+impl core::str::FromStr for CheckFormat {
+    type Err = bpaf_kit::suggest::UnknownValue;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        const FORMATS: &[(&str, CheckFormat)] =
+            &[("text", CheckFormat::Text), ("github", CheckFormat::Github)];
+        bpaf_kit::suggest::parse_choice("format", s, FORMATS)
+    }
+}
+
 /// `--fail-on LEVEL`: the least severe finding that fails the run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FailOn(Severity);
@@ -246,8 +289,15 @@ fn main() -> ExitCode {
     }
     match run(&opts) {
         Ok(report) => {
+            let check = matches!(opts.cmd, Command::Check { .. });
             let text = if opts.json {
                 report.to_json()
+            } else if let Command::Check {
+                format: Some(CheckFormat::Github),
+                ..
+            } = opts.cmd
+            {
+                check::github_annotations(&report.findings())
             } else {
                 report.render_text(bpaf_kit::color_enabled(&std::io::stdout()))
             };
@@ -269,6 +319,18 @@ fn main() -> ExitCode {
                     f.title.to_lowercase()
                 ));
                 return bpaf_kit::report::report_as("cargo faster", &e);
+            }
+            let broken = report
+                .findings()
+                .iter()
+                .filter(|f| f.severity > Severity::Info)
+                .count();
+            if check && broken > 0 {
+                eprintln!(
+                    "cargo faster: check failed: {broken} rule{} broken",
+                    if broken == 1 { "" } else { "s" }
+                );
+                return ExitCode::FAILURE;
             }
             match opts.fail_on {
                 Some(FailOn(level)) if report.findings().iter().any(|f| f.severity >= level) => {
@@ -331,6 +393,13 @@ fn check_usage(cmd: &Command) -> Result<(), Error> {
         } if p != k => Err(Error::Usage(format!(
             "rdeps takes one crate: -p {p} or {k}, not both"
         ))),
+        Command::Timings {
+            hot: true,
+            edit: Some(_),
+            ..
+        } => Err(Error::Usage(
+            "--hot measures every hot crate; --edit CRATE measures one: pick one".into(),
+        )),
         _ => Ok(()),
     }
 }
@@ -381,7 +450,14 @@ fn run(opts: &Opts) -> Result<Report, Error> {
             accepted: Vec::new(),
         });
     }
-    let ctx = Context::gather(opts.manifest_path.as_deref())?;
+    let mut ctx = Context::gather(opts.manifest_path.as_deref())?;
+    let loaded = Config::load(ctx.root(), &ctx.manifest)?;
+    if let Some(m) = &ctx.metadata {
+        let members: Vec<&str> = m.members().map(|p| p.name.as_str()).collect();
+        loaded.config.check_names(members.iter().copied())?;
+    }
+    ctx.faster = loaded.config.clone();
+    let ctx = ctx;
     let mut report = Report {
         workspace: Some(ctx.root().display().to_string()),
         ..Report::default()
@@ -408,41 +484,73 @@ fn run(opts: &Opts) -> Result<Report, Error> {
             run,
             nice,
             nextest_args,
-        } => tests_sections(&ctx, *run, nice.n, nextest_args, &mut report)?,
-        Command::Rdeps { package, krate } => report
+        } => {
+            let mut args = nextest_args.clone();
+            if let Some(p) = &ctx.faster.env.nextest_profile
+                && !args
+                    .iter()
+                    .any(|a| a == "--profile" || a == "-P" || a.starts_with("--profile="))
+            {
+                args.splice(0..0, ["--profile".to_owned(), p.clone()]);
+            }
+            tests_sections(&ctx, *run, nice.n, &args, &mut report)?;
+        }
+        Command::Rdeps { package, krate } => report.sections.push(rdeps_section(
+            &m,
+            package.as_deref().or(krate.as_deref()),
+            &ctx.faster.hot,
+        )?),
+        Command::Check {
+            timings,
+            format: _,
+            nice,
+        } => report
             .sections
-            .push(rdeps_section(&m, package.as_deref().or(krate.as_deref()))?),
+            .extend(check_sections(&ctx, &loaded, *timings, nice.n)?),
         Command::Timings {
             file,
             run,
             cmd,
             edit,
             body,
+            hot,
             nice,
             baseline,
             cargo_args,
             allow_failed_build: _,
         } => {
-            let run =
-                (*run || cmd.is_some() || edit.is_some() || !cargo_args.is_empty()).then(|| {
-                    TimingsRun {
-                        build: cmd.unwrap_or_default(),
-                        edit: edit.clone(),
-                        probe: if *body {
-                            timings::run::Probe::Body
-                        } else {
-                            timings::run::Probe::Api
-                        },
-                        nice: nice.n,
-                        cargo_args: cargo_args.clone(),
-                    }
+            if *hot && ctx.faster.hot.is_empty() {
+                return Err(Error::Usage(
+                    "--hot measures the crates in `hot = [...]`, and the configuration lists none"
+                        .into(),
+                ));
+            }
+            let edits: Vec<Option<String>> = if *hot {
+                ctx.faster.hot.iter().cloned().map(Some).collect()
+            } else {
+                vec![edit.clone()]
+            };
+            let wants_run =
+                *run || *hot || cmd.is_some() || edit.is_some() || !cargo_args.is_empty();
+            for edit in edits {
+                let run = wants_run.then(|| TimingsRun {
+                    build: cmd.unwrap_or_default(),
+                    edit,
+                    probe: if *body {
+                        timings::run::Probe::Body
+                    } else {
+                        timings::run::Probe::Api
+                    },
+                    nice: nice.n,
+                    cargo_args: env_cargo_args(&ctx, cargo_args),
                 });
-            report.sections.push(timings_section(
-                &ctx,
-                file.as_deref(),
-                run.as_ref(),
-                baseline.as_deref(),
-            )?);
+                report.sections.push(timings_section(
+                    &ctx,
+                    file.as_deref(),
+                    run.as_ref(),
+                    baseline.as_deref(),
+                )?);
+            }
         }
         Command::CheckCost {
             package,
@@ -464,19 +572,192 @@ fn run(opts: &Opts) -> Result<Report, Error> {
                     Some(TargetSel::Bench { bench }) => checkcost::Select::Bench(bench),
                 },
                 tests: *tests,
-                cargo_args: cargo_args.clone(),
+                cargo_args: env_cargo_args(&ctx, cargo_args),
                 nice: nice.n,
                 keep: keep.clone(),
             };
             report.sections.push(check_cost_section(&ctx, &o)?);
         }
     }
+    apply_env(&ctx.faster, &mut report);
+    config::apply_accepts(&ctx.faster.accept, &mut report);
+    if let Some(src) = &loaded.source
+        && let Some(s) = report.sections.first_mut()
+    {
+        s.facts.insert(
+            0,
+            Fact {
+                key: "config".into(),
+                value: loaded.describe(ctx.root()),
+            },
+        );
+        let _ = src;
+    }
     Ok(report)
+}
+
+/// `env.profile` and `env.features` as cargo arguments, after the ones
+/// given (which win: a `--profile` or `--features` there skips ours).
+fn env_cargo_args(ctx: &Context, given: &[String]) -> Vec<String> {
+    let env = &ctx.faster.env;
+    let mut args = given.to_vec();
+    let has = |names: &[&str]| {
+        given.iter().any(|a| {
+            names
+                .iter()
+                .any(|n| a == n || a.starts_with(&format!("{n}=")))
+        })
+    };
+    if let Some(p) = &env.profile
+        && !has(&["--profile", "--release", "-r"])
+    {
+        args.extend(["--profile".to_owned(), p.clone()]);
+    }
+    if !env.features.is_empty() && !has(&["--features", "-F", "--all-features"]) {
+        args.extend(["--features".to_owned(), env.features.join(",")]);
+    }
+    args
+}
+
+/// `env.jobserver = "shared"`: builds here share job tokens with other
+/// builds on purpose, so a token-starved build is expected.
+fn apply_env(cfg: &Config, report: &mut Report) {
+    if cfg.env.jobserver != Some(config::Jobserver::Shared) {
+        return;
+    }
+    for f in report
+        .sections
+        .iter_mut()
+        .flat_map(|s| s.findings.iter_mut())
+        .filter(|f| f.id == "token-starved")
+    {
+        f.severity = Severity::Info;
+        f.why.push_str(
+            " The configuration says builds share a jobserver (`env.jobserver = \"shared\"`), so this is expected here.",
+        );
+    }
+}
+
+/// `cargo faster check`: the rules that need no build, and with
+/// `--timings` the measured budgets.
+fn check_sections(
+    ctx: &Context,
+    loaded: &config::Loaded,
+    with_timings: bool,
+    nice: i32,
+) -> Result<Vec<Section>, Error> {
+    let cfg = &ctx.faster;
+    let pg = check::gather_graph(ctx)?;
+    let r = check::resolve_for(ctx);
+    let wrapper = cache::wrapper(ctx).map(|(w, _)| w);
+    let mut s = check::section(&pg, cfg, &r, wrapper.as_deref());
+    if loaded.source.is_none() {
+        s.fact(
+            "config",
+            format!(
+                "none: add {} or [workspace.metadata.cargo-faster] (see the guide)",
+                config::FILE_NAME
+            ),
+        );
+    }
+    if !with_timings {
+        return Ok(vec![s]);
+    }
+    let mut measured = check::Measured::default();
+    let b = &cfg.budgets;
+    if b.cold_check_secs.is_some()
+        || b.critical_path_max_crates.is_some()
+        || b.no_new_critical_crates.is_some()
+    {
+        let (wall, path) = cold_check(ctx, nice)?;
+        s.fact("cold check", format!("{wall:.1}s"));
+        s.fact(
+            "critical path (workspace crates)",
+            if path.is_empty() {
+                "none".to_owned()
+            } else {
+                path.join(" → ")
+            },
+        );
+        measured.cold_check_secs = Some(wall);
+        measured.critical_path = path;
+    }
+    if let Some(eb) = &b.edit_rebuild_secs {
+        for c in cfg.hot.iter().filter(|c| eb.for_crate(c).is_some()) {
+            let run = TimingsRun {
+                build: timings::run::Build::default(),
+                edit: Some(c.clone()),
+                probe: timings::run::Probe::Api,
+                nice,
+                cargo_args: env_cargo_args(ctx, &[]),
+            };
+            let (path, _, failed, _) = timings_run(ctx, &run)?;
+            if let Some((code, stderr)) = failed {
+                return Err(Error::BuildFailed(format!(
+                    "the build after an edit to {c} failed (exit {code})\n{stderr}"
+                )));
+            }
+            let wall = timings::analyze(&read_timings(&path)?).wall;
+            s.fact(format!("edit {c}"), format!("{wall:.1}s"));
+            measured.edits.push((c.clone(), wall));
+        }
+    }
+    s.extend(check::budgets(cfg, &measured));
+    Ok(vec![s])
+}
+
+/// A cold `cargo check --workspace --timings` in a target directory of
+/// its own (removed before and after), for the cold-check budgets: its
+/// wall time and the workspace crates on its critical path.
+fn cold_check(ctx: &Context, nice: i32) -> Result<(f64, Vec<String>), Error> {
+    let dir = ctx.target_dir().join("cargo-faster-cold");
+    let _ = std::fs::remove_dir_all(&dir);
+    let out = build(ctx, nice, cargo_bin(&ctx.env))
+        .args(["check", "--workspace", "--timings"])
+        .args(env_cargo_args(ctx, &[]))
+        .env("CARGO_TARGET_DIR", &dir)
+        .env("CARGO_BUILD_BUILD_DIR", &dir)
+        .current_dir(ctx.root())
+        .output()?;
+    if cmd::dry_run_enabled() {
+        return Err(Error::DryRun(
+            "--dry-run: nothing was built, so there is nothing to time".into(),
+        ));
+    }
+    let report = timings::newest_report(&dir);
+    let parsed = report.as_deref().map(read_timings);
+    let _ = std::fs::remove_dir_all(&dir);
+    if !out.success() {
+        return Err(Error::BuildFailed(format!(
+            "the cold `cargo check --workspace` failed\n{}",
+            out.stderr_lossy().trim()
+        )));
+    }
+    let t = parsed.ok_or_else(|| Error::from("the cold check wrote no cargo-timing.html"))??;
+    let a = timings::analyze(&t);
+    let members: BTreeSet<&str> = ctx
+        .metadata
+        .as_ref()
+        .map(|m| m.members().map(|p| p.name.as_str()).collect())
+        .unwrap_or_default();
+    let mut path: Vec<String> = Vec::new();
+    for step in &a.critical_path {
+        if members.contains(step.of.krate.as_str()) && !path.contains(&step.of.krate) {
+            path.push(step.of.krate.clone());
+        }
+    }
+    Ok((a.wall, path))
+}
+
+fn read_timings(p: &Path) -> Result<timings::Timings, Error> {
+    let html = std::fs::read_to_string(p).map_err(|e| format!("reading {}: {e}", p.display()))?;
+    Ok(timings::Timings::parse_html(&html).map_err(|e| e.to_string())?)
 }
 
 fn rdeps_section(
     m: &cargo_faster::context::Metadata,
     krate: Option<&str>,
+    hot: &[String],
 ) -> Result<Section, Error> {
     let crates = graph::gather(m);
     if let Some(k) = krate
@@ -489,6 +770,9 @@ fn rdeps_section(
         );
     }
     let mut s = graph::section(&crates, krate);
+    if krate.is_none() {
+        graph::rank_hot(&mut s, &crates, hot);
+    }
     graph::add_edges(m, &crates, krate, &mut s);
     Ok(s)
 }

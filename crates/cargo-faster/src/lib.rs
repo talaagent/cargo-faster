@@ -74,5 +74,8 @@ pub const GUIDE_ANCHORS: &[&str] = &[
     "the-machine",
     "procedural-macros",
     "generic-code-and-monomorphization",
+    "the-config-file",
+    "layering-rules",
+    "build-budgets",
     "case-study-a-312-second-check",
 ];

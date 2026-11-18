@@ -257,9 +257,10 @@ impl Config {
         let Some(v) = crate::context::lookup(manifest, "workspace.metadata.cargo-faster") else {
             return Ok(None);
         };
-        let c: Self = v.clone().try_into().map_err(|e: toml::de::Error| {
-            e.to_string().trim_end().to_owned()
-        })?;
+        let c: Self = v
+            .clone()
+            .try_into()
+            .map_err(|e: toml::de::Error| e.to_string().trim_end().to_owned())?;
         c.validate()?;
         Ok(Some(c))
     }
@@ -273,8 +274,12 @@ impl Config {
     /// When both exist, or the one that does is invalid.
     pub fn load(root: &Path, manifest: &toml::Table) -> Result<Loaded, Error> {
         let file = root.join(FILE_NAME);
-        let from_manifest = Self::from_manifest(manifest)
-            .map_err(|e| Error::Config(format!("{}: [workspace.metadata.cargo-faster]: {e}", root.join("Cargo.toml").display())))?;
+        let from_manifest = Self::from_manifest(manifest).map_err(|e| {
+            Error::Config(format!(
+                "{}: [workspace.metadata.cargo-faster]: {e}",
+                root.join("Cargo.toml").display()
+            ))
+        })?;
         let text = match std::fs::read_to_string(&file) {
             Ok(t) => Some(t),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -286,7 +291,8 @@ impl Config {
                 file.display()
             ))),
             (Some(t), None) => Ok(Loaded {
-                config: Self::parse(&t).map_err(|e| Error::Config(format!("{}: {e}", file.display())))?,
+                config: Self::parse(&t)
+                    .map_err(|e| Error::Config(format!("{}: {e}", file.display())))?,
                 source: Some(file),
             }),
             (None, Some(c)) => Ok(Loaded {
@@ -339,7 +345,10 @@ impl Config {
     /// # Errors
     ///
     /// Naming the first unknown crate and the closest valid ones.
-    pub fn check_names<'a>(&self, members: impl IntoIterator<Item = &'a str> + Clone) -> Result<(), Error> {
+    pub fn check_names<'a>(
+        &self,
+        members: impl IntoIterator<Item = &'a str> + Clone,
+    ) -> Result<(), Error> {
         let known = |n: &str| {
             members
                 .clone()
@@ -351,7 +360,10 @@ impl Config {
             names.extend(m.keys().map(|k| ("budgets.edit_rebuild_secs", k.as_str())));
         }
         if let Some(c) = &self.budgets.no_new_critical_crates {
-            names.extend(c.iter().map(|k| ("budgets.no_new_critical_crates", k.as_str())));
+            names.extend(
+                c.iter()
+                    .map(|k| ("budgets.no_new_critical_crates", k.as_str())),
+            );
         }
         for (key, n) in names {
             if !known(n) {
@@ -554,14 +566,20 @@ features = ["test-utils"]
     #[test]
     fn loads_from_the_file_or_the_manifest_but_not_both() {
         let dir = tempfile::tempdir().unwrap();
-        let manifest: toml::Table =
-            "[workspace.metadata.cargo-faster]\nhot = [\"a\"]\n".parse().unwrap();
+        let manifest: toml::Table = "[workspace.metadata.cargo-faster]\nhot = [\"a\"]\n"
+            .parse()
+            .unwrap();
         let l = Config::load(dir.path(), &manifest).unwrap();
         assert_eq!(l.config.hot, ["a"]);
         assert_eq!(l.describe(dir.path()), "Cargo.toml");
-        let bad: toml::Table = "[workspace.metadata.cargo-faster]\nbogus = 1\n".parse().unwrap();
+        let bad: toml::Table = "[workspace.metadata.cargo-faster]\nbogus = 1\n"
+            .parse()
+            .unwrap();
         let e = Config::load(dir.path(), &bad).unwrap_err().to_string();
-        assert!(e.contains("[workspace.metadata.cargo-faster]: unknown field `bogus`"), "{e}");
+        assert!(
+            e.contains("[workspace.metadata.cargo-faster]: unknown field `bogus`"),
+            "{e}"
+        );
         std::fs::write(dir.path().join(FILE_NAME), "hot = [\"b\"]\n").unwrap();
         let e = Config::load(dir.path(), &manifest).unwrap_err();
         assert_eq!(e.code(), "config");
@@ -569,8 +587,13 @@ features = ["test-utils"]
         assert_eq!(l.config.hot, ["b"]);
         assert_eq!(l.describe(dir.path()), FILE_NAME);
         std::fs::write(dir.path().join(FILE_NAME), "hot = 3\n").unwrap();
-        let e = Config::load(dir.path(), &toml::Table::new()).unwrap_err().to_string();
-        assert!(e.contains("cargo-faster.toml") && e.contains("invalid type"), "{e}");
+        let e = Config::load(dir.path(), &toml::Table::new())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("cargo-faster.toml") && e.contains("invalid type"),
+            "{e}"
+        );
         assert_eq!(
             Config::load(&dir.path().join("none"), &toml::Table::new()).unwrap(),
             Loaded::default()
@@ -581,8 +604,14 @@ features = ["test-utils"]
     fn names_must_be_workspace_crates() {
         let c = Config::parse(FULL).unwrap();
         c.check_names(["app-core", "app-web"]).unwrap();
-        let e = c.check_names(["app-core", "app-wb"]).unwrap_err().to_string();
-        assert!(e.starts_with("hot: unknown workspace crate 'app-web'"), "{e}");
+        let e = c
+            .check_names(["app-core", "app-wb"])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.starts_with("hot: unknown workspace crate 'app-web'"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -634,11 +663,60 @@ features = ["test-utils"]
             },
         ];
         apply_accepts(&accept, &mut r);
-        let left: Vec<&str> = r.sections[0].findings.iter().map(|f| f.title.as_str()).collect();
+        let left: Vec<&str> = r.sections[0]
+            .findings
+            .iter()
+            .map(|f| f.title.as_str())
+            .collect();
         assert_eq!(left, ["app-core has 30000 lines of Rust"]);
         assert_eq!(r.accepted.len(), 3);
         assert_eq!(r.accepted[0].reason, "generated");
         let text = r.render_text(false);
         assert!(text.contains("3 accepted"), "{text}");
+    }
+
+    /// The example in docs/cargo-faster.md parses, and it and the JSON
+    /// schema name the same keys, every one of them.
+    #[test]
+    fn the_documented_example_and_schema_match_the_structs() {
+        fn keys(v: &serde_json::Value) -> Vec<String> {
+            let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+            k.sort();
+            k
+        }
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/");
+        let doc = std::fs::read_to_string(format!("{root}cargo-faster.md")).unwrap();
+        let start = doc.find("```toml\n# The workspace crates").unwrap() + "```toml\n".len();
+        let len = doc[start..].find("```").unwrap();
+        let cfg = Config::parse(&doc[start..start + len]).unwrap();
+        let schema: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(format!("{root}cargo-faster.schema.json")).unwrap(),
+        )
+        .unwrap();
+        let json = serde_json::to_value(&cfg).unwrap();
+        let props = |path: &[&str]| {
+            let mut v = &schema;
+            for p in path {
+                v = &v["properties"][*p];
+                if v.get("items").is_some() {
+                    v = &v["items"];
+                }
+            }
+            keys(&v["properties"])
+        };
+        assert_eq!(keys(&json), props(&[]));
+        for section in ["budgets", "deps", "env"] {
+            assert_eq!(keys(&json[section]), props(&[section]), "{section}");
+        }
+        let mut accept: Vec<String> = json["accept"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(keys)
+            .collect();
+        accept.sort();
+        accept.dedup();
+        assert_eq!(accept, props(&["accept"]));
+        assert_eq!(keys(&json["layer"][0]), props(&["layer"]));
     }
 }

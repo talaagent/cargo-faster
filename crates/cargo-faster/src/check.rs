@@ -13,7 +13,8 @@ use core::fmt::Write as _;
 use guppy::PackageId;
 use guppy::graph::cargo::{CargoOptions, CargoResolverVersion, CargoSet};
 use guppy::graph::feature::{
-    FeatureFilter, FeatureFilterFn, FeatureGraph, FeatureId, FeatureLabel, FeatureSet, StandardFeatures,
+    FeatureFilter, FeatureFilterFn, FeatureGraph, FeatureId, FeatureLabel, FeatureSet,
+    StandardFeatures,
 };
 use guppy::graph::{PackageGraph, PackageLink};
 use guppy::platform::{Platform, PlatformSpec, TargetFeatures};
@@ -43,7 +44,13 @@ pub fn package_graph(metadata_json: &str) -> Result<PackageGraph, Error> {
 /// When `cargo metadata` fails or its output can't be read.
 pub fn gather_graph(ctx: &Context) -> Result<PackageGraph, Error> {
     let out = probe(cargo_bin(&ctx.env))
-        .args(["metadata", "--format-version", "1", "--all-features", "--manifest-path"])
+        .args([
+            "metadata",
+            "--format-version",
+            "1",
+            "--all-features",
+            "--manifest-path",
+        ])
         .arg(ctx.root().join("Cargo.toml"))
         .output()?;
     if !out.success() {
@@ -118,9 +125,10 @@ impl Resolve {
                 .iter()
                 .any(|w| w == name || w.split_once('/') == Some((pkg, name)))
         });
-        pg.resolve_ids(ids.iter().copied())
-            .map(|set| set.to_feature_set(filter))
-            .unwrap_or_else(|_| pg.feature_graph().resolve_none())
+        pg.resolve_ids(ids.iter().copied()).map_or_else(
+            |_| pg.feature_graph().resolve_none(),
+            |set| set.to_feature_set(filter),
+        )
     }
 }
 
@@ -162,7 +170,10 @@ fn chain<'g>(
 }
 
 fn render_chain(path: &[PackageLink<'_>]) -> String {
-    let mut s = path.first().map(|l| l.from().name().to_owned()).unwrap_or_default();
+    let mut s = path
+        .first()
+        .map(|l| l.from().name().to_owned())
+        .unwrap_or_default();
     for l in path {
         let kind = if l.normal().is_present() {
             ""
@@ -222,11 +233,11 @@ pub fn layers(pg: &PackageGraph, cfg: &Config, r: &Resolve) -> Vec<Finding> {
                     ))
                     .why(why)
                     .fix(format!(
-                        "cut the first edge that crosses the layer: move what `{}` uses from `{}` down a \
+                        "cut the edge `{} → {banned}`: move what `{}` uses from `{banned}` down a \
                          layer, or invert it behind a trait the upper crate implements. If the edge is \
                          intended, narrow the rule or `[[accept]]` it with the reason",
-                        path.first().map_or(member.name(), |l| l.to().name()),
-                        banned,
+                        last.from().name(),
+                        last.from().name(),
                     )),
                 );
             }
@@ -241,7 +252,12 @@ pub fn layers(pg: &PackageGraph, cfg: &Config, r: &Resolve) -> Vec<Finding> {
 fn workspace_set<'g>(pg: &'g PackageGraph, r: &Resolve, dev: bool) -> Option<CargoSet<'g>> {
     let ids: Vec<&PackageId> = pg.workspace().iter().map(|m| m.id()).collect();
     let initials = r.initials(pg, &ids);
-    CargoSet::new(initials, pg.feature_graph().resolve_none(), &r.options(dev, r.host_platform())).ok()
+    CargoSet::new(
+        initials,
+        pg.feature_graph().resolve_none(),
+        &r.options(dev, r.host_platform()),
+    )
+    .ok()
 }
 
 /// Crates built in more than one version for the host, with every target
@@ -251,7 +267,10 @@ pub fn duplicates(pg: &PackageGraph, cfg: &Config, r: &Resolve) -> BTreeMap<Stri
     let mut by_name: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     if let Some(set) = workspace_set(pg, r, true) {
         for f in [set.target_features(), set.host_features()] {
-            for p in f.to_package_set().packages(guppy::graph::DependencyDirection::Forward) {
+            for p in f
+                .to_package_set()
+                .packages(guppy::graph::DependencyDirection::Forward)
+            {
                 by_name
                     .entry(p.name().to_owned())
                     .or_default()
@@ -283,7 +302,11 @@ pub fn duplicate_budget(dups: &BTreeMap<String, Vec<String>>, cfg: &Config) -> V
         Finding::new(
             "duplicates-over-budget",
             Severity::High,
-            format!("{} crates built in more than one version, budget {max}", dups.len()),
+            format!(
+                "{} crate{} built in more than one version, budget {max}",
+                dups.len(),
+                if dups.len() == 1 { "" } else { "s" }
+            ),
             "dependencies-and-features",
         )
         .saw(format!("built twice or more: {}", list.join("; ")))
@@ -309,7 +332,9 @@ pub fn flagged(pg: &PackageGraph, cfg: &Config, r: &Resolve) -> Vec<Finding> {
     let mut out = Vec::new();
     let mut done = BTreeSet::new();
     for member in pg.workspace().iter() {
-        for path in chain(&adj, member.id(), |l| any_glob(&cfg.deps.flag, l.to().name())) {
+        for path in chain(&adj, member.id(), |l| {
+            any_glob(&cfg.deps.flag, l.to().name())
+        }) {
             let Some(last) = path.last() else { continue };
             let name = last.to().name();
             if !done.insert(name) {
@@ -397,7 +422,7 @@ pub fn budgets(cfg: &Config, m: &Measured) -> Vec<Finding> {
             Finding::new(
                 "cold-check-over-budget",
                 Severity::High,
-                format!("cold check took {got:.1}s, budget {max:.0}s"),
+                format!("cold check took {got:.1}s, budget {max}s"),
                 "build-budgets",
             )
             .saw(format!(
@@ -460,7 +485,7 @@ pub fn budgets(cfg: &Config, m: &Measured) -> Vec<Finding> {
                     Finding::new(
                         "edit-rebuild-over-budget",
                         Severity::High,
-                        format!("an edit to {c} rebuilds in {got:.1}s, budget {max:.0}s"),
+                        format!("an edit to {c} rebuilds in {got:.1}s, budget {max}s"),
                         "build-budgets",
                     )
                     .krate(c)
@@ -514,7 +539,7 @@ pub fn github_annotations(findings: &[&Finding]) -> String {
         let level = match f.severity {
             Severity::Info => "notice",
             Severity::Low | Severity::Medium => "warning",
-            _ => "error",
+            Severity::High => "error",
         };
         let msg = format!("{}\n{}\nfix: {}\n{}", f.saw, f.why, f.fix, f.guide);
         let _ = writeln!(
@@ -528,7 +553,9 @@ pub fn github_annotations(findings: &[&Finding]) -> String {
 }
 
 fn escape_data(s: &str) -> String {
-    s.replace('%', "%25").replace('\r', "%0D").replace('\n', "%0A")
+    s.replace('%', "%25")
+        .replace('\r', "%0D")
+        .replace('\n', "%0A")
 }
 
 fn escape_property(s: &str) -> String {
@@ -558,9 +585,7 @@ mod tests {
     }
 
     fn ids(f: &[Finding]) -> Vec<String> {
-        f.iter()
-            .map(|f| format!("{} {}", f.id, f.title))
-            .collect()
+        f.iter().map(|f| format!("{} {}", f.id, f.title)).collect()
     }
 
     #[test]
@@ -585,7 +610,11 @@ mod tests {
                 "layer-violation valet-io depends on tala-win"
             ]
         );
-        assert!(f[0].saw.contains("valet-io → util-b → tala-core"), "{}", f[0].saw);
+        assert!(
+            f[0].saw.contains("valet-io → util-b → tala-core"),
+            "{}",
+            f[0].saw
+        );
         assert!(f[0].why.contains("valet is a library"));
         assert_eq!(f[0].krate.as_deref(), Some("valet-io"));
         assert_eq!(f[0].target.as_deref(), Some("tala-core"));
@@ -601,7 +630,11 @@ mod tests {
         .expect("config");
         let f = layers(&pg, &dev, &linux());
         assert_eq!(ids(&f), ["layer-violation valet-ok depends on tala-core"]);
-        assert!(f[0].saw.contains("valet-ok → tala-core (dev)"), "{}", f[0].saw);
+        assert!(
+            f[0].saw.contains("valet-ok → tala-core (dev)"),
+            "{}",
+            f[0].saw
+        );
     }
 
     #[test]
@@ -616,7 +649,7 @@ mod tests {
         )
         .expect("config");
         // tala-glue is behind app-cli's off-by-default `glue` feature.
-        assert!(layers(&pg, &cfg, &linux()).is_empty());
+        assert_eq!(layers(&pg, &cfg, &linux()).len(), 0);
         let mut r = linux();
         r.features = vec!["app-cli/glue".into()];
         assert_eq!(
@@ -644,7 +677,7 @@ mod tests {
         assert_eq!(dups.len(), 1);
         assert_eq!(
             ids(&duplicate_budget(&dups, &cfg)),
-            ["duplicates-over-budget 1 crates built in more than one version, budget 0"]
+            ["duplicates-over-budget 1 crate built in more than one version, budget 0"]
         );
         // winonly is Windows-only, testkit a dev-dependency.
         let f = flagged(&pg, &cfg, &linux());
@@ -655,20 +688,23 @@ mod tests {
         assert_eq!(flagged(&pg, &cfg, &win).len(), 2);
 
         cfg.deps.allow_duplicates = vec!["util-*".into()];
-        assert!(duplicates(&pg, &cfg, &linux()).is_empty());
+        assert_eq!(duplicates(&pg, &cfg, &linux()).len(), 0);
     }
 
     #[test]
     fn env_cache_compares_the_wrapper() {
         let cfg = Config::parse("[env]\ncache = \"kache\"").expect("config");
-        assert!(env_cache(&cfg, Some("/nix/store/x-kache/bin/kache")).is_empty());
+        assert_eq!(
+            env_cache(&cfg, Some("/nix/store/x-kache/bin/kache")).len(),
+            0
+        );
         assert_eq!(
             ids(&env_cache(&cfg, Some("sccache"))),
             ["env-cache-mismatch builds use sccache, the project expects kache"]
         );
         assert_eq!(env_cache(&cfg, None).len(), 1);
         let none = Config::parse("[env]\ncache = \"none\"").expect("config");
-        assert!(env_cache(&none, None).is_empty());
+        assert_eq!(env_cache(&none, None).len(), 0);
     }
 
     #[test]
@@ -702,13 +738,18 @@ mod tests {
             critical_path: vec!["core".into()],
             edits: vec![("core".into(), 2.0)],
         };
-        assert!(budgets(&cfg, &ok).is_empty());
+        assert_eq!(budgets(&cfg, &ok).len(), 0);
     }
 
     #[test]
     fn github_annotations_escape() {
-        let f = Finding::new("layer-violation", Severity::High, "a: b, c", "layering-rules")
-            .saw("50%\nnext");
+        let f = Finding::new(
+            "layer-violation",
+            Severity::High,
+            "a: b, c",
+            "layering-rules",
+        )
+        .saw("50%\nnext");
         let out = github_annotations(&[&f]);
         assert!(
             out.starts_with("::error title=layer-violation%3A a%3A b%2C c::50%25%0Anext%0A"),
