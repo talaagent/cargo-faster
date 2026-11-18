@@ -421,6 +421,16 @@ impl Context {
             .filter(|v| !v.is_empty())
     }
 
+    /// The jobserver cargo would join: the variable that names it
+    /// (`CARGO_MAKEFLAGS`, `MAKEFLAGS` or `MFLAGS`, the order cargo reads
+    /// them in) and its `--jobserver-auth` value (e.g. `fifo:/dev/x`).
+    #[must_use]
+    pub fn jobserver(&self) -> Option<(&'static str, &str)> {
+        ["CARGO_MAKEFLAGS", "MAKEFLAGS", "MFLAGS"]
+            .into_iter()
+            .find_map(|k| self.var(k).and_then(jobserver_auth).map(|a| (k, a)))
+    }
+
     /// `profile.<name>.<key>` from the manifest, else from config, else
     /// from `CARGO_PROFILE_<NAME>_<KEY>`; with where it came from.
     #[must_use]
@@ -514,9 +524,44 @@ pub fn has_subcommand(env: &BTreeMap<String, String>, name: &str) -> bool {
     on_path(env, &prog).is_some() || home_bin.is_some_and(|p| p.is_file())
 }
 
+/// The jobserver in make flags: the last `--jobserver-auth=X` (or the
+/// older `--jobserver-fds=X`), as make and cargo read it.
+#[must_use]
+pub fn jobserver_auth(flags: &str) -> Option<&str> {
+    flags
+        .split_whitespace()
+        .filter_map(|w| {
+            w.strip_prefix("--jobserver-auth=")
+                .or_else(|| w.strip_prefix("--jobserver-fds="))
+        })
+        .rfind(|a| !a.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jobserver_in_make_flags() {
+        assert_eq!(
+            jobserver_auth("-j --jobserver-auth=fifo:/dev/shm/js"),
+            Some("fifo:/dev/shm/js")
+        );
+        assert_eq!(jobserver_auth(" -j8 --jobserver-fds=3,4"), Some("3,4"));
+        assert_eq!(
+            jobserver_auth("--jobserver-auth=3,4 --jobserver-auth=fifo:/x"),
+            Some("fifo:/x")
+        );
+        assert_eq!(jobserver_auth("-j4 -k"), None);
+        let mut c = Context::default();
+        assert_eq!(c.jobserver(), None);
+        c.env
+            .insert("MAKEFLAGS".into(), "--jobserver-auth=fifo:/dev/js".into());
+        assert_eq!(c.jobserver(), Some(("MAKEFLAGS", "fifo:/dev/js")));
+        c.env
+            .insert("CARGO_MAKEFLAGS".into(), "-j --jobserver-auth=5,6".into());
+        assert_eq!(c.jobserver(), Some(("CARGO_MAKEFLAGS", "5,6")));
+    }
 
     #[test]
     fn config_lookup_prefers_nearest() {
