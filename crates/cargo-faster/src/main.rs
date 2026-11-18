@@ -899,6 +899,7 @@ fn tests_sections(
         binaries,
         units: timings.map(|t| t.0).unwrap_or_default(),
         build_fresh,
+        filters: testrun::filters(args),
     };
     inputs.process_cost = testrun::process_cost(&run_inputs);
     report.sections.push(tests::check(ctx, &inputs));
