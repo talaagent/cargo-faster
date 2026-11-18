@@ -213,7 +213,7 @@ The timings check also finds:
 - `critical-path-waiting`: steps on the critical path that sat idle after they were ready, or waited for the cache's scheduler;
 - `wrapper-wait`: a lot of time spent waiting for the rustc wrapper's scheduler or for another build compiling the same thing;
 - `edit-rebuilt-many`: an edit that recompiled many workspace crates, and which crates it started from;
-- `first-build`: every workspace crate compiled, starting from the workspace's leaves, as in a first build in a new target directory: there is no edit, so no fan-out to report (`--edit CRATE` measures one);
+- `first-build`: every workspace crate compiled, starting from the workspace's leaves, as in a first build in a new target directory, or the first test or release build after checks (`timings --run` and `tests --run` tell from the fingerprints cargo keeps per mode and profile): there is no edit, so no fan-out to report (`--edit CRATE` measures one);
 - `cheap-to-cut-edge`: a step on the critical path that waited for a workspace crate it uses only a few items from (the same check as `rdeps`, with the seconds that crate took on the path);
 - `unused-dependency`, `reexported-dependency`: a step on the critical path that waited for a workspace crate it doesn't use, or only re-exports to its own dependents;
 - `slow-build`: a slow build that none of the above explains, with what was measured and what to try next;

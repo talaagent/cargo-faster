@@ -4,6 +4,7 @@
 use crate::context::Metadata;
 use crate::error::Error;
 use crate::error::UnknownName;
+use alloc::collections::BTreeSet;
 use core::fmt;
 use core::str::FromStr;
 use std::path::{Path, PathBuf};
@@ -154,13 +155,14 @@ pub fn edit_target(m: &Metadata, name: &str) -> Result<EditTarget, Error> {
     })
 }
 
-/// Whether the target directory has a cargo fingerprint for any of
-/// `members` (package names), in any profile (`debug/.fingerprint`) or
-/// target (`x86_64-unknown-linux-gnu/debug/.fingerprint`). A build in a
-/// target directory without one compiles every workspace crate for the
-/// first time.
+/// The cargo fingerprint directories (`<package>-<hash>`) of `members`
+/// (package names) in the target directory, in any profile
+/// (`debug/.fingerprint`) or target
+/// (`x86_64-unknown-linux-gnu/debug/.fingerprint`). Each is one unit: a
+/// package's target in one mode, profile and feature set, so a check, a
+/// test build and a release build of a crate each have their own.
 #[must_use]
-pub fn has_fingerprints(target_dir: &Path, members: &[&str]) -> bool {
+pub fn fingerprints(target_dir: &Path, members: &[&str]) -> BTreeSet<PathBuf> {
     let subdirs = |p: &Path| -> Vec<PathBuf> {
         std::fs::read_dir(p)
             .map(|d| {
@@ -180,16 +182,65 @@ pub fn has_fingerprints(target_dir: &Path, members: &[&str]) -> bool {
                 .map(|p| p.join(".fingerprint")),
         );
     }
-    dirs.iter().any(|d| {
-        std::fs::read_dir(d).is_ok_and(|entries| {
-            entries.flatten().any(|e| {
-                let name = e.file_name();
-                let name = name.to_string_lossy();
-                name.rsplit_once('-')
-                    .is_some_and(|(pkg, _)| members.contains(&pkg))
-            })
-        })
-    })
+    dirs.iter()
+        .flat_map(|d| subdirs(d))
+        .filter(|d| package(d).is_some_and(|pkg| members.contains(&pkg)))
+        .collect()
+}
+
+/// The package of a fingerprint directory, `app-core` for `app-core-9f8e`.
+fn package(dir: &Path) -> Option<&str> {
+    dir.file_name()?
+        .to_str()?
+        .rsplit_once('-')
+        .map(|(pkg, _)| pkg)
+}
+
+/// What a run knows about whether its build was a first build, to decide
+/// once the report says which workspace crates compiled.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum FirstBuildHint {
+    /// Nothing: tell from the report.
+    #[default]
+    Unknown,
+    /// The run made an edit, so it's not a first build.
+    Edit,
+    /// The packages that got a fingerprint directory they didn't have
+    /// before the build: units built for the first time in this mode and
+    /// profile.
+    New(BTreeSet<String>),
+}
+
+impl FirstBuildHint {
+    /// From the fingerprint directories before and after the build.
+    #[must_use]
+    pub fn new(before: &BTreeSet<PathBuf>, after: &BTreeSet<PathBuf>) -> Self {
+        Self::New(
+            after
+                .difference(before)
+                .filter_map(|d| package(d))
+                .map(str::to_owned)
+                .collect(),
+        )
+    }
+
+    /// For [`crate::timings::Extra::first_build`]: `Some(true)` when every
+    /// workspace crate that compiled did so for the first time in this mode
+    /// and profile (a first test build after checks, a first release
+    /// build), `Some(false)` after an edit, otherwise `None`. With no new
+    /// fingerprints at all they live elsewhere (a build-dir), so the report
+    /// tells.
+    #[must_use]
+    pub fn resolve<'a>(&self, compiled: impl IntoIterator<Item = &'a str>) -> Option<bool> {
+        match self {
+            Self::Unknown => None,
+            Self::Edit => Some(false),
+            Self::New(new) => {
+                let mut compiled = compiled.into_iter().peekable();
+                (compiled.peek().is_some() && compiled.all(|c| new.contains(c))).then_some(true)
+            }
+        }
+    }
 }
 
 /// A probe edit in place: the file's original bytes, written back by
@@ -328,15 +379,32 @@ mod tests {
     }
 
     #[test]
-    fn fingerprints() {
+    fn first_build_per_mode() {
         let dir = tempfile::tempdir().unwrap();
         let t = dir.path();
-        assert!(!has_fingerprints(t, &["app-core"]));
-        std::fs::create_dir_all(t.join("debug/.fingerprint/serde-0123abcd")).unwrap();
-        assert!(!has_fingerprints(t, &["app-core"]));
-        std::fs::create_dir_all(t.join("x86_64-unknown-linux-gnu/gate/.fingerprint/app-core-9f8e"))
-            .unwrap();
-        assert!(has_fingerprints(t, &["app-core"]));
+        let fp = |d: &str| std::fs::create_dir_all(t.join(d)).unwrap();
+        assert!(fingerprints(t, &["app-core"]).is_empty());
+        fp("debug/.fingerprint/serde-0123abcd");
+        assert!(fingerprints(t, &["app-core"]).is_empty());
+        fp("x86_64-unknown-linux-gnu/gate/.fingerprint/app-core-9f8e");
+        let members = ["app-core", "app"];
+        // A check of both crates.
+        fp("debug/.fingerprint/app-1111");
+        let checked = fingerprints(t, &members);
+        assert_eq!(checked.len(), 2);
+        // Then a first test build: new units for both.
+        fp("debug/.fingerprint/app-2222");
+        fp("debug/.fingerprint/app-core-3333");
+        let hint = FirstBuildHint::new(&checked, &fingerprints(t, &members));
+        assert_eq!(hint.resolve(["app", "app-core"]), Some(true));
+        // A build that also recompiled a crate it had built before.
+        assert_eq!(hint.resolve(["app", "app-core", "other"]), None);
+        assert_eq!(hint.resolve([]), None);
+        // Nothing new: an ordinary rebuild.
+        let same = FirstBuildHint::new(&checked, &checked);
+        assert_eq!(same.resolve(["app"]), None);
+        assert_eq!(FirstBuildHint::Edit.resolve(["app"]), Some(false));
+        assert_eq!(FirstBuildHint::Unknown.resolve(["app"]), None);
     }
 
     #[test]

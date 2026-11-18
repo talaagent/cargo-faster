@@ -283,9 +283,9 @@ fn rebuilt(a: &Analysis, out: &mut Vec<Finding>) {
             r.roots.join(", ")
         };
         out.push(
-            Finding::new("first-build", Severity::Info, "First build in this target directory: no fan-out to report", "worktrees-and-cold-target-directories")
+            Finding::new("first-build", Severity::Info, "First build of these crates here: no fan-out to report", "worktrees-and-cold-target-directories")
                 .saw(match why {
-                    FirstBuild::NoFingerprints => format!("The target directory had no fingerprints for any workspace crate before this build, so all {} workspace crates it compiled ({} of units) were built for the first time, whatever came from a cache.", r.crates, secs(r.busy)),
+                    FirstBuild::NoFingerprints => format!("None of the {} workspace crates this build compiled ({} of units) had a fingerprint for this mode and profile in the target directory before, so they were built for the first time, whatever came from a cache: a first build here, or the first test or release build after checks.", r.crates, secs(r.busy)),
                     _ => format!("All {} workspace crates in the report compiled ({} of units) and none was fresh, starting from {} crates with no workspace dependencies ({leaves}): that's a first build in this target directory (or after `cargo clean`), not an edit.", r.crates, secs(r.busy), r.roots.len()),
                 })
                 .why("A first build compiles every crate, so which ones it started from says nothing about what an edit rebuilds.")
