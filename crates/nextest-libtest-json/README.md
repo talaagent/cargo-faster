@@ -1,5 +1,7 @@
 # nextest-libtest-json
 
+[![crates.io][version-badge]][crate] [![downloads][downloads-badge]][crate] [![docs.rs][docs-badge]][docs] [![lib.rs][librs-badge]][librs] [![License: Apache-2.0][license-badge]][license]
+
 Parse the output of `cargo nextest run --message-format libtest-json` (or
 `libtest-json-plus`) into typed events and a run summary.
 
@@ -40,3 +42,13 @@ see `tests/fixtures/README.md`.
 ## License
 
 Apache-2.0. Part of [cargo-faster](https://github.com/talaagent/cargo-faster).
+
+[version-badge]: https://img.shields.io/crates/v/nextest-libtest-json.svg
+[downloads-badge]: https://img.shields.io/crates/d/nextest-libtest-json.svg
+[crate]: https://crates.io/crates/nextest-libtest-json
+[docs-badge]: https://docs.rs/nextest-libtest-json/badge.svg
+[docs]: https://docs.rs/nextest-libtest-json
+[librs-badge]: https://img.shields.io/badge/lib.rs-nextest--libtest--json-purple.svg
+[librs]: https://lib.rs/crates/nextest-libtest-json
+[license-badge]: https://img.shields.io/badge/license-Apache--2.0-blue.svg
+[license]: https://github.com/talaagent/cargo-faster/blob/main/LICENSE

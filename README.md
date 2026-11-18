@@ -1,5 +1,7 @@
 # cargo-faster
 
+[![CI][ci-badge]][ci] [![crates.io][version-badge]][crate] [![downloads][downloads-badge]][crate] [![docs.rs][docs-badge]][docs] [![lib.rs][librs-badge]][librs] [![Rust 1.88+][msrv-badge]][msrv] [![License: Apache-2.0][license-badge]][license]
+
 Find out why your Rust build is slow and how to make it faster.
 
 `cargo faster` measures your build and reports what it found. Each finding comes with the numbers it saw, why they cost you time, a fix with its tradeoffs, and a link into [the guide](docs/guide.md).
@@ -75,6 +77,34 @@ cargo faster is Linux-first. Every check works on Linux. On macOS the machine ch
 - [Using cargo faster](docs/cargo-faster.md): each subcommand, and how to read its output.
 - [`skills/debug-slow-rust-builds`](skills/debug-slow-rust-builds/SKILL.md): the same workflow as an agent skill.
 
+## MSRV
+
+cargo-faster and its parser crates need Rust 1.88 (let chains), declared as
+`rust-version` in Cargo.toml. CI builds and tests the workspace on it.
+Raising the MSRV is a minor-version change.
+
+## Contributing
+
+Pull requests welcome; see [CONTRIBUTING.md][contributing]. Report
+security issues privately as described in [SECURITY.md][security].
+
+[contributing]: https://github.com/talaagent/cargo-faster/blob/main/CONTRIBUTING.md
+[security]: https://github.com/talaagent/cargo-faster/blob/main/SECURITY.md
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+[ci-badge]: https://github.com/talaagent/cargo-faster/actions/workflows/ci.yml/badge.svg
+[ci]: https://github.com/talaagent/cargo-faster/actions/workflows/ci.yml
+[version-badge]: https://img.shields.io/crates/v/cargo-faster.svg
+[downloads-badge]: https://img.shields.io/crates/d/cargo-faster.svg
+[crate]: https://crates.io/crates/cargo-faster
+[docs-badge]: https://docs.rs/cargo-faster/badge.svg
+[docs]: https://docs.rs/cargo-faster
+[librs-badge]: https://img.shields.io/badge/lib.rs-cargo--faster-purple.svg
+[librs]: https://lib.rs/crates/cargo-faster
+[msrv-badge]: https://img.shields.io/badge/rust-1.88%2B-orange.svg
+[msrv]: https://github.com/talaagent/cargo-faster#msrv
+[license-badge]: https://img.shields.io/badge/license-Apache--2.0-blue.svg
+[license]: https://github.com/talaagent/cargo-faster/blob/main/LICENSE
