@@ -147,7 +147,7 @@ $ cargo faster timings --cmd clippy                 # cargo clippy --workspace -
 $ cargo faster timings --cmd test -- --profile ci   # cargo nextest run --workspace --no-run --timings --profile ci
 ```
 
-`--cmd test` times the test build: `cargo nextest run --no-run` when nextest is installed, `cargo test --no-run` otherwise. Every build is `--workspace`, never `-p`, so it resolves features and cache keys the way your usual build does. Clippy runs rustc through `clippy-driver`, so its units don't share artifacts or cache entries with `cargo check`: time the one you wait on.
+`--cmd test` times the test build: `cargo nextest run --no-run` when nextest is installed, `cargo test --no-run` otherwise. Every build is `--workspace`, never `-p`, so it resolves features and cache keys the way your usual build does. If the arguments after `--` already pick the packages (`--workspace`, `--all`, `-p`), cargo faster leaves its own `--workspace` out, so a gate command like `-- --workspace --all-targets` can be pasted as is. Clippy runs rustc through `clippy-driver`, so its units don't share artifacts or cache entries with `cargo check`: time the one you wait on.
 
 ### What an edit to one crate costs
 
@@ -205,6 +205,7 @@ The timings check also finds:
 - `serial-crate`: a unit that runs while little else can, so most of your cores sit idle;
 - `long-codegen`: a unit that spends most of its time in LLVM, which usually means big generic instantiations or a release profile doing more than it needs to;
 - `low-parallelism`: a build that keeps few cores busy overall;
+- `token-starved`: a build that ran well under `jobs` units at a time while units sat ready, so cargo was waiting for tokens from a shared jobserver; the critical path and serial-crate findings are left out, since they'd only show the order tokens came in;
 - `critical-path-dominated`: one unit that is most of the critical path;
 - `slow-build-script`: a build script that holds up the crates waiting for it.
 - `post-metadata-analysis`: check units that spend a long time after writing their metadata, which is analysis such as lints and borrow checking, not codegen (a check has none);
@@ -386,6 +387,7 @@ It looks at:
 - **the parallel frontend** (`-Zthreads`), and `-C target-cpu=native`;
 - **`RUSTFLAGS`** in the environment, which silently replaces the `rustflags` in your Cargo config, and changes every cache key;
 - **jobs**: `CARGO_BUILD_JOBS` or `build.jobs` limiting parallelism.
+- **jobserver**: `--jobserver-auth` in `CARGO_MAKEFLAGS`, `MAKEFLAGS` or `MFLAGS` (`shared-jobserver`): cargo joins that jobserver, so its free tokens, not `jobs`, decide how many units run.
 
 It reads settings the way cargo does, environment included: rustflags come from `CARGO_ENCODED_RUSTFLAGS`, else `RUSTFLAGS`, else `target.<triple>.rustflags` plus `CARGO_TARGET_<TRIPLE>_RUSTFLAGS`, else `build.rustflags` plus `CARGO_BUILD_RUSTFLAGS`; incremental from `CARGO_INCREMENTAL`, else `build.incremental` (or `CARGO_BUILD_INCREMENTAL`), else the profile. Each line names where its value came from, e.g. `linker  mold (CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS)`.
 
@@ -437,7 +439,7 @@ Before you believe any timing, know what else the machine was doing:
   [medium] The target dir filesystem is 94% full
 ```
 
-It checks load against the number of cores, other `rustc` and `cargo` processes, memory and swap, free disk space, and whether your target directory and your cache are on the same filesystem. If they aren't, a cache hit is a full copy instead of a reflink.
+It checks load against the number of cores, other `rustc` and `cargo` processes, memory and swap, free disk space, and whether your target directory and your cache are on the same filesystem. A `jobserver` fact names a jobserver cargo would share (`--jobserver-auth` in `MAKEFLAGS` or `CARGO_MAKEFLAGS`): its free tokens are then the real job limit. They can't be counted without taking them, so it isn't tried. If they aren't, a cache hit is a full copy instead of a reflink.
 
 On Linux these come from `/proc`, `df -PT`, the mount table and `stat -f`. On macOS they come from `sysctl` (load, memory, swap), `vm_stat` (free memory), `ps` (other builds), and `df -P` plus `mount` (filesystems). The default sccache directory there is `~/Library/Caches/Mozilla.sccache`. Anything it can't read on a platform is listed in an `unavailable` fact and left out, rather than reported as zero, and a busy-machine finding needs a load or process count to go on.
 

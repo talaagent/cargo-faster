@@ -31,6 +31,11 @@ pub struct Analysis {
     pub cpu_avg: Option<f64>,
     /// Cargo's `jobs` and the CPU count, from the report.
     pub jobs: Option<Jobs>,
+    /// Unit-seconds compiled units spent ready (whatever unblocked them
+    /// done) before they started: waiting for a free job, or for a token
+    /// from a jobserver. Divided by `wall`, the units ready on average.
+    #[serde(rename = "queued_s", default)]
+    pub queued: f64,
     /// The chain of units that decided the wall time, first to last.
     pub critical_path: Vec<PathStep>,
     /// Seconds of the critical path between a step's dependency finishing
@@ -291,6 +296,7 @@ pub fn analyze_with(t: &Timings, extra: Extra<'_>) -> Analysis {
         let n = t.cpu.len() as f64;
         a.cpu_avg = Some(t.cpu.iter().map(|c| c.1).sum::<f64>() / n);
     }
+    a.queued = queued(t, first);
     let path = critical_path(t);
     a.path_gaps = path.iter().map(|(_, s)| s.gap).sum();
     let on_path: Vec<(usize, f64)> = path.iter().map(|(p, s)| (*p, s.duration)).collect();
@@ -367,6 +373,39 @@ fn serial(ran: &[&Unit]) -> Vec<Serial> {
     }
     out.sort_by(|x, y| y.duration.total_cmp(&x.duration));
     out
+}
+
+/// Unit-seconds compiled units spent ready before they started. A unit is
+/// ready when the unit that lists it in `unblocked_units` ends (or, in
+/// `unblocked_rmeta_units`, writes its metadata); one no unit lists was
+/// ready when the build started at `first`.
+fn queued(t: &Timings, first: f64) -> f64 {
+    let by_i: BTreeMap<usize, usize> = t
+        .units
+        .iter()
+        .enumerate()
+        .map(|(pos, u)| (u.i.unwrap_or(pos), pos))
+        .collect();
+    let mut ready: BTreeMap<usize, f64> = BTreeMap::new();
+    for u in &t.units {
+        for (list, at) in [
+            (&u.unblocked_units, u.end()),
+            (&u.unblocked_rmeta_units, u.rmeta_end()),
+        ] {
+            for i in list {
+                if let Some(&pos) = by_i.get(i) {
+                    let r = ready.entry(pos).or_insert(at);
+                    *r = r.max(at);
+                }
+            }
+        }
+    }
+    t.units
+        .iter()
+        .enumerate()
+        .filter(|(_, u)| u.duration > 0.0)
+        .map(|(pos, u)| (u.start - ready.get(&pos).copied().unwrap_or(first)).max(0.0))
+        .sum()
 }
 
 /// The chain of units that decided the wall time, first to last, with
@@ -697,6 +736,27 @@ mod tests {
                 ("big".to_owned(), "c".to_owned(), 3.0)
             ]
         );
+    }
+
+    #[test]
+    fn queued_units() {
+        // Nothing started later than it could.
+        assert!(analyze(&fixture()).queued.abs() < 1e-9);
+        // Three independent units one after another: the second sat ready
+        // for 2 s, the third for 4 s. A unit that a's end unblocked was
+        // ready at 2 s and started at 6 s.
+        let t = Timings {
+            units: vec![
+                unit(0, "a", 0.0, 2.0, &[3], &[]),
+                unit(1, "b", 2.0, 2.0, &[], &[]),
+                unit(2, "c", 4.0, 2.0, &[], &[]),
+                unit(3, "d", 6.0, 1.0, &[], &[]),
+            ],
+            ..Timings::default()
+        };
+        let a = analyze(&t);
+        assert!((a.queued - 10.0).abs() < 1e-9, "{}", a.queued);
+        assert!((a.parallelism - 1.0).abs() < 1e-9);
     }
 
     #[test]
