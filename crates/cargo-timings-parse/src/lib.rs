@@ -239,6 +239,14 @@ impl Unit {
         }
     }
 
+    /// Whether it compiles a test harness (`cargo test`, `nextest --no-run`):
+    /// cargo marks those `(test)` in the target, as `"mode"` is always
+    /// `"todo"`.
+    #[must_use]
+    pub fn is_test(&self) -> bool {
+        self.target.trim_end().ends_with("(test)")
+    }
+
     /// The rustc crate name it compiles: the target's name for a `bin`,
     /// `test`, `example` or `bench` target, else the package name, with
     /// `-` as `_`.
@@ -509,6 +517,21 @@ mod tests {
         assert_eq!(l(" app-bin \"bin\""), "app-bin (bin)");
         assert_eq!(l(" build-script (run)"), "app-bin (build-script, run)");
         assert_eq!(l(" build-script"), "app-bin (build-script)");
+    }
+
+    #[test]
+    fn test_units() {
+        let u = |target: &str| Unit {
+            name: "app".into(),
+            mode: "todo".into(),
+            target: target.into(),
+            ..Unit::default()
+        };
+        assert!(u(" app \"lib\" (test)").is_test());
+        assert!(u(" it \"test\" (test)").is_test());
+        assert!(!u(" it \"test\" (check-test)").is_test());
+        assert!(!u(" app \"bin\"").is_test());
+        assert!(!u("").is_test());
     }
 
     #[test]
