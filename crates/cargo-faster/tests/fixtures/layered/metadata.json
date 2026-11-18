@@ -1,0 +1,924 @@
+{
+ "packages": [
+  {
+   "name": "app-cli",
+   "version": "0.1.0",
+   "id": "path+file:///fixture/layered/app-cli#0.1.0",
+   "license": null,
+   "license_file": null,
+   "description": null,
+   "source": null,
+   "dependencies": [
+    {
+     "name": "app-core",
+     "source": null,
+     "req": "*",
+     "kind": null,
+     "rename": null,
+     "optional": false,
+     "uses_default_features": true,
+     "features": [],
+     "target": null,
+     "registry": null,
+     "path": "/fixture/layered/app-core"
+    },
+    {
+     "name": "tala-glue",
+     "source": null,
+     "req": "*",
+     "kind": null,
+     "rename": null,
+     "optional": true,
+     "uses_default_features": true,
+     "features": [],
+     "target": null,
+     "registry": null,
+     "path": "/fixture/layered/vendor/tala-glue"
+    },
+    {
+     "name": "testkit",
+     "source": null,
+     "req": "*",
+     "kind": "dev",
+     "rename": null,
+     "optional": false,
+     "uses_default_features": true,
+     "features": [],
+     "target": null,
+     "registry": null,
+     "path": "/fixture/layered/vendor/testkit"
+    },
+    {
+     "name": "winonly",
+     "source": null,
+     "req": "*",
+     "kind": null,
+     "rename": null,
+     "optional": false,
+     "uses_default_features": true,
+     "features": [],
+     "target": "cfg(windows)",
+     "registry": null,
+     "path": "/fixture/layered/vendor/winonly"
+    }
+   ],
+   "targets": [
+    {
+     "kind": [
+      "lib"
+     ],
+     "crate_types": [
+      "lib"
+     ],
+     "name": "app_cli",
+     "src_path": "/fixture/layered/app-cli/src/lib.rs",
+     "edition": "2021",
+     "doc": true,
+     "doctest": true,
+     "test": true
+    }
+   ],
+   "features": {
+    "glue": [
+     "dep:tala-glue"
+    ]
+   },
+   "manifest_path": "/fixture/layered/app-cli/Cargo.toml",
+   "metadata": null,
+   "publish": null,
+   "authors": [],
+   "categories": [],
+   "keywords": [],
+   "readme": null,
+   "repository": null,
+   "homepage": null,
+   "documentation": null,
+   "edition": "2021",
+   "links": null,
+   "default_run": null,
+   "rust_version": null
+  },
+  {
+   "name": "app-core",
+   "version": "0.1.0",
+   "id": "path+file:///fixture/layered/app-core#0.1.0",
+   "license": null,
+   "license_file": null,
+   "description": null,
+   "source": null,
+   "dependencies": [
+    {
+     "name": "heavy",
+     "source": null,
+     "req": "*",
+     "kind": null,
+     "rename": null,
+     "optional": false,
+     "uses_default_features": true,
+     "features": [],
+     "target": null,
+     "registry": null,
+     "path": "/fixture/layered/vendor/heavy"
+    },
+    {
+     "name": "util-a",
+     "source": null,
+     "req": "*",
+     "kind": null,
+     "rename": null,
+     "optional": false,
+     "uses_default_features": true,
+     "features": [],
+     "target": null,
+     "registry": null,
+     "path": "/fixture/layered/vendor/util-a-1"
+    }
+   ],
+   "targets": [
+    {
+     "kind": [
+      "lib"
+     ],
+     "crate_types": [
+      "lib"
+     ],
+     "name": "app_core",
+     "src_path": "/fixture/layered/app-core/src/lib.rs",
+     "edition": "2021",
+     "doc": true,
+     "doctest": true,
+     "test": true
+    }
+   ],
+   "features": {},
+   "manifest_path": "/fixture/layered/app-core/Cargo.toml",
+   "metadata": null,
+   "publish": null,
+   "authors": [],
+   "categories": [],
+   "keywords": [],
+   "readme": null,
+   "repository": null,
+   "homepage": null,
+   "documentation": null,
+   "edition": "2021",
+   "links": null,
+   "default_run": null,
+   "rust_version": null
+  },
+  {
+   "name": "heavy",
+   "version": "0.1.0",
+   "id": "path+file:///fixture/layered/vendor/heavy#0.1.0",
+   "license": null,
+   "license_file": null,
+   "description": null,
+   "source": null,
+   "dependencies": [],
+   "targets": [
+    {
+     "kind": [
+      "lib"
+     ],
+     "crate_types": [
+      "lib"
+     ],
+     "name": "heavy",
+     "src_path": "/fixture/layered/vendor/heavy/src/lib.rs",
+     "edition": "2021",
+     "doc": true,
+     "doctest": true,
+     "test": true
+    }
+   ],
+   "features": {},
+   "manifest_path": "/fixture/layered/vendor/heavy/Cargo.toml",
+   "metadata": null,
+   "publish": null,
+   "authors": [],
+   "categories": [],
+   "keywords": [],
+   "readme": null,
+   "repository": null,
+   "homepage": null,
+   "documentation": null,
+   "edition": "2021",
+   "links": null,
+   "default_run": null,
+   "rust_version": null
+  },
+  {
+   "name": "tala-core",
+   "version": "0.1.0",
+   "id": "path+file:///fixture/layered/tala-core#0.1.0",
+   "license": null,
+   "license_file": null,
+   "description": null,
+   "source": null,
+   "dependencies": [],
+   "targets": [
+    {
+     "kind": [
+      "lib"
+     ],
+     "crate_types": [
+      "lib"
+     ],
+     "name": "tala_core",
+     "src_path": "/fixture/layered/tala-core/src/lib.rs",
+     "edition": "2021",
+     "doc": true,
+     "doctest": true,
+     "test": true
+    }
+   ],
+   "features": {},
+   "manifest_path": "/fixture/layered/tala-core/Cargo.toml",
+   "metadata": null,
+   "publish": null,
+   "authors": [],
+   "categories": [],
+   "keywords": [],
+   "readme": null,
+   "repository": null,
+   "homepage": null,
+   "documentation": null,
+   "edition": "2021",
+   "links": null,
+   "default_run": null,
+   "rust_version": null
+  },
+  {
+   "name": "tala-glue",
+   "version": "0.1.0",
+   "id": "path+file:///fixture/layered/vendor/tala-glue#0.1.0",
+   "license": null,
+   "license_file": null,
+   "description": null,
+   "source": null,
+   "dependencies": [],
+   "targets": [
+    {
+     "kind": [
+      "lib"
+     ],
+     "crate_types": [
+      "lib"
+     ],
+     "name": "tala_glue",
+     "src_path": "/fixture/layered/vendor/tala-glue/src/lib.rs",
+     "edition": "2021",
+     "doc": true,
+     "doctest": true,
+     "test": true
+    }
+   ],
+   "features": {},
+   "manifest_path": "/fixture/layered/vendor/tala-glue/Cargo.toml",
+   "metadata": null,
+   "publish": null,
+   "authors": [],
+   "categories": [],
+   "keywords": [],
+   "readme": null,
+   "repository": null,
+   "homepage": null,
+   "documentation": null,
+   "edition": "2021",
+   "links": null,
+   "default_run": null,
+   "rust_version": null
+  },
+  {
+   "name": "tala-win",
+   "version": "0.1.0",
+   "id": "path+file:///fixture/layered/vendor/tala-win#0.1.0",
+   "license": null,
+   "license_file": null,
+   "description": null,
+   "source": null,
+   "dependencies": [],
+   "targets": [
+    {
+     "kind": [
+      "lib"
+     ],
+     "crate_types": [
+      "lib"
+     ],
+     "name": "tala_win",
+     "src_path": "/fixture/layered/vendor/tala-win/src/lib.rs",
+     "edition": "2021",
+     "doc": true,
+     "doctest": true,
+     "test": true
+    }
+   ],
+   "features": {},
+   "manifest_path": "/fixture/layered/vendor/tala-win/Cargo.toml",
+   "metadata": null,
+   "publish": null,
+   "authors": [],
+   "categories": [],
+   "keywords": [],
+   "readme": null,
+   "repository": null,
+   "homepage": null,
+   "documentation": null,
+   "edition": "2021",
+   "links": null,
+   "default_run": null,
+   "rust_version": null
+  },
+  {
+   "name": "testkit",
+   "version": "0.1.0",
+   "id": "path+file:///fixture/layered/vendor/testkit#0.1.0",
+   "license": null,
+   "license_file": null,
+   "description": null,
+   "source": null,
+   "dependencies": [],
+   "targets": [
+    {
+     "kind": [
+      "lib"
+     ],
+     "crate_types": [
+      "lib"
+     ],
+     "name": "testkit",
+     "src_path": "/fixture/layered/vendor/testkit/src/lib.rs",
+     "edition": "2021",
+     "doc": true,
+     "doctest": true,
+     "test": true
+    }
+   ],
+   "features": {},
+   "manifest_path": "/fixture/layered/vendor/testkit/Cargo.toml",
+   "metadata": null,
+   "publish": null,
+   "authors": [],
+   "categories": [],
+   "keywords": [],
+   "readme": null,
+   "repository": null,
+   "homepage": null,
+   "documentation": null,
+   "edition": "2021",
+   "links": null,
+   "default_run": null,
+   "rust_version": null
+  },
+  {
+   "name": "util-a",
+   "version": "1.0.0",
+   "id": "path+file:///fixture/layered/vendor/util-a-1#util-a@1.0.0",
+   "license": null,
+   "license_file": null,
+   "description": null,
+   "source": null,
+   "dependencies": [],
+   "targets": [
+    {
+     "kind": [
+      "lib"
+     ],
+     "crate_types": [
+      "lib"
+     ],
+     "name": "util_a",
+     "src_path": "/fixture/layered/vendor/util-a-1/src/lib.rs",
+     "edition": "2021",
+     "doc": true,
+     "doctest": true,
+     "test": true
+    }
+   ],
+   "features": {},
+   "manifest_path": "/fixture/layered/vendor/util-a-1/Cargo.toml",
+   "metadata": null,
+   "publish": null,
+   "authors": [],
+   "categories": [],
+   "keywords": [],
+   "readme": null,
+   "repository": null,
+   "homepage": null,
+   "documentation": null,
+   "edition": "2021",
+   "links": null,
+   "default_run": null,
+   "rust_version": null
+  },
+  {
+   "name": "util-a",
+   "version": "2.0.0",
+   "id": "path+file:///fixture/layered/vendor/util-a-2#util-a@2.0.0",
+   "license": null,
+   "license_file": null,
+   "description": null,
+   "source": null,
+   "dependencies": [],
+   "targets": [
+    {
+     "kind": [
+      "lib"
+     ],
+     "crate_types": [
+      "lib"
+     ],
+     "name": "util_a",
+     "src_path": "/fixture/layered/vendor/util-a-2/src/lib.rs",
+     "edition": "2021",
+     "doc": true,
+     "doctest": true,
+     "test": true
+    }
+   ],
+   "features": {},
+   "manifest_path": "/fixture/layered/vendor/util-a-2/Cargo.toml",
+   "metadata": null,
+   "publish": null,
+   "authors": [],
+   "categories": [],
+   "keywords": [],
+   "readme": null,
+   "repository": null,
+   "homepage": null,
+   "documentation": null,
+   "edition": "2021",
+   "links": null,
+   "default_run": null,
+   "rust_version": null
+  },
+  {
+   "name": "util-b",
+   "version": "0.1.0",
+   "id": "path+file:///fixture/layered/vendor/util-b#0.1.0",
+   "license": null,
+   "license_file": null,
+   "description": null,
+   "source": null,
+   "dependencies": [
+    {
+     "name": "tala-core",
+     "source": null,
+     "req": "*",
+     "kind": null,
+     "rename": null,
+     "optional": false,
+     "uses_default_features": true,
+     "features": [],
+     "target": null,
+     "registry": null,
+     "path": "/fixture/layered/tala-core"
+    }
+   ],
+   "targets": [
+    {
+     "kind": [
+      "lib"
+     ],
+     "crate_types": [
+      "lib"
+     ],
+     "name": "util_b",
+     "src_path": "/fixture/layered/vendor/util-b/src/lib.rs",
+     "edition": "2021",
+     "doc": true,
+     "doctest": true,
+     "test": true
+    }
+   ],
+   "features": {},
+   "manifest_path": "/fixture/layered/vendor/util-b/Cargo.toml",
+   "metadata": null,
+   "publish": null,
+   "authors": [],
+   "categories": [],
+   "keywords": [],
+   "readme": null,
+   "repository": null,
+   "homepage": null,
+   "documentation": null,
+   "edition": "2021",
+   "links": null,
+   "default_run": null,
+   "rust_version": null
+  },
+  {
+   "name": "valet-io",
+   "version": "0.1.0",
+   "id": "path+file:///fixture/layered/valet-io#0.1.0",
+   "license": null,
+   "license_file": null,
+   "description": null,
+   "source": null,
+   "dependencies": [
+    {
+     "name": "util-a",
+     "source": null,
+     "req": "*",
+     "kind": null,
+     "rename": "util-a2",
+     "optional": false,
+     "uses_default_features": true,
+     "features": [],
+     "target": null,
+     "registry": null,
+     "path": "/fixture/layered/vendor/util-a-2"
+    },
+    {
+     "name": "util-b",
+     "source": null,
+     "req": "*",
+     "kind": null,
+     "rename": null,
+     "optional": false,
+     "uses_default_features": true,
+     "features": [],
+     "target": null,
+     "registry": null,
+     "path": "/fixture/layered/vendor/util-b"
+    },
+    {
+     "name": "tala-win",
+     "source": null,
+     "req": "*",
+     "kind": null,
+     "rename": null,
+     "optional": false,
+     "uses_default_features": true,
+     "features": [],
+     "target": "cfg(windows)",
+     "registry": null,
+     "path": "/fixture/layered/vendor/tala-win"
+    }
+   ],
+   "targets": [
+    {
+     "kind": [
+      "lib"
+     ],
+     "crate_types": [
+      "lib"
+     ],
+     "name": "valet_io",
+     "src_path": "/fixture/layered/valet-io/src/lib.rs",
+     "edition": "2021",
+     "doc": true,
+     "doctest": true,
+     "test": true
+    }
+   ],
+   "features": {},
+   "manifest_path": "/fixture/layered/valet-io/Cargo.toml",
+   "metadata": null,
+   "publish": null,
+   "authors": [],
+   "categories": [],
+   "keywords": [],
+   "readme": null,
+   "repository": null,
+   "homepage": null,
+   "documentation": null,
+   "edition": "2021",
+   "links": null,
+   "default_run": null,
+   "rust_version": null
+  },
+  {
+   "name": "valet-ok",
+   "version": "0.1.0",
+   "id": "path+file:///fixture/layered/valet-ok#0.1.0",
+   "license": null,
+   "license_file": null,
+   "description": null,
+   "source": null,
+   "dependencies": [
+    {
+     "name": "tala-core",
+     "source": null,
+     "req": "*",
+     "kind": "dev",
+     "rename": null,
+     "optional": false,
+     "uses_default_features": true,
+     "features": [],
+     "target": null,
+     "registry": null,
+     "path": "/fixture/layered/tala-core"
+    }
+   ],
+   "targets": [
+    {
+     "kind": [
+      "lib"
+     ],
+     "crate_types": [
+      "lib"
+     ],
+     "name": "valet_ok",
+     "src_path": "/fixture/layered/valet-ok/src/lib.rs",
+     "edition": "2021",
+     "doc": true,
+     "doctest": true,
+     "test": true
+    }
+   ],
+   "features": {},
+   "manifest_path": "/fixture/layered/valet-ok/Cargo.toml",
+   "metadata": null,
+   "publish": null,
+   "authors": [],
+   "categories": [],
+   "keywords": [],
+   "readme": null,
+   "repository": null,
+   "homepage": null,
+   "documentation": null,
+   "edition": "2021",
+   "links": null,
+   "default_run": null,
+   "rust_version": null
+  },
+  {
+   "name": "winonly",
+   "version": "0.1.0",
+   "id": "path+file:///fixture/layered/vendor/winonly#0.1.0",
+   "license": null,
+   "license_file": null,
+   "description": null,
+   "source": null,
+   "dependencies": [],
+   "targets": [
+    {
+     "kind": [
+      "lib"
+     ],
+     "crate_types": [
+      "lib"
+     ],
+     "name": "winonly",
+     "src_path": "/fixture/layered/vendor/winonly/src/lib.rs",
+     "edition": "2021",
+     "doc": true,
+     "doctest": true,
+     "test": true
+    }
+   ],
+   "features": {},
+   "manifest_path": "/fixture/layered/vendor/winonly/Cargo.toml",
+   "metadata": null,
+   "publish": null,
+   "authors": [],
+   "categories": [],
+   "keywords": [],
+   "readme": null,
+   "repository": null,
+   "homepage": null,
+   "documentation": null,
+   "edition": "2021",
+   "links": null,
+   "default_run": null,
+   "rust_version": null
+  }
+ ],
+ "workspace_members": [
+  "path+file:///fixture/layered/app-cli#0.1.0",
+  "path+file:///fixture/layered/app-core#0.1.0",
+  "path+file:///fixture/layered/valet-io#0.1.0",
+  "path+file:///fixture/layered/valet-ok#0.1.0",
+  "path+file:///fixture/layered/tala-core#0.1.0"
+ ],
+ "workspace_default_members": [
+  "path+file:///fixture/layered/app-cli#0.1.0",
+  "path+file:///fixture/layered/app-core#0.1.0",
+  "path+file:///fixture/layered/valet-io#0.1.0",
+  "path+file:///fixture/layered/valet-ok#0.1.0",
+  "path+file:///fixture/layered/tala-core#0.1.0"
+ ],
+ "resolve": {
+  "nodes": [
+   {
+    "id": "path+file:///fixture/layered/app-cli#0.1.0",
+    "dependencies": [
+     "path+file:///fixture/layered/app-core#0.1.0",
+     "path+file:///fixture/layered/vendor/tala-glue#0.1.0",
+     "path+file:///fixture/layered/vendor/testkit#0.1.0",
+     "path+file:///fixture/layered/vendor/winonly#0.1.0"
+    ],
+    "deps": [
+     {
+      "name": "app_core",
+      "pkg": "path+file:///fixture/layered/app-core#0.1.0",
+      "dep_kinds": [
+       {
+        "kind": null,
+        "target": null
+       }
+      ]
+     },
+     {
+      "name": "tala_glue",
+      "pkg": "path+file:///fixture/layered/vendor/tala-glue#0.1.0",
+      "dep_kinds": [
+       {
+        "kind": null,
+        "target": null
+       }
+      ]
+     },
+     {
+      "name": "testkit",
+      "pkg": "path+file:///fixture/layered/vendor/testkit#0.1.0",
+      "dep_kinds": [
+       {
+        "kind": "dev",
+        "target": null
+       }
+      ]
+     },
+     {
+      "name": "winonly",
+      "pkg": "path+file:///fixture/layered/vendor/winonly#0.1.0",
+      "dep_kinds": [
+       {
+        "kind": null,
+        "target": "cfg(windows)"
+       }
+      ]
+     }
+    ],
+    "features": [
+     "glue"
+    ]
+   },
+   {
+    "id": "path+file:///fixture/layered/app-core#0.1.0",
+    "dependencies": [
+     "path+file:///fixture/layered/vendor/heavy#0.1.0",
+     "path+file:///fixture/layered/vendor/util-a-1#util-a@1.0.0"
+    ],
+    "deps": [
+     {
+      "name": "heavy",
+      "pkg": "path+file:///fixture/layered/vendor/heavy#0.1.0",
+      "dep_kinds": [
+       {
+        "kind": null,
+        "target": null
+       }
+      ]
+     },
+     {
+      "name": "util_a",
+      "pkg": "path+file:///fixture/layered/vendor/util-a-1#util-a@1.0.0",
+      "dep_kinds": [
+       {
+        "kind": null,
+        "target": null
+       }
+      ]
+     }
+    ],
+    "features": []
+   },
+   {
+    "id": "path+file:///fixture/layered/vendor/heavy#0.1.0",
+    "dependencies": [],
+    "deps": [],
+    "features": []
+   },
+   {
+    "id": "path+file:///fixture/layered/tala-core#0.1.0",
+    "dependencies": [],
+    "deps": [],
+    "features": []
+   },
+   {
+    "id": "path+file:///fixture/layered/vendor/tala-glue#0.1.0",
+    "dependencies": [],
+    "deps": [],
+    "features": []
+   },
+   {
+    "id": "path+file:///fixture/layered/vendor/tala-win#0.1.0",
+    "dependencies": [],
+    "deps": [],
+    "features": []
+   },
+   {
+    "id": "path+file:///fixture/layered/vendor/testkit#0.1.0",
+    "dependencies": [],
+    "deps": [],
+    "features": []
+   },
+   {
+    "id": "path+file:///fixture/layered/vendor/util-a-1#util-a@1.0.0",
+    "dependencies": [],
+    "deps": [],
+    "features": []
+   },
+   {
+    "id": "path+file:///fixture/layered/vendor/util-a-2#util-a@2.0.0",
+    "dependencies": [],
+    "deps": [],
+    "features": []
+   },
+   {
+    "id": "path+file:///fixture/layered/vendor/util-b#0.1.0",
+    "dependencies": [
+     "path+file:///fixture/layered/tala-core#0.1.0"
+    ],
+    "deps": [
+     {
+      "name": "tala_core",
+      "pkg": "path+file:///fixture/layered/tala-core#0.1.0",
+      "dep_kinds": [
+       {
+        "kind": null,
+        "target": null
+       }
+      ]
+     }
+    ],
+    "features": []
+   },
+   {
+    "id": "path+file:///fixture/layered/valet-io#0.1.0",
+    "dependencies": [
+     "path+file:///fixture/layered/vendor/tala-win#0.1.0",
+     "path+file:///fixture/layered/vendor/util-a-2#util-a@2.0.0",
+     "path+file:///fixture/layered/vendor/util-b#0.1.0"
+    ],
+    "deps": [
+     {
+      "name": "tala_win",
+      "pkg": "path+file:///fixture/layered/vendor/tala-win#0.1.0",
+      "dep_kinds": [
+       {
+        "kind": null,
+        "target": "cfg(windows)"
+       }
+      ]
+     },
+     {
+      "name": "util_a2",
+      "pkg": "path+file:///fixture/layered/vendor/util-a-2#util-a@2.0.0",
+      "dep_kinds": [
+       {
+        "kind": null,
+        "target": null
+       }
+      ]
+     },
+     {
+      "name": "util_b",
+      "pkg": "path+file:///fixture/layered/vendor/util-b#0.1.0",
+      "dep_kinds": [
+       {
+        "kind": null,
+        "target": null
+       }
+      ]
+     }
+    ],
+    "features": []
+   },
+   {
+    "id": "path+file:///fixture/layered/valet-ok#0.1.0",
+    "dependencies": [
+     "path+file:///fixture/layered/tala-core#0.1.0"
+    ],
+    "deps": [
+     {
+      "name": "tala_core",
+      "pkg": "path+file:///fixture/layered/tala-core#0.1.0",
+      "dep_kinds": [
+       {
+        "kind": "dev",
+        "target": null
+       }
+      ]
+     }
+    ],
+    "features": []
+   },
+   {
+    "id": "path+file:///fixture/layered/vendor/winonly#0.1.0",
+    "dependencies": [],
+    "deps": [],
+    "features": []
+   }
+  ],
+  "root": null
+ },
+ "target_directory": "/fixture/layered/target",
+ "build_directory": "/fixture/layered/target",
+ "version": 1,
+ "workspace_root": "/fixture/layered",
+ "metadata": null
+}

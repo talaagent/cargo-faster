@@ -1,0 +1,17 @@
+[package]
+name = "app-cli"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+glue = ["dep:tala-glue"]
+
+[dependencies]
+app-core = { path = "../app-core" }
+tala-glue = { path = "../vendor/tala-glue", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+winonly = { path = "../vendor/winonly" }
+
+[dev-dependencies]
+testkit = { path = "../vendor/testkit" }
