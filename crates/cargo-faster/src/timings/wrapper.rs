@@ -82,11 +82,67 @@ fn outcome(result: &str, reason: &str) -> Option<Outcome> {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct KacheReport {
     /// Per-crate trace events (unlike `all_events`, passthroughs too).
-    #[serde(default, rename = "traceEvents", deserialize_with = "null_as_empty")]
-    pub trace_events: Vec<TraceEvent>,
-    /// The session(s) the report covers.
-    #[serde(default)]
+    /// One malformed event is skipped and counted, not the whole report.
+    #[serde(default, rename = "traceEvents")]
+    pub trace_events: Lenient<TraceEvent>,
+    /// The session(s) the report covers: `None` when absent or malformed.
+    #[serde(default, deserialize_with = "or_none")]
     pub meta: Option<KacheMeta>,
+}
+
+/// A list read item by item: the items that deserialize, and how many
+/// didn't. `null` is empty.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Lenient<T> {
+    /// The items that deserialized, in order.
+    pub items: Vec<T>,
+    /// How many were skipped because they didn't.
+    pub skipped: usize,
+}
+
+impl<T> Default for Lenient<T> {
+    fn default() -> Self {
+        Self {
+            items: Vec::new(),
+            skipped: 0,
+        }
+    }
+}
+
+impl<'de, T: serde::de::DeserializeOwned> Deserialize<'de> for Lenient<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Each item is buffered as a JSON value so that a bad one fails on
+        // its own; works for any deserializer, a reader or a `Value`.
+        let raw = Option::<Vec<serde_json::Value>>::deserialize(deserializer)?.unwrap_or_default();
+        let mut list = Self::default();
+        for item in &raw {
+            match T::deserialize(item) {
+                Ok(parsed) => list.items.push(parsed),
+                Err(_) => list.skipped += 1,
+            }
+        }
+        Ok(list)
+    }
+}
+
+/// A list whose malformed items are dropped. `null` is empty.
+fn skip_malformed<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    Lenient::deserialize(deserializer).map(|list| list.items)
+}
+
+/// A value that is `None` when it doesn't deserialize, rather than an
+/// error for the whole report.
+fn or_none<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let raw = serde_json::Value::deserialize(deserializer)?;
+    Ok(T::deserialize(&raw).ok())
 }
 
 /// A list that may be `null`: empty.
@@ -130,9 +186,10 @@ pub struct TraceArgs {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct KacheMeta {
     /// The latest session.
+    #[serde(default, deserialize_with = "or_none")]
     pub session: Option<KacheSession>,
     /// Several sessions, when the report spans them.
-    #[serde(default, deserialize_with = "null_as_empty")]
+    #[serde(default, deserialize_with = "skip_malformed")]
     pub sessions: Vec<KacheSession>,
 }
 
@@ -150,7 +207,7 @@ pub struct KacheSession {
     /// The directory that command ran in.
     pub cwd: Option<String>,
     /// The cargo commands it saw.
-    #[serde(default, deserialize_with = "null_as_empty")]
+    #[serde(default, deserialize_with = "skip_malformed")]
     pub commands: Vec<KacheCommand>,
 }
 
@@ -198,6 +255,7 @@ impl KacheSession {
 pub fn kache_events(report: &KacheReport) -> Vec<WrapperEvent> {
     report
         .trace_events
+        .items
         .iter()
         .filter_map(|event| {
             let args = event.args.as_ref()?;
@@ -461,5 +519,31 @@ mod tests {
         assert!((e[1].run.wait - 6.0).abs() < 1e-9);
         assert!((e[1].start_ms - 3000.0).abs() < 1e-9);
         assert_eq!(e[2].run.outcome, Outcome::Miss);
+        assert_eq!(v.trace_events.skipped, 0);
+    }
+
+    #[test]
+    fn skips_a_malformed_event_and_keeps_the_rest() {
+        let report = KacheReport::from_value(&serde_json::json!({
+            "traceEvents": [
+                {"ts": 1_000_000.0, "args": {"crate_name": "good_one", "result": "miss", "compile_time_ms": 2000}},
+                {"ts": "not a number", "args": {"crate_name": "bad", "result": "miss"}},
+                {"ts": 2_000_000.0, "args": {"crate_name": "good_two", "result": "local_hit"}}
+            ],
+            "meta": {"session": {"argv": ["cargo", "build"], "commands": [{"argv": 7}, {"started_unix_ms": 5.0, "argv": ["cargo", "build"]}]}}
+        }));
+        assert_eq!(report.trace_events.skipped, 1);
+        let events = kache_events(&report);
+        let names: Vec<&str> = events
+            .iter()
+            .map(|event| event.crate_name.as_str())
+            .collect();
+        assert_eq!(names, ["good_one", "good_two"]);
+        let session = report.session().unwrap();
+        assert_eq!(
+            session.argv(),
+            Some(&["cargo".to_owned(), "build".to_owned()][..])
+        );
+        assert_eq!(session.commands.len(), 1);
     }
 }
