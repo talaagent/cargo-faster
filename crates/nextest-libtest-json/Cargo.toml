@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
+documentation = "https://docs.rs/nextest-libtest-json"
 readme = "README.md"
 keywords = ["nextest", "libtest", "json", "test", "parser"]
 categories = ["development-tools::testing", "parser-implementations", "no-std"]
@@ -24,3 +25,6 @@ serde_json.workspace = true
 
 [lints]
 workspace = true
+
+[package.metadata.docs.rs]
+all-features = true

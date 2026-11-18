@@ -1,5 +1,7 @@
 # cargo-timings-parse
 
+[![crates.io][version-badge]][crate] [![downloads][downloads-badge]][crate] [![docs.rs][docs-badge]][docs] [![lib.rs][librs-badge]][librs] [![License: Apache-2.0][license-badge]][license]
+
 Parse the HTML reports `cargo build --timings` writes to
 `target/cargo-timings/` into typed units, and analyze them: the critical
 path (and whether each step waited for metadata or a full build), crates
@@ -66,3 +68,13 @@ after it, made with cargo 1.99.0 and rustc 1.99.1; see
 ## License
 
 Apache-2.0. Part of [cargo-faster](https://github.com/talaagent/cargo-faster).
+
+[version-badge]: https://img.shields.io/crates/v/cargo-timings-parse.svg
+[downloads-badge]: https://img.shields.io/crates/d/cargo-timings-parse.svg
+[crate]: https://crates.io/crates/cargo-timings-parse
+[docs-badge]: https://docs.rs/cargo-timings-parse/badge.svg
+[docs]: https://docs.rs/cargo-timings-parse
+[librs-badge]: https://img.shields.io/badge/lib.rs-cargo--timings--parse-purple.svg
+[librs]: https://lib.rs/crates/cargo-timings-parse
+[license-badge]: https://img.shields.io/badge/license-Apache--2.0-blue.svg
+[license]: https://github.com/talaagent/cargo-faster/blob/main/LICENSE

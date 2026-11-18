@@ -1,5 +1,7 @@
 # rustc-self-profile
 
+[![crates.io][version-badge]][crate] [![downloads][downloads-badge]][crate] [![docs.rs][docs-badge]][docs] [![lib.rs][librs-badge]][librs] [![License: Apache-2.0][license-badge]][license]
+
 Analyze a rustc self-profile (`-Zself-profile`, the `.mm_profdata` format
 from [measureme](https://github.com/rust-lang/measureme)): where the
 compiler spent its time in one crate, which function bodies and modules
@@ -57,3 +59,13 @@ trimmed; see `tests/fixtures/README.md`.
 ## License
 
 Apache-2.0. Part of [cargo-faster](https://github.com/talaagent/cargo-faster).
+
+[version-badge]: https://img.shields.io/crates/v/rustc-self-profile.svg
+[downloads-badge]: https://img.shields.io/crates/d/rustc-self-profile.svg
+[crate]: https://crates.io/crates/rustc-self-profile
+[docs-badge]: https://docs.rs/rustc-self-profile/badge.svg
+[docs]: https://docs.rs/rustc-self-profile
+[librs-badge]: https://img.shields.io/badge/lib.rs-rustc--self--profile-purple.svg
+[librs]: https://lib.rs/crates/rustc-self-profile
+[license-badge]: https://img.shields.io/badge/license-Apache--2.0-blue.svg
+[license]: https://github.com/talaagent/cargo-faster/blob/main/LICENSE

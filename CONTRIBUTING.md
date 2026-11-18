@@ -56,18 +56,23 @@ replaces the built-in token.
 
 ### First publication
 
-Trusted publishing can't create a crate, so the first release of each
-crate (cargo-faster, and each parser crate) needs a token:
+All four crates (cargo-faster, nextest-libtest-json, rustc-self-profile,
+cargo-timings-parse) are reserved on crates.io as `0.0.0` placeholders, so
+the first real release can use trusted publishing and needs no token:
 
-1. Create a short-lived crates.io token with the `publish-new` scope and
-   store it as the `CARGO_REGISTRY_TOKEN` Actions secret.
+1. On crates.io, add a trusted publisher to each crate: owner `talaagent`,
+   repository `cargo-faster`, workflow `release-plz.yml`, no environment.
 2. Add the release date to the `0.1.0` heading in CHANGELOG.md.
 3. Run the release-plz workflow by hand with `bootstrap=true`. It publishes
-   the committed version.
-4. On crates.io, add a trusted publisher to each new crate: owner `talaagent`,
-   repository `cargo-faster`, workflow `release-plz.yml`, no environment.
-5. Delete the `CARGO_REGISTRY_TOKEN` secret and revoke the token. Later
-   releases use OIDC. A persistent token would override it.
+   the committed version over OIDC (without a `CARGO_REGISTRY_TOKEN`
+   secret).
+
+A crate added later that isn't on crates.io yet can't use trusted
+publishing for its first release: store a short-lived token with the
+`publish-new` scope as the `CARGO_REGISTRY_TOKEN` Actions secret, run the
+workflow with `bootstrap=true` and `release_packages` set to the new crate,
+add its trusted publisher, then delete the secret and revoke the token. A
+persistent token would override OIDC.
 
 Afterwards, check the crate's page on crates.io.
 
