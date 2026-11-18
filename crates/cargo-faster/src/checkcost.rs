@@ -472,7 +472,7 @@ pub fn run(ctx: &Context, opts: &Options) -> Result<Run, Error> {
             .map_err(|e| format!("touching {}: {e}", target.src_path.display()))?;
     }
     let out = build(ctx, opts.nice, cargo_bin(&ctx.env))
-        .args(["check", "--workspace", "-vv", "--color", "never"])
+        .args(check_args(&opts.cargo_args))
         .args(&filters)
         .args(&opts.cargo_args)
         .current_dir(&root)
@@ -638,6 +638,15 @@ pub fn crate_from_file(path: &Path) -> String {
         .filter(|(_, pid)| pid.chars().all(|c| c.is_ascii_digit()))
         .map_or(stem, |(n, _)| n)
         .to_owned()
+}
+
+/// The `cargo check -vv` the rustc command is captured from: with
+/// `--workspace`, unless the user's arguments pick the packages.
+fn check_args(cargo_args: &[String]) -> Vec<&'static str> {
+    crate::timings::run::without_workspace_if_picked(
+        vec!["check", "--workspace", "-vv", "--color", "never"],
+        cargo_args,
+    )
 }
 
 #[cfg(test)]
