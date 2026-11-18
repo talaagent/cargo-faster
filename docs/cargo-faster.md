@@ -542,7 +542,7 @@ It times `cargo nextest run --workspace --no-run --timings`, runs the tests (`--
 
 Here one hung test, killed by the profile's terminate-after at 600s, is most of the 11-minute run; without it the suite needs about a minute on 8 threads.
 
-Its findings: `test-build-dominates` (the build takes over a minute and more than twice the run), `tests-near-slow-timeout` (tests at half the profile's `slow-timeout` or more), `test-threads-idle` (the threads were busy less than half the run), and `no-tests-ran` (nextest found no tests, and the `tests` fact says `0 tests`). It needs cargo-nextest, on `PATH` or in `~/.cargo/bin`; without it, it stops with `error[no_nextest]` and the install command. Arguments after `--` go to both nextest commands; never pass `-p` there if you use a caching wrapper, as it changes feature resolution and the cache keys.
+Its findings: `test-build-dominates` (the build takes over a minute and more than twice the run; not for a filtered run, which gets a `filtered` fact instead, since the build compiles every test binary whatever the filter), `tests-near-slow-timeout` (tests at half the profile's `slow-timeout` or more), `test-threads-idle` (the threads were busy less than half the run), and `no-tests-ran` (nextest found no tests, and the `tests` fact says `0 tests`). It needs cargo-nextest, on `PATH` or in `~/.cargo/bin`; without it, it stops with `error[no_nextest]` and the install command. Arguments after `--` go to both nextest commands; never pass `-p` there if you use a caching wrapper, as it changes feature resolution and the cache keys.
 
 See [Test suites](guide.md#test-suites) and [Measuring a test run](guide.md#measuring-a-test-run).
 

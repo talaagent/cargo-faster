@@ -151,6 +151,48 @@ pub fn build_args(args: &[String]) -> Vec<String> {
     out
 }
 
+/// The test filters in `args`, as the user wrote them: `-E`/`--filterset`
+/// expressions, `--partition`, and name filters before or after `--`.
+/// A filtered run covers some of the tests, but its `--no-run` build still
+/// compiles every test binary.
+#[must_use]
+pub fn filters(args: &[String]) -> Vec<String> {
+    const FILTER_VALUE: &[&str] = &["-E", "--filterset", "--filter-expr", "--partition"];
+    let mut out = Vec::new();
+    let mut it = args.iter();
+    let mut after_dashes = false;
+    while let Some(a) = it.next() {
+        let flag = a.split_once('=').map_or(a.as_str(), |(f, _)| f);
+        if after_dashes {
+            // libtest arguments: names, and `--skip NAME`.
+            if a == "--skip" {
+                if let Some(v) = it.next() {
+                    out.push(format!("--skip {v}"));
+                }
+            } else if !a.starts_with('-') {
+                out.push(a.clone());
+            }
+        } else if a == "--" {
+            after_dashes = true;
+        } else if FILTER_VALUE.contains(&flag) {
+            if flag == a.as_str() {
+                if let Some(v) = it.next() {
+                    out.push(format!("{a} {v}"));
+                }
+            } else {
+                out.push(a.clone());
+            }
+        } else if a.len() > 2 && a.starts_with("-E") {
+            out.push(a.clone());
+        } else if RUN_ONLY_VALUE.contains(&a.as_str()) || BUILD_VALUE.contains(&a.as_str()) {
+            it.next();
+        } else if !a.starts_with('-') {
+            out.push(a.clone());
+        }
+    }
+    out
+}
+
 /// `--no-fail-fast` for the run, unless the arguments already pick a
 /// fail-fast mode.
 #[must_use]
@@ -440,6 +482,8 @@ pub struct Inputs {
     pub units: Vec<TestUnit>,
     /// Whether the `--no-run` build was all fresh (nothing compiled).
     pub build_fresh: bool,
+    /// The test filters the run had (see [`filters`]).
+    pub filters: Vec<String>,
 }
 
 /// Per-binary totals.
@@ -521,7 +565,12 @@ pub fn no_tests_arg(args: &[String]) -> Option<&'static str> {
 }
 
 /// Building the tests takes much longer than running them.
+/// Not for a filtered run: it ran some of the tests, but the build
+/// compiled all of them, so the two don't compare.
 fn build_finding(i: &Inputs) -> Option<Finding> {
+    if !i.filters.is_empty() {
+        return None;
+    }
     let b = i
         .build_secs
         .filter(|b| *b >= 60.0 && *b > i.run_secs * 2.0)?;
@@ -529,6 +578,28 @@ fn build_finding(i: &Inputs) -> Option<Finding> {
             .saw(format!("`cargo nextest run --no-run` took {}; the run itself took {}.", secs(b), secs(i.run_secs)))
             .why("Faster tests won't help much here: most of the wait is compiling and linking test binaries. Every integration test file and every crate's unit tests are a separate binary that links the whole dependency graph.")
             .fix("Read the timings section below for the units on the critical path. Common fixes: fewer test binaries (one tests/ binary per crate), less debug info, a faster linker, and splitting the crate whose `lib (test)` unit dominates."))
+}
+
+/// The build, run and filter facts.
+fn time_facts(s: &mut Section, i: &Inputs) {
+    if let Some(b) = i.build_secs {
+        let fresh = if i.build_fresh {
+            ": fresh, nothing compiled"
+        } else {
+            ""
+        };
+        s.fact("build (--no-run)", format!("{}{fresh}", secs(b)));
+    }
+    s.fact("run", secs(i.run_secs));
+    if !i.filters.is_empty() {
+        s.fact(
+            "filtered",
+            format!(
+                "{}: the run covered only the matching tests, while the build compiled every test binary, so build and run time aren't compared",
+                i.filters.join(" ")
+            ),
+        );
+    }
 }
 
 /// The `test run` section: build and run time, the slowest tests and
@@ -540,15 +611,7 @@ pub fn section(i: &Inputs) -> Section {
     let failed = tests.iter().filter(|t| !t.passed).count();
     let test_secs: f64 = tests.iter().map(|t| t.secs).sum();
     let (threads, threads_src) = (&i.threads.0, &i.threads.1);
-    if let Some(b) = i.build_secs {
-        let fresh = if i.build_fresh {
-            ": fresh, nothing compiled"
-        } else {
-            ""
-        };
-        s.fact("build (--no-run)", format!("{}{fresh}", secs(b)));
-    }
-    s.fact("run", secs(i.run_secs));
+    time_facts(&mut s, i);
     if tests.is_empty() && i.run.ignored == 0 {
         s.fact("tests", "0 tests: nextest found none to run");
         s.extend([Finding::new("no-tests-ran", Severity::Info, "No tests ran", "measuring-a-test-run")
@@ -823,6 +886,55 @@ not json
         })
         .unwrap();
         assert_eq!((cost.tests, cost.fastest), (3, 0.004));
+    }
+
+    #[test]
+    fn filtered_run() {
+        let args = |s: &[&str]| s.iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert_eq!(
+            filters(&args(&["--workspace", "-P", "ci", "--features", "x"])),
+            Vec::<String>::new()
+        );
+        assert_eq!(filters(&args(&["--", "--nocapture"])), Vec::<String>::new());
+        assert_eq!(
+            filters(&args(&[
+                "-E",
+                "package(app-x)",
+                "--partition=hash:1/2",
+                "db",
+                "-j",
+                "4"
+            ])),
+            ["-E package(app-x)", "--partition=hash:1/2", "db"]
+        );
+        assert_eq!(
+            filters(&args(&[
+                "-Etest(a)",
+                "--",
+                "--exact",
+                "a::b",
+                "--skip",
+                "slow"
+            ])),
+            ["-Etest(a)", "a::b", "--skip slow"]
+        );
+        let i = Inputs {
+            build_secs: Some(83.3),
+            run_secs: 1.37,
+            threads: (8, "CPUs".into()),
+            run: parse(RUN),
+            filters: filters(&args(&["-E", "package(app-x)"])),
+            ..Inputs::default()
+        };
+        let s = section(&i);
+        assert!(!s.findings.iter().any(|f| f.id == "test-build-dominates"));
+        let f = s.facts.iter().find(|f| f.key == "filtered").unwrap();
+        assert!(f.value.starts_with("-E package(app-x): "), "{}", f.value);
+        let s = section(&Inputs {
+            filters: Vec::new(),
+            ..i
+        });
+        assert!(s.findings.iter().any(|f| f.id == "test-build-dominates"));
     }
 
     #[test]
