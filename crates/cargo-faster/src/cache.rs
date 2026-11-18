@@ -40,6 +40,8 @@ pub struct Inputs {
     pub sccache_on_path: bool,
     /// Now, Unix milliseconds, for the age of what kache reports.
     pub now_unix_ms: Option<f64>,
+    /// `$HOME`, to abbreviate paths kache reports to `~`.
+    pub home: Option<String>,
 }
 
 /// Parse `git worktree list --porcelain`, checking each tree's target
@@ -124,6 +126,7 @@ impl Inputs {
                 .duration_since(std::time::UNIX_EPOCH)
                 .ok()
                 .map(|d| d.as_secs_f64() * 1000.0),
+            home: ctx.env.get("HOME").filter(|h| !h.is_empty()).cloned(),
             worktrees,
         }
     }
@@ -318,13 +321,65 @@ fn tail_fact(t: &UncachedTail, now_ms: Option<f64>) -> String {
     )
 }
 
-/// What the latest session is: when it started and how long it ran.
-fn session_fact(last: &Value, now_ms: Option<f64>) -> Option<String> {
-    let tl = last.get("timeline")?;
-    let start = tl.get("start_time")?.as_str()?;
-    let dur = f64_at(tl, &["duration_ms"])
+/// `path` with `home` abbreviated to `~`.
+fn tilde(path: &str, home: Option<&str>) -> String {
+    let home = home
+        .map(|h| h.trim_end_matches('/'))
+        .filter(|h| !h.is_empty());
+    match home.and_then(|h| path.strip_prefix(h)) {
+        Some("") => "~".to_owned(),
+        Some(rest) if rest.starts_with('/') => format!("~{rest}"),
+        _ => path.to_owned(),
+    }
+}
+
+/// What the latest session is: when it started, how long it ran and, when
+/// kache records it, the cargo command that started it.
+///
+/// The command comes from `meta.session.argv` and `cwd` (and the session's
+/// later commands from `meta.session.commands`), which kache doesn't record
+/// yet: they are provisional fields proposed in
+/// <https://github.com/kunobi-ninja/kache/issues/1968>. Without them the
+/// fact is when and how long only.
+fn session_fact(last: &Value, now_ms: Option<f64>, home: Option<&str>) -> Option<String> {
+    use crate::timings::wrapper::{argv, session_commands};
+    let session = last.pointer("/meta/session");
+    let tl = last.get("timeline");
+    let start = tl
+        .and_then(|t| t.get("start_time"))
+        .or_else(|| session.and_then(|s| s.get("started_at")))?
+        .as_str()?;
+    let dur = tl
+        .and_then(|t| f64_at(t, &["duration_ms"]))
         .map_or_else(String::new, |d| format!(", ran {}", secs(d / 1000.0)));
-    Some(format!("started {}{dur}", when(start, now_ms)))
+    let Some(argv) = session.and_then(argv) else {
+        return Some(format!("started {}{dur}", when(start, now_ms)));
+    };
+    let cwd = session
+        .and_then(|s| s.get("cwd"))
+        .and_then(Value::as_str)
+        .map_or_else(String::new, |c| format!(" (in {})", tilde(c, home)));
+    let clock = start
+        .get(11..16)
+        .map_or_else(String::new, |c| format!(" {c} UTC"));
+    let ago = cargo_timings_parse::parse_timestamp(start)
+        .zip(now_ms)
+        .map_or_else(String::new, |(t, now)| {
+            format!(", {}", ago((now - t) / 1000.0))
+        });
+    let commands = session_commands(last);
+    let more = match commands.as_slice() {
+        [_, .., latest] => format!(
+            ", {} cargo commands in all (latest: {})",
+            commands.len(),
+            latest.command_line()
+        ),
+        _ => String::new(),
+    };
+    Some(format!(
+        "started{clock} by {}{cwd}{ago}{dur}{more}",
+        argv.join(" ")
+    ))
 }
 
 /// Whether a `kache stats --last-build` session compiled anything, beyond
@@ -530,7 +585,7 @@ pub fn check(ctx: &Context, inputs: &Inputs) -> Section {
         let pass = f64_at(sum, &["passthroughs"]).unwrap_or(0.0);
         let hit = f64_at(sum, &["hit_rate_pct"]).unwrap_or(0.0);
         let weighted = f64_at(sum, &["weighted_hit_rate_pct"]).unwrap_or(0.0);
-        if let Some(session) = session_fact(last, inputs.now_unix_ms) {
+        if let Some(session) = session_fact(last, inputs.now_unix_ms, inputs.home.as_deref()) {
             s.fact("kache session", session);
         }
         s.fact(
@@ -769,6 +824,7 @@ mod tests {
             sccache_stats: None,
             sccache_on_path: false,
             now_unix_ms: None,
+            home: None,
         };
         let s = check(&ctx, &inputs);
         let ids: Vec<_> = s.findings.iter().map(|f| f.id).collect();
@@ -867,6 +923,75 @@ mod tests {
         assert!(s.details.iter().any(|d| {
             d.starts_with("why the last cached build missed (recorded 00:00 UTC, 25 min ago)")
         }));
+    }
+
+    /// The kache session fact with the provisional `meta.session` fields
+    /// (kunobi-ninja/kache#1968), and byte-for-byte as before without them.
+    #[test]
+    fn names_the_cargo_command_that_started_the_session() {
+        let mut last: Value = serde_json::from_str(
+            &std::fs::read_to_string(format!(
+                "{}/tests/fixtures/kache-session.json",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let ctx = Context {
+            config: CargoConfig::from_strs(&[(
+                "/h/.cargo/config.toml",
+                "[build]\nrustc-wrapper = \"kache\"\n",
+            )]),
+            ..Context::default()
+        };
+        let session = |last: &Value, home: Option<&str>| {
+            let inputs = Inputs {
+                kache_last: Some(last.clone()),
+                now_unix_ms: Some(1_794_909_549_000.0 + 1_500_000.0),
+                home: home.map(str::to_owned),
+                ..Inputs::default()
+            };
+            let s = check(&ctx, &inputs);
+            s.facts
+                .iter()
+                .find(|f| f.key == "kache session")
+                .map(|f| f.value.clone())
+                .unwrap()
+        };
+        assert_eq!(
+            session(&last, Some("/home/user")),
+            "started 09:59 UTC by cargo build --timings (in ~/src/app), 25 min ago, ran 144s, 2 cargo commands in all (latest: cargo test --workspace --no-run)"
+        );
+        assert_eq!(
+            session(&last, Some("/home/other")),
+            "started 09:59 UTC by cargo build --timings (in /home/user/src/app), 25 min ago, ran 144s, 2 cargo commands in all (latest: cargo test --workspace --no-run)"
+        );
+        last["meta"]["session"]["commands"] = Value::Null;
+        last["meta"]["session"]["cwd"] = Value::Null;
+        assert_eq!(
+            session(&last, Some("/home/user")),
+            "started 09:59 UTC by cargo build --timings, 25 min ago, ran 144s"
+        );
+        // Without the fields: as before.
+        last["meta"] = serde_json::json!({"session": {"root": "/home/user/src/app/target"}});
+        assert_eq!(
+            session(&last, Some("/home/user")),
+            "started 09:59 UTC, 25 min ago, ran 144s"
+        );
+    }
+
+    #[test]
+    fn abbreviates_home() {
+        assert_eq!(
+            tilde("/home/user/src/app", Some("/home/user/")),
+            "~/src/app"
+        );
+        assert_eq!(tilde("/home/user", Some("/home/user")), "~");
+        assert_eq!(
+            tilde("/home/username/app", Some("/home/user")),
+            "/home/username/app"
+        );
+        assert_eq!(tilde("/home/user/app", None), "/home/user/app");
     }
 
     #[test]
