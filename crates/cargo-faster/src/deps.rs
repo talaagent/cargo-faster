@@ -409,13 +409,14 @@ fn async_trait_finding(a: &Analysis) -> Option<Finding> {
                 .fix(fix),
         );
     };
+    let unparsed = unparsed_note(scan);
     if scan.uses == 0 {
         if a.async_trait_in.is_empty() {
             return None;
         }
         return Some(
             Finding::new("unused-async-trait", Severity::Info, format!("{} on async-trait without using it", crates_depend(a.async_trait_in.len())), "the-cost-of-async-trait")
-                .saw(format!("async-trait is a dependency of {}, but no #[async_trait] attribute is in their sources.", a.async_trait_in.join(", ")))
+                .saw(format!("async-trait is a dependency of {}, but no #[async_trait] attribute is in their sources.{unparsed}", a.async_trait_in.join(", ")))
                 .why("An unused dependency still has to be built (and its proc macro loaded) before these crates can start.")
                 .fix(format!("Drop async-trait from those manifests, and keep it out with clippy.toml:\n{CLIPPY_BAN}")),
         );
@@ -452,7 +453,7 @@ fn async_trait_finding(a: &Analysis) -> Option<Finding> {
     Some(
         Finding::new("uses-async-trait", sev, format!("#[async_trait] is used {} times in {} workspace crates", scan.uses, scan.crates.len()), "the-cost-of-async-trait")
             .saw(format!(
-                "{} #[async_trait] attributes: {}{more}. {defined}{foreign}",
+                "{} #[async_trait] attributes: {}{more}. {defined}{foreign}{unparsed}",
                 scan.uses,
                 top.join(", "),
             ))
@@ -570,6 +571,29 @@ fn dev_feature_split_finding(a: &Analysis) -> Option<Finding> {
             .why("Builds that include the crate's tests turn the features on; builds that don't (`cargo build --release`, `cargo clippy -p bin --lib --bins`) leave them off. Each feature set is a separate compile of that crate and of every workspace crate depending on it, with its own cache keys, so a gate that runs both a production check and a `--workspace --all-targets` build or test compiles them twice and shares nothing between the two.")
             .fix("If the repo builds both, either make the feature additive and harmless enough to keep on in every build (one feature set, one build), or drop the separate production step and let `--workspace --all-targets` cover it, checking production-only code (`cfg(not(feature = ...))`) another way. If only one kind of build ever runs, this costs nothing. Tradeoff: leaving the feature on compiles test helpers into normal builds (see test-features-in-dependencies)."),
     )
+}
+
+/// " 2 source files didn't parse and weren't counted: a.rs, b.rs.", or
+/// nothing when every file parsed.
+fn unparsed_note(scan: &Scan) -> String {
+    match scan.unparsed.as_slice() {
+        [] => String::new(),
+        [only] => format!(
+            " 1 source file didn't parse and wasn't counted: {}.",
+            only.display()
+        ),
+        files => {
+            let names: Vec<String> = files
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect();
+            format!(
+                " {} source files didn't parse and weren't counted: {}.",
+                files.len(),
+                crate::fmt::capped(&names, 5)
+            )
+        }
+    }
 }
 
 /// "3 held as `dyn` (`A`, `B`, `C`)".
@@ -998,15 +1022,15 @@ mod tests {
 
         // A few uses: low; many: medium, with the clippy ban.
         let scan = |n: usize| {
-            let files: Vec<(String, String)> = (0..n)
-                .map(|i| {
-                    (
-                        "app".to_owned(),
-                        format!("#[async_trait]\nimpl Store for S{i} {{}}\n"),
-                    )
-                })
-                .chain([(
-                    "lib".to_owned(),
+            let source = |krate: &str, text: String| asynctrait::Source {
+                krate: krate.to_owned(),
+                path: format!("{krate}/src/lib.rs").into(),
+                text,
+            };
+            let files: Vec<asynctrait::Source> = (0..n)
+                .map(|i| source("app", format!("#[async_trait]\nimpl Store for S{i} {{}}\n")))
+                .chain([source(
+                    "lib",
                     "#[async_trait]\npub trait Store {}\nfn f(_: &dyn Store) {}\n".to_owned(),
                 )])
                 .collect();
@@ -1023,6 +1047,11 @@ mod tests {
             saw,
             "4 #[async_trait] attributes: app 3, lib 1. They define 1 traits, 1 held as `dyn` (`Store`)."
         );
+        let mut broken = scan(1);
+        broken.unparsed = vec!["app/src/gen.rs".into()];
+        a.async_trait = Some(broken);
+        let (.., saw, _) = finding(&a).unwrap();
+        assert!(saw.ends_with(" 1 source file didn't parse and wasn't counted: app/src/gen.rs."));
         a.async_trait = Some(scan(ASYNC_TRAIT_MANY));
         let (_, sev, _, _, fix) = finding(&a).unwrap();
         assert_eq!(sev, Severity::Medium);

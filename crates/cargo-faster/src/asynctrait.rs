@@ -6,13 +6,16 @@
 //! `#[async_trait(?Send)]`) attribute, whether it sits on a trait or an
 //! impl, and which of the traits it defines are used as `dyn Trait`.
 //!
-//! The scanner is lexical, not a parser: it blanks out comments and string
-//! literals, then looks at attributes and the item that follows them. That
-//! is enough for counting and keeps syn out of the build.
+//! Each file is parsed with syn and walked with [`syn::visit`], so comments,
+//! strings and nested modules are handled the way rustc sees them. Code
+//! inside macro invocations (`macro_rules!` bodies, `quote!`) isn't parsed
+//! and isn't counted. A file syn can't parse is listed in
+//! [`Scan::unparsed`], not guessed at.
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use syn::visit::{self, Visit};
 
 use crate::context::Metadata;
 
@@ -56,236 +59,96 @@ pub struct Scan {
     pub foreign_impls: usize,
     /// Source files read.
     pub files: usize,
+    /// Source files syn couldn't parse, so not counted.
+    pub unparsed: Vec<PathBuf>,
 }
 
-/// Blank out comments, string and char literals, keeping byte offsets.
-#[must_use]
-pub fn strip(src: &str) -> String {
-    let b = src.as_bytes();
-    let mut out = b.to_vec();
-    let blank = |out: &mut Vec<u8>, from: usize, to: usize| {
-        for c in out.iter_mut().take(to).skip(from) {
-            if *c != b'\n' {
-                *c = b' ';
+/// One workspace source file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Source {
+    /// The package it belongs to.
+    pub krate: String,
+    /// Where it is, for reporting files that don't parse.
+    pub path: PathBuf,
+    /// Its contents.
+    pub text: String,
+}
+
+/// Whether `attr` is `#[async_trait]`, `#[async_trait(?Send)]` or
+/// `#[path::to::async_trait]`.
+fn is_async_trait(attr: &syn::Attribute) -> bool {
+    attr.path()
+        .segments
+        .last()
+        .is_some_and(|segment| segment.ident == "async_trait")
+}
+
+fn last_ident(path: &syn::Path) -> Option<String> {
+    path.segments
+        .last()
+        .map(|segment| segment.ident.to_string())
+}
+
+/// The syn walk over one file.
+#[derive(Default)]
+struct Visitor {
+    scan: FileScan,
+    /// The traits the file names as `dyn [path::]Trait`, by last segment.
+    dyn_names: BTreeSet<String>,
+}
+
+impl<'ast> Visit<'ast> for Visitor {
+    fn visit_attribute(&mut self, attr: &'ast syn::Attribute) {
+        if is_async_trait(attr) {
+            self.scan.uses += 1;
+        }
+        visit::visit_attribute(self, attr);
+    }
+
+    fn visit_item_trait(&mut self, item: &'ast syn::ItemTrait) {
+        if item.attrs.iter().any(is_async_trait) {
+            self.scan.traits.push(item.ident.to_string());
+        }
+        visit::visit_item_trait(self, item);
+    }
+
+    fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+        if item.attrs.iter().any(is_async_trait)
+            && let Some(name) = item.trait_.as_ref().and_then(|(path, _)| last_ident(path))
+        {
+            self.scan.impls.push(name);
+        }
+        visit::visit_item_impl(self, item);
+    }
+
+    fn visit_type_trait_object(&mut self, object: &'ast syn::TypeTraitObject) {
+        for bound in &object.bounds {
+            if let syn::TypeParamBound::Trait(bound) = bound
+                && let Some(name) = last_ident(&bound.path)
+            {
+                self.dyn_names.insert(name);
             }
         }
-    };
-    let mut i = 0;
-    while i < b.len() {
-        match b[i] {
-            b'/' if b.get(i + 1) == Some(&b'/') => {
-                let end = b[i..]
-                    .iter()
-                    .position(|&c| c == b'\n')
-                    .map_or(b.len(), |p| i + p);
-                blank(&mut out, i, end);
-                i = end;
-            }
-            b'/' if b.get(i + 1) == Some(&b'*') => {
-                let (mut j, mut depth) = (i + 2, 1);
-                while j < b.len() && depth > 0 {
-                    if b[j] == b'/' && b.get(j + 1) == Some(&b'*') {
-                        depth += 1;
-                        j += 2;
-                    } else if b[j] == b'*' && b.get(j + 1) == Some(&b'/') {
-                        depth -= 1;
-                        j += 2;
-                    } else {
-                        j += 1;
-                    }
-                }
-                blank(&mut out, i, j);
-                i = j;
-            }
-            b'r' if !ident_byte(prev(b, i)) && raw_start(b, i).is_some() => {
-                let (hashes, open) = raw_start(b, i).unwrap_or((0, i));
-                let close: Vec<u8> = core::iter::once(b'"')
-                    .chain(core::iter::repeat_n(b'#', hashes))
-                    .collect();
-                let end = b[open + 1..]
-                    .windows(close.len())
-                    .position(|w| w == close.as_slice())
-                    .map_or(b.len(), |p| open + 1 + p + close.len());
-                blank(&mut out, i, end);
-                i = end;
-            }
-            b'"' => {
-                let mut j = i + 1;
-                while j < b.len() && b[j] != b'"' {
-                    j += if b[j] == b'\\' { 2 } else { 1 };
-                }
-                let end = (j + 1).min(b.len());
-                blank(&mut out, i, end);
-                i = end;
-            }
-            b'\'' => {
-                // A char literal ('a', '\n', '\u{1F600}') or a lifetime ('a).
-                let end = if b.get(i + 1) == Some(&b'\\') {
-                    b[i + 2..]
-                        .iter()
-                        .position(|&c| c == b'\'')
-                        .map(|p| i + 2 + p + 1)
-                } else {
-                    let ch = src[i + 1..].chars().next().map_or(1, char::len_utf8);
-                    (b.get(i + 1 + ch) == Some(&b'\'')).then_some(i + 2 + ch)
-                };
-                match end {
-                    Some(e) => {
-                        blank(&mut out, i, e);
-                        i = e;
-                    }
-                    None => i += 1,
-                }
-            }
-            _ => i += 1,
-        }
+        visit::visit_type_trait_object(self, object);
     }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
-fn prev(b: &[u8], i: usize) -> u8 {
-    if i == 0 { b' ' } else { b[i - 1] }
+fn visit_source(src: &str) -> syn::Result<Visitor> {
+    let file = syn::parse_file(src)?;
+    let mut visitor = Visitor::default();
+    visitor.visit_file(&file);
+    Ok(visitor)
 }
 
-fn ident_byte(c: u8) -> bool {
-    c.is_ascii_alphanumeric() || c == b'_'
+/// Count `#[async_trait]` uses in one file's source, or the parse error.
+pub fn scan_source(src: &str) -> syn::Result<FileScan> {
+    visit_source(src).map(|visitor| visitor.scan)
 }
 
-/// `r"`, `r#"`, `br"`: the number of hashes and the offset of the quote.
-fn raw_start(b: &[u8], i: usize) -> Option<(usize, usize)> {
-    let mut j = i + 1;
-    while b.get(j) == Some(&b'#') {
-        j += 1;
-    }
-    (b.get(j) == Some(&b'"')).then_some((j - i - 1, j))
-}
-
-/// Count `#[async_trait]` uses in one file's source.
-#[must_use]
-pub fn scan_source(src: &str) -> FileScan {
-    let s = strip(src);
-    let mut f = FileScan::default();
-    let mut at = 0;
-    while let Some(p) = s[at..].find("#[") {
-        let start = at + p + 2;
-        let Some(close) = matching_bracket(&s, start) else {
-            break;
-        };
-        at = close + 1;
-        let path: String = s[start..close]
-            .split('(')
-            .next()
-            .unwrap_or_default()
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .collect();
-        if path != "async_trait" && !path.ends_with("::async_trait") {
-            continue;
-        }
-        f.uses += 1;
-        match item_after(&s[at..]) {
-            Some(Item::Trait(name)) => f.traits.push(name),
-            Some(Item::Impl(name)) => f.impls.push(name),
-            None => {}
-        }
-    }
-    f
-}
-
-/// The index of the `]` closing a `#[` whose contents start at `from`.
-fn matching_bracket(s: &str, from: usize) -> Option<usize> {
-    let mut depth = 1usize;
-    for (i, c) in s[from..].char_indices() {
-        match c {
-            '[' => depth += 1,
-            ']' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(from + i);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-enum Item {
-    Trait(String),
-    Impl(String),
-}
-
-/// The trait or impl an attribute is on: the text up to the item's `{`.
-fn item_after(rest: &str) -> Option<Item> {
-    let head = &rest[..rest.find(['{', ';']).unwrap_or(rest.len())];
-    let words: Vec<&str> = head
-        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
-        .filter(|w| !w.is_empty())
-        .collect();
-    if let Some(i) = words.iter().position(|w| *w == "trait") {
-        return words.get(i + 1).map(|n| Item::Trait((*n).to_owned()));
-    }
-    let impl_at = find_word(head, "impl")?;
-    let for_at = find_word(&head[impl_at..], "for").map(|p| impl_at + p)?;
-    let mut tr = head[impl_at + 4..for_at].trim();
-    if tr.starts_with('<') {
-        tr = skip_generics(tr).trim();
-    }
-    let tr = tr.split('<').next().unwrap_or(tr);
-    let name = tr.rsplit("::").next().unwrap_or(tr).trim();
-    Some(Item::Impl(name.trim_start_matches('!').to_owned()))
-}
-
-/// Byte offset of `w` as a whole word in `s`.
-fn find_word(s: &str, w: &str) -> Option<usize> {
-    let b = s.as_bytes();
-    let mut at = 0;
-    while let Some(p) = s[at..].find(w) {
-        let i = at + p;
-        let before = i == 0 || !ident_byte(b[i - 1]);
-        let after = b.get(i + w.len()).is_none_or(|&c| !ident_byte(c));
-        if before && after {
-            return Some(i);
-        }
-        at = i + w.len();
-    }
-    None
-}
-
-/// Skip a leading `<...>` (nested).
-fn skip_generics(s: &str) -> &str {
-    let mut depth = 0usize;
-    for (i, c) in s.char_indices() {
-        match c {
-            '<' => depth += 1,
-            '>' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return &s[i + 1..];
-                }
-            }
-            _ => {}
-        }
-    }
-    ""
-}
-
-/// Whether the stripped source names `trait_name` as `dyn [path::]Trait`.
-#[must_use]
-pub fn mentions_dyn(stripped: &str, trait_name: &str) -> bool {
-    let mut at = 0;
-    while let Some(p) = find_word(&stripped[at..], "dyn") {
-        let rest = stripped[at + p + 3..].trim_start();
-        let path: String = rest
-            .chars()
-            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == ':')
-            .collect();
-        if path.rsplit("::").next() == Some(trait_name) {
-            return true;
-        }
-        at += p + 3;
-    }
-    false
+/// The traits a file's source names as `dyn [path::]Trait`, by last
+/// segment, or the parse error.
+pub fn dyn_names(src: &str) -> syn::Result<BTreeSet<String>> {
+    visit_source(src).map(|visitor| visitor.dyn_names)
 }
 
 /// Directories never scanned: build output, vendored code, VCS state.
@@ -305,24 +168,26 @@ const SKIP_DIRS: &[&str] = &[
 pub fn package_sources(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&d) else {
+    while let Some(next) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&next) else {
             continue;
         };
-        for e in rd.flatten() {
-            let p = e.path();
-            let name = e.file_name().to_string_lossy().into_owned();
-            let Ok(ft) = e.file_type() else { continue };
-            if ft.is_dir() {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
                 if name.starts_with('.')
                     || SKIP_DIRS.contains(&name.as_str())
-                    || p.join("Cargo.toml").exists()
+                    || path.join("Cargo.toml").exists()
                 {
                     continue;
                 }
-                stack.push(p);
-            } else if ft.is_file() && p.extension().is_some_and(|x| x == "rs") {
-                out.push(p);
+                stack.push(path);
+            } else if kind.is_file() && path.extension().is_some_and(|ext| ext == "rs") {
+                out.push(path);
             }
         }
     }
@@ -333,57 +198,75 @@ pub fn package_sources(dir: &Path) -> Vec<PathBuf> {
 /// Scan every workspace member's sources.
 #[must_use]
 pub fn scan_workspace(m: &Metadata) -> Scan {
-    let mut files: Vec<(String, String)> = Vec::new();
-    for p in m.members() {
-        let Some(dir) = p.manifest_path.parent() else {
+    let mut files: Vec<Source> = Vec::new();
+    for package in m.members() {
+        let Some(dir) = package.manifest_path.parent() else {
             continue;
         };
-        for f in package_sources(dir) {
-            if let Ok(src) = std::fs::read_to_string(&f) {
-                files.push((p.name.clone(), src));
+        for path in package_sources(dir) {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                let path = path
+                    .strip_prefix(&m.workspace_root)
+                    .map_or_else(|_| path.clone(), Path::to_path_buf);
+                files.push(Source {
+                    krate: package.name.clone(),
+                    path,
+                    text,
+                });
             }
         }
     }
     aggregate(&files)
 }
 
-/// Aggregate `(crate, source)` pairs into a [`Scan`].
+/// Aggregate source files into a [`Scan`].
 #[must_use]
-pub fn aggregate(files: &[(String, String)]) -> Scan {
+pub fn aggregate(files: &[Source]) -> Scan {
     let mut by_crate: BTreeMap<&str, CrateUses> = BTreeMap::new();
     let mut traits: BTreeSet<String> = BTreeSet::new();
     let mut impls: Vec<String> = Vec::new();
-    let mut stripped = Vec::with_capacity(files.len());
-    for (krate, src) in files {
-        let f = scan_source(src);
-        if f.uses > 0 {
-            let c = by_crate.entry(krate).or_insert_with(|| CrateUses {
-                name: krate.clone(),
-                ..CrateUses::default()
-            });
-            c.uses += f.uses;
-            c.traits += f.traits.len();
-            c.impls += f.impls.len();
-            traits.extend(f.traits);
-            impls.extend(f.impls);
+    let mut dyn_names: BTreeSet<String> = BTreeSet::new();
+    let mut unparsed = Vec::new();
+    for source in files {
+        let Ok(Visitor {
+            scan,
+            dyn_names: names,
+        }) = visit_source(&source.text)
+        else {
+            unparsed.push(source.path.clone());
+            continue;
+        };
+        dyn_names.extend(names);
+        if scan.uses == 0 {
+            continue;
         }
-        stripped.push(strip(src));
+        let uses = by_crate.entry(&source.krate).or_insert_with(|| CrateUses {
+            name: source.krate.clone(),
+            ..CrateUses::default()
+        });
+        uses.uses += scan.uses;
+        uses.traits += scan.traits.len();
+        uses.impls += scan.impls.len();
+        traits.extend(scan.traits);
+        impls.extend(scan.impls);
     }
-    let dyn_traits = traits
-        .iter()
-        .filter(|t| stripped.iter().any(|s| mentions_dyn(s, t)))
-        .cloned()
-        .collect();
-    let foreign_impls = impls.iter().filter(|i| !traits.contains(*i)).count();
+    let dyn_traits = traits.intersection(&dyn_names).cloned().collect();
+    let foreign_impls = impls.iter().filter(|name| !traits.contains(*name)).count();
     let mut crates: Vec<CrateUses> = by_crate.into_values().collect();
-    crates.sort_by(|a, b| b.uses.cmp(&a.uses).then_with(|| a.name.cmp(&b.name)));
+    crates.sort_by(|left, right| {
+        right
+            .uses
+            .cmp(&left.uses)
+            .then_with(|| left.name.cmp(&right.name))
+    });
     Scan {
-        uses: crates.iter().map(|c| c.uses).sum(),
+        uses: crates.iter().map(|krate| krate.uses).sum(),
         crates,
         traits: traits.into_iter().collect(),
         dyn_traits,
         foreign_impls,
         files: files.len(),
+        unparsed,
     }
 }
 
@@ -418,59 +301,58 @@ impl Store for Mem {
 #[derive(Debug)]
 struct Mem;
 
-#[cfg(test)]
-#[async_trait(?Send)]
-impl<'a, T: Clone> crate::hooks::Hooks<'a> for Wrapper<T> {
-    async fn run(&self) {}
+mod nested {
+    #[cfg(test)]
+    #[async_trait(?Send)]
+    impl<'a, T: Clone> crate::hooks::Hooks<'a> for Wrapper<T> {
+        async fn run(&self) {}
+    }
 }
 
 fn held(s: Arc<dyn Store>, h: &dyn crate::Other) {}
 fn lifetime<'a>(x: &'a str) -> &'a str { x }
 "##;
 
-    #[test]
-    fn counts_attributes_not_text() {
-        let f = scan_source(SRC);
-        assert_eq!(f.uses, 4);
-        assert_eq!(f.traits, ["Store", "Hooks"]);
-        assert_eq!(f.impls, ["Store", "Hooks"]);
+    fn source(krate: &str, text: &str) -> Source {
+        Source {
+            krate: krate.to_owned(),
+            path: PathBuf::from(format!("{krate}/src/lib.rs")),
+            text: text.to_owned(),
+        }
     }
 
     #[test]
-    fn strip_keeps_offsets_and_lifetimes() {
-        let s = strip(SRC);
-        assert_eq!(s.len(), SRC.len());
-        assert!(s.contains("fn lifetime<'a>(x: &'a str)"));
-        assert!(!s.contains("quoted"));
+    fn counts_attributes_not_text() {
+        let scan = scan_source(SRC).unwrap();
+        assert_eq!(scan.uses, 4);
+        assert_eq!(scan.traits, ["Store", "Hooks"]);
+        assert_eq!(scan.impls, ["Store", "Hooks"]);
     }
 
     #[test]
     fn finds_dyn_traits() {
-        let s = strip(SRC);
-        assert!(mentions_dyn(&s, "Store"));
-        assert!(!mentions_dyn(&s, "Hooks"));
-        assert!(mentions_dyn("Box<dyn hooks::Hooks + Send>", "Hooks"));
-        assert!(!mentions_dyn("Box<dyn StoreExt>", "Store"));
+        let names = dyn_names(SRC).unwrap();
+        assert!(names.contains("Store"));
+        assert!(names.contains("Other"));
+        assert!(!names.contains("Hooks"));
+        let boxed = dyn_names("type B = Box<dyn hooks::Hooks + Send>;").unwrap();
+        assert!(boxed.contains("Hooks"));
+        let ext = dyn_names("type B = Box<dyn StoreExt>;").unwrap();
+        assert!(!ext.contains("Store"));
     }
 
     #[test]
     fn aggregates_per_crate() {
-        let files = vec![
-            ("app".to_owned(), SRC.to_owned()),
-            (
-                "lib".to_owned(),
-                "#[async_trait]\nimpl Store for Db {}\n".to_owned(),
-            ),
-            (
-                "dep-only".to_owned(),
-                "use async_trait::async_trait;\n".to_owned(),
-            ),
+        let files = [
+            source("app", SRC),
+            source("lib", "#[async_trait]\nimpl Store for Db {}\n"),
+            source("dep-only", "use async_trait::async_trait;\n"),
         ];
-        let s = aggregate(&files);
-        assert_eq!(s.uses, 5);
-        assert_eq!(s.files, 3);
+        let scan = aggregate(&files);
+        assert_eq!(scan.uses, 5);
+        assert_eq!(scan.files, 3);
         assert_eq!(
-            s.crates,
+            scan.crates,
             [
                 CrateUses {
                     name: "app".into(),
@@ -486,21 +368,29 @@ fn lifetime<'a>(x: &'a str) -> &'a str { x }
                 },
             ]
         );
-        assert_eq!(s.traits, ["Hooks", "Store"]);
-        assert_eq!(s.dyn_traits, ["Store"]);
-        assert_eq!(s.foreign_impls, 0);
-        let up = aggregate(&[(
-            "a".to_owned(),
-            "#[async_trait]\nimpl up::Driver for D {}\n".to_owned(),
-        )]);
-        assert_eq!((up.uses, up.foreign_impls), (1, 1));
+        assert_eq!(scan.traits, ["Hooks", "Store"]);
+        assert_eq!(scan.dyn_traits, ["Store"]);
+        assert_eq!(scan.foreign_impls, 0);
+        assert_eq!(scan.unparsed, Vec::<PathBuf>::new());
+        let upstream = aggregate(&[source("a", "#[async_trait]\nimpl up::Driver for D {}\n")]);
+        assert_eq!((upstream.uses, upstream.foreign_impls), (1, 1));
+    }
+
+    #[test]
+    fn reports_files_that_dont_parse() {
+        let scan = aggregate(&[
+            source("ok", "#[async_trait]\nimpl Store for Db {}\n"),
+            source("broken", "#[async_trait]\nimpl Store for {\n"),
+        ]);
+        assert_eq!((scan.uses, scan.files), (1, 2));
+        assert_eq!(scan.unparsed, [PathBuf::from("broken/src/lib.rs")]);
     }
 
     #[test]
     fn walks_package_sources() {
-        let d = tempfile::tempdir().unwrap();
-        let root = d.path();
-        for (p, body) in [
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for (path, body) in [
             ("src/lib.rs", "#[async_trait]\ntrait A {}\n"),
             ("src/m/x.rs", "#[async_trait]\nimpl A for B {}\n"),
             (
@@ -511,14 +401,19 @@ fn lifetime<'a>(x: &'a str) -> &'a str { x }
             ("sub/Cargo.toml", ""),
             ("sub/src/lib.rs", "#[async_trait]\ntrait Sub {}\n"),
         ] {
-            let p = root.join(p);
-            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-            std::fs::write(p, body).unwrap();
+            let path = root.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
         }
         let files = package_sources(root);
         let rel: Vec<_> = files
             .iter()
-            .map(|f| f.strip_prefix(root).unwrap().to_string_lossy().into_owned())
+            .map(|file| {
+                file.strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
             .collect();
         assert_eq!(rel, ["src/lib.rs", "src/m/x.rs"]);
     }
