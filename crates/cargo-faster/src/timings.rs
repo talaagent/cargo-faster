@@ -201,7 +201,7 @@ pub fn section(a: &Analysis, source: &str) -> Section {
             "rebuilt",
             if r.first_build.is_some() {
                 format!(
-                    "{} workspace crates: a first build in this target directory",
+                    "{} workspace crates: a first build of them in this target directory, mode and profile",
                     r.crates
                 )
             } else {
@@ -841,7 +841,7 @@ mod tests {
         assert!(
             s.facts
                 .iter()
-                .any(|f| f.value == "14 workspace crates: a first build in this target directory")
+                .any(|f| f.value == "14 workspace crates: a first build of them in this target directory, mode and profile")
         );
         // A workspace crate was fresh: something was edited.
         assert!(ids(&run(&units(true), None)).contains(&"edit-rebuilt-many"));

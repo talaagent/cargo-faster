@@ -1,6 +1,9 @@
 //! `cargo faster`: find out why your Rust build is slow and how to make it
 //! faster.
 
+extern crate alloc;
+
+use alloc::collections::BTreeSet;
 use bpaf::Bpaf;
 use bpaf_kit::log::LogArgs;
 use bpaf_kit::{Cli, cmd};
@@ -8,7 +11,7 @@ use cargo_faster::context::{Context, build, cargo_bin};
 use cargo_faster::error::Error;
 use cargo_faster::error::UnknownName;
 use cargo_faster::finding::{Fact, Report, Section, Severity};
-use cargo_faster::timings::run::without_workspace_if_picked;
+use cargo_faster::timings::run::{FirstBuildHint, without_workspace_if_picked};
 use cargo_faster::{
     cache, checkcost, deps, graph, machine, profile, setup, testrun, tests, timings,
 };
@@ -367,7 +370,12 @@ fn run(opts: &Opts) -> Result<Report, Error> {
     {
         return Ok(Report {
             workspace: None,
-            sections: vec![timings_file_section(None, file, baseline.as_deref(), None)?],
+            sections: vec![timings_file_section(
+                None,
+                file,
+                baseline.as_deref(),
+                &FirstBuildHint::Unknown,
+            )?],
             skipped: Vec::new(),
         });
     }
@@ -596,7 +604,7 @@ fn timings_section(
             Some(f) => f.to_path_buf(),
             None => timings::newest_report(&ctx.target_dir()).ok_or(Error::NoTimings)?,
         };
-        let mut s = timings_file_section(Some(ctx), &path, baseline, None)?;
+        let mut s = timings_file_section(Some(ctx), &path, baseline, &FirstBuildHint::Unknown)?;
         let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
         if let Some(written) = modified(&path) {
             let age = SystemTime::now()
@@ -624,7 +632,7 @@ fn timings_section(
         return Ok(s);
     };
     let (path, facts, failed, first_build) = timings_run(ctx, r)?;
-    let mut s = timings_file_section(Some(ctx), &path, baseline, first_build)?;
+    let mut s = timings_file_section(Some(ctx), &path, baseline, &first_build)?;
     for (i, f) in facts.into_iter().enumerate() {
         s.facts.insert(i, f);
     }
@@ -649,12 +657,12 @@ type Failed = Option<(i32, String)>;
 
 /// Run the build with `--timings` (after the probe edit, for `--edit`)
 /// and return the report it wrote, with facts saying what was measured,
-/// how the build failed if it did, and whether it was the first build in
-/// its target directory (see [`timings::Extra::first_build`]).
+/// how the build failed if it did, and what it knows about whether it was
+/// a first build (see [`timings::run::FirstBuildHint`]).
 fn timings_run(
     ctx: &Context,
     r: &TimingsRun,
-) -> Result<(PathBuf, Vec<Fact>, Failed, Option<bool>), Error> {
+) -> Result<(PathBuf, Vec<Fact>, Failed, FirstBuildHint), Error> {
     use timings::run::{Edit, Probe, edit_target, probe_text};
     let nextest = tests::Inputs::gather(ctx).nextest_installed;
     let args = r.build.args(nextest, &r.cargo_args);
@@ -716,7 +724,7 @@ fn timings_run(
             ),
         });
     }
-    let fingerprints_before = fingerprinted(ctx);
+    let fingerprints_before = fingerprints(ctx);
     let start = SystemTime::now();
     let out = build(ctx, r.nice, &cargo)
         .args(&args)
@@ -751,25 +759,22 @@ fn timings_run(
             .into(),
         });
     };
-    // No fingerprints before and some after: this build made the first
-    // ones. None after either: they live elsewhere (a build-dir), so say
-    // nothing and let the report tell.
     let first_build = if target.is_some() {
-        Some(false)
+        FirstBuildHint::Edit
     } else {
-        (!fingerprints_before && fingerprinted(ctx)).then_some(true)
+        FirstBuildHint::new(&fingerprints_before, &fingerprints(ctx))
     };
     Ok((path, facts, failed, first_build))
 }
 
-/// Whether the target directory has fingerprints for a workspace member.
-fn fingerprinted(ctx: &Context) -> bool {
+/// The target directory's fingerprint directories for workspace members.
+fn fingerprints(ctx: &Context) -> BTreeSet<PathBuf> {
     let members: Vec<&str> = ctx
         .metadata
         .as_ref()
         .map(|m| m.members().map(|p| p.name.as_str()).collect())
         .unwrap_or_default();
-    timings::run::has_fingerprints(&ctx.target_dir(), &members)
+    timings::run::fingerprints(&ctx.target_dir(), &members)
 }
 
 /// The newest report in the target directory, if it was written after
@@ -835,6 +840,7 @@ fn tests_sections(
     if !inputs.nextest_installed {
         return Err(Error::NoNextest);
     }
+    let fingerprints_before = fingerprints(ctx);
     let build_start = SystemTime::now();
     let started = Instant::now();
     let built = build(ctx, nice, cargo_bin(&ctx.env))
@@ -846,6 +852,7 @@ fn tests_sections(
         .current_dir(ctx.root())
         .output()?;
     let build_secs = started.elapsed().as_secs_f64();
+    let first_build = FirstBuildHint::new(&fingerprints_before, &fingerprints(ctx));
     if !built.success() {
         return Err(format!("building the tests failed\n{}", built.stderr_lossy().trim()).into());
     }
@@ -915,9 +922,11 @@ fn tests_sections(
     match timings_path {
         // The test run section says the build was fresh.
         Some(_) if build_fresh => {}
-        Some(path) => report
-            .sections
-            .push(timings_file_section(Some(ctx), &path, None, None)?),
+        Some(path) => {
+            report
+                .sections
+                .push(timings_file_section(Some(ctx), &path, None, &first_build)?);
+        }
         None => report.skipped.push(Fact {
             key: "timings".into(),
             value: "the test build wrote no cargo-timing.html".into(),
@@ -929,13 +938,14 @@ fn tests_sections(
 /// Read a report; with a workspace, join the cache wrapper's records,
 /// compare with a baseline (given, or the newest earlier check report when
 /// this one is a build) and count the workspace crates it rebuilt.
-/// `first_build` is what the run knows about the target directory (see
-/// [`timings::Extra::first_build`]).
+/// `first_build` is what the run knows about the units it built (see
+/// [`FirstBuildHint::resolve`]). Only a plain build is compared with an
+/// earlier check: a test build's units aren't the check's.
 fn timings_file_section(
     ctx: Option<&Context>,
     path: &Path,
     baseline: Option<&Path>,
-    first_build: Option<bool>,
+    first_build: &FirstBuildHint,
 ) -> Result<Section, Error> {
     let read = |p: &Path| -> Result<timings::Timings, Error> {
         let html =
@@ -945,7 +955,7 @@ fn timings_file_section(
     let t = read(path)?;
     let base = match baseline {
         Some(b) => Some((b.to_path_buf(), read(b)?)),
-        None if !t.is_check() => timings::check_before(path),
+        None if !t.is_check() && !t.ran().any(|u| u.mode == "test") => timings::check_before(path),
         None => None,
     };
     let ws = ctx.and_then(|c| c.metadata.as_ref().map(timings::workspace_from_metadata));
@@ -974,7 +984,11 @@ fn timings_file_section(
         timings::Extra {
             baseline: base.as_ref().map(|(_, b)| b),
             workspace: ws.as_ref(),
-            first_build,
+            first_build: first_build.resolve(
+                t.ran()
+                    .map(|u| u.name.as_str())
+                    .filter(|n| ws.as_ref().is_some_and(|w| w.deps.contains_key(*n))),
+            ),
         },
         &runs,
     );

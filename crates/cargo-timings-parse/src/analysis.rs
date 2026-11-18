@@ -239,8 +239,9 @@ pub struct Rebuilt {
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum FirstBuild {
-    /// The target directory had no fingerprints for any workspace crate
-    /// before the build, and had them after (the caller knows this, see
+    /// No workspace crate the build compiled had been built before in this
+    /// mode and profile: the target directory had no fingerprint for those
+    /// units (the caller knows this, see
     /// [`Extra::first_build`]).
     NoFingerprints,
     /// No workspace crate in the report was fresh, and the recompiled
@@ -256,9 +257,11 @@ pub struct Extra<'a> {
     pub baseline: Option<&'a Timings>,
     /// The workspace's crates and their dependencies.
     pub workspace: Option<&'a Workspace>,
-    /// Whether the build was the first in its target directory: `Some(true)`
-    /// when it had no fingerprints for the workspace before, `Some(false)`
-    /// after a known edit, `None` to tell from the report.
+    /// Whether the build was a first build: `Some(true)` when no workspace
+    /// unit it compiled had been built before in this mode and profile (a
+    /// first build in the target directory, or the first test build after
+    /// checks), `Some(false)` after a known edit, `None` to tell from the
+    /// report.
     pub first_build: Option<bool>,
 }
 
