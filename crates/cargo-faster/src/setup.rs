@@ -264,31 +264,7 @@ pub fn check(ctx: &Context, tools: &Tools) -> Section {
         );
     }
 
-    // Jobs.
-    let jobs = ctx
-        .var("CARGO_BUILD_JOBS")
-        .map(|j| (j.to_owned(), "CARGO_BUILD_JOBS".to_owned()))
-        .or_else(|| {
-            ctx.config
-                .get("build.jobs")
-                .map(|(v, f)| (v.to_string(), f.display().to_string()))
-        });
-    if let Some((j, src)) = &jobs {
-        s.fact("jobs", format!("{j} ({src})"));
-        if let Ok(n) = j.parse::<usize>()
-            && tools.cpus > 0
-            && n * 2 <= tools.cpus
-        {
-            f.push(
-                Finding::new("low-jobs", Severity::Low, format!("cargo is limited to {n} jobs on {} CPUs", tools.cpus), "the-machine")
-                    .saw(format!("jobs = {n} ({src}); this machine has {} CPUs.", tools.cpus))
-                    .why("cargo runs one rustc per job. Limiting jobs is right on a shared or memory-starved machine, but otherwise leaves cores idle in the wide parts of the build.")
-                    .fix("If the limit was for memory or a shared box, keep it. Otherwise remove it and let cargo use every core."),
-            );
-        }
-    } else {
-        s.fact("jobs", format!("{} (default: one per CPU)", tools.cpus));
-    }
+    jobs(ctx, tools, &mut s, &mut f);
 
     // Rustflags.
     if !flags.is_empty() {
@@ -337,6 +313,53 @@ pub fn check(ctx: &Context, tools: &Tools) -> Section {
     }
     s.extend(f);
     s
+}
+
+/// The job limit: `CARGO_BUILD_JOBS` or `build.jobs`, and a jobserver
+/// cargo would share with other processes.
+fn jobs(ctx: &Context, tools: &Tools, s: &mut Section, f: &mut Vec<Finding>) {
+    let jobs = ctx
+        .var("CARGO_BUILD_JOBS")
+        .map(|j| (j.to_owned(), "CARGO_BUILD_JOBS".to_owned()))
+        .or_else(|| {
+            ctx.config
+                .get("build.jobs")
+                .map(|(v, f)| (v.to_string(), f.display().to_string()))
+        });
+    let shared = ctx.jobserver();
+    let capped = if shared.is_some() {
+        ", at most: the jobserver's free tokens are the real limit"
+    } else {
+        ""
+    };
+    if let Some((j, src)) = &jobs {
+        s.fact("jobs", format!("{j} ({src}){capped}"));
+        if let Ok(n) = j.parse::<usize>()
+            && tools.cpus > 0
+            && n * 2 <= tools.cpus
+        {
+            f.push(
+                Finding::new("low-jobs", Severity::Low, format!("cargo is limited to {n} jobs on {} CPUs", tools.cpus), "the-machine")
+                    .saw(format!("jobs = {n} ({src}); this machine has {} CPUs.", tools.cpus))
+                    .why("cargo runs one rustc per job. Limiting jobs is right on a shared or memory-starved machine, but otherwise leaves cores idle in the wide parts of the build.")
+                    .fix("If the limit was for memory or a shared box, keep it. Otherwise remove it and let cargo use every core."),
+            );
+        }
+    } else {
+        s.fact(
+            "jobs",
+            format!("{} (default: one per CPU){capped}", tools.cpus),
+        );
+    }
+    if let Some((var, auth)) = shared {
+        s.fact("jobserver", format!("{auth} ({var})"));
+        f.push(
+            Finding::new("shared-jobserver", Severity::Medium, "cargo takes its job tokens from a shared jobserver", "shared-jobservers")
+                .saw(format!("{var} has --jobserver-auth={auth}, so cargo joins that jobserver instead of making its own: it runs one unit, and a second only when it gets a token from it. The jobs setting is only an upper bound."))
+                .why("A jobserver hands out a fixed number of tokens to every process that joins it. When it is machine-wide, other builds hold the tokens and yours runs one unit at a time: the build looks serial, and its critical path is only the order tokens came in.")
+                .fix(format!("On a shared machine keep it for everyday builds: it's what stops builds from overloading the box. To time the build itself, run without it at a quiet moment: `env -u {var} cargo faster timings --run` (unset MAKEFLAGS, CARGO_MAKEFLAGS and MFLAGS if more than one is set).")),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -434,6 +457,29 @@ mod tests {
         );
         c.env.insert("RUSTFLAGS".into(), "-C debuginfo=0".into());
         assert!(ids(&check(&c, &Tools::default())).contains(&"rustflags-env-overrides-config"));
+    }
+
+    #[test]
+    fn shared_jobserver() {
+        let mut c = ctx("[profile.dev]\ndebug = 0\n", "");
+        c.env.insert("CARGO_BUILD_JOBS".into(), "16".into());
+        c.env.insert(
+            "MAKEFLAGS".into(),
+            "--jobserver-auth=fifo:/dev/shm/js".into(),
+        );
+        let s = check(
+            &c,
+            &Tools {
+                linkers: vec![],
+                cpus: 32,
+            },
+        );
+        assert!(ids(&s).contains(&"shared-jobserver"), "{:?}", ids(&s));
+        let fact = |k: &str| s.facts.iter().find(|f| f.key == k).unwrap().value.clone();
+        assert_eq!(fact("jobserver"), "fifo:/dev/shm/js (MAKEFLAGS)");
+        assert!(fact("jobs").contains("free tokens are the real limit"));
+        c.env.remove("MAKEFLAGS");
+        assert!(!ids(&check(&c, &Tools::default())).contains(&"shared-jobserver"));
     }
 
     fn linker_fact(s: &Section) -> String {

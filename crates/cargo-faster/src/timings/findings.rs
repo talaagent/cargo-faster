@@ -85,8 +85,31 @@ pub fn findings(a: &Analysis) -> Vec<Finding> {
     out
 }
 
-/// Serial crates, a dominated critical path, low parallelism.
+/// Whether the build was short of job tokens: well under `jobs` units at
+/// a time while compiled units sat ready (on average at least half a
+/// unit). Cargo starts a ready unit as soon as it has a token, so ready
+/// units with jobs to spare mean it couldn't get one.
+#[must_use]
+pub fn token_starved(a: &Analysis) -> bool {
+    let Some(j) = a.jobs else { return false };
+    let jobs = f64::from(j.jobs);
+    jobs >= 2.0 && a.wall >= 2.0 && a.parallelism <= jobs / 2.0 && a.queued / a.wall >= 0.5
+}
+
+/// Token starvation, serial crates, a dominated critical path, low
+/// parallelism. A token-starved build gets only the first: its shape is
+/// the order tokens came in, not the dependency graph.
 fn shape(a: &Analysis, out: &mut Vec<Finding>) {
+    if token_starved(a) {
+        let jobs = a.jobs.map_or(0, |j| j.jobs);
+        out.push(
+            Finding::new("token-starved", if a.parallelism < 1.5 { Severity::High } else { Severity::Medium }, format!("The build waited for job tokens: {:.1} units at a time with jobs={jobs}", a.parallelism), "shared-jobservers")
+                .saw(format!("Compiled units sat ready (what they need already built) for {} in all, {:.1} of them on average at any moment of the {} build, while cargo ran {:.1} at a time with jobs={jobs}.", secs(a.queued), a.queued / a.wall, secs(a.wall), a.parallelism))
+                .why("Cargo starts a unit as soon as what it needs is built and it holds a job token. Ready units with jobs to spare mean cargo couldn't get tokens: it was sharing a jobserver (a machine-wide one in MAKEFLAGS or CARGO_MAKEFLAGS, or a parent make or cargo) whose tokens other processes held. The critical path and serial crates in this report show the order tokens came in, not your dependency graph.")
+                .fix("Check `cargo faster setup` for a shared jobserver. To time the build itself, run it without one at a quiet moment: `env -u MAKEFLAGS -u CARGO_MAKEFLAGS -u MFLAGS cargo faster timings --run`."),
+        );
+        return;
+    }
     if let Some(s) = a.serial.first()
         && pct(s.duration, a.wall) >= 25.0
     {
