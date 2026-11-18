@@ -62,10 +62,13 @@ the first real release can use trusted publishing and needs no token:
 
 1. On crates.io, add a trusted publisher to each crate: owner `talaagent`,
    repository `cargo-faster`, workflow `release-plz.yml`, no environment.
-2. Add the release date to the `0.1.0` heading in CHANGELOG.md.
-3. Run the release-plz workflow by hand with `bootstrap=true`. It publishes
-   the committed version over OIDC (without a `CARGO_REGISTRY_TOKEN`
-   secret).
+2. Let release-plz open the release PR. The workspace version is already
+   `0.1.0`, above the placeholders, so release-plz keeps it and only writes
+   its CHANGELOG.md section; don't write that section by hand, or the
+   release PR has nothing to change and release-plz opens none.
+3. Merge the release PR once CI passes. The publish job then publishes
+   `0.1.0` over OIDC (without a `CARGO_REGISTRY_TOKEN` secret), tags
+   `v0.1.0` and creates the GitHub release.
 
 A crate added later that isn't on crates.io yet can't use trusted
 publishing for its first release: store a short-lived token with the
