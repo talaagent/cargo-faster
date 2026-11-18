@@ -646,6 +646,20 @@ When you're debugging a cache, check its statistics. `sccache --show-stats` repo
 
 `cargo faster cache` shows which wrapper is configured, whether incremental is on for which crates, and where your target directories live.
 
+### kache sessions and cargo commands
+
+kache groups the compiles it wraps into sessions: a session starts with the first `rustc` it sees and ends after a stretch of inactivity. One session can cover several cargo commands, say a `cargo build`, then a `cargo clippy`, then a `cargo test`. Its hit rate covers all of them, which is why two edit builds in a row can show the same (cold build) hit rate: both reports describe the session, not the last command.
+
+`cargo faster cache` says which session its numbers come from: `kache session  started 09:41 UTC, 12 min ago, ran 4 min`. When kache records the cargo commands of a session, it also names the command that started it and how many ran in it:
+
+```text
+kache session  started 09:41 UTC by cargo clippy --workspace (in ~/src/app), 12 min ago, ran 4 min, 3 cargo commands in all (latest: cargo test)
+```
+
+`cargo faster timings` joins kache's records with a `--timings` report by crate name and start time. If the records it matched started under more than one cargo command, say a `cargo test` that overlapped the timed build, the cache outcomes and waits it shows may describe another build, and it warns (`kache-records-mixed-commands`). `cargo faster timings --run` avoids this: it times one cargo command and reads kache's records for that build alone. When you time a build yourself, run one cargo command per kache session.
+
+These fields are provisional: kache doesn't record cargo commands yet. cargo-faster reads them as proposed in [kunobi-ninja/kache#1968](https://github.com/kunobi-ninja/kache/issues/1968), all optional, on `meta.session` in `kache stats --json --last-build --full` and `kache stats --since … --format json`: `started_at`, `argv` and `cwd` for the command that started the session, and `commands`, oldest first, with `started_at`, `started_unix_ms`, `argv` and `cwd` for every cargo command in it (and the `commands` of each `meta.sessions` entry, if a window spans several sessions). Without them, the output is what it was before. The names may change when kache ships them.
+
 ### Worktrees and cold target directories
 
 Git worktrees are a great way to work on several branches at once. But each worktree is a separate directory with its own `target/`, so the first build in a new worktree is cold: every dependency compiles from scratch, as if you'd just cloned the repository.

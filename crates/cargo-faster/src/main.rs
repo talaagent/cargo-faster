@@ -940,11 +940,22 @@ fn timings_file_section(
     let ws = ctx.and_then(|c| c.metadata.as_ref().map(timings::workspace_from_metadata));
     let mut joined = None;
     let mut runs = Vec::new();
+    let mut mixed = None;
     if let (Some(c), Some(start)) = (ctx, t.start_unix_ms) {
-        let events = timings::wrapper::gather(c, start);
-        if !events.is_empty() {
-            runs = timings::wrapper::join(&t, &events);
+        let records = timings::wrapper::gather(c, start);
+        if !records.events.is_empty() {
+            let idx = timings::wrapper::join_events(&t, &records.events);
+            runs = idx
+                .iter()
+                .map(|j| j.map(|j| records.events[j].run.clone()))
+                .collect();
             joined = Some(runs.iter().flatten().count());
+            let counts = timings::wrapper::by_command(
+                &records.events,
+                idx.iter().flatten().copied(),
+                &records.commands,
+            );
+            mixed = timings::wrapper::mixed_commands(&records.commands, &counts);
         }
     }
     let a = timings::analyze_with(
@@ -966,6 +977,7 @@ fn timings_file_section(
             "kache has records for this period but none matched the report's units",
         );
     }
+    s.extend(mixed);
     if let (Some(m), Some(ws)) = (ctx.and_then(|c| c.metadata.as_ref()), &ws) {
         let found = graph::edges::gather(m, &timings::path_edges(&a, ws));
         if let Some(d) = graph::edges::detail(&found, false) {
