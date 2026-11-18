@@ -8,6 +8,7 @@ use cargo_faster::context::{Context, build, cargo_bin};
 use cargo_faster::error::Error;
 use cargo_faster::error::UnknownName;
 use cargo_faster::finding::{Fact, Report, Section, Severity};
+use cargo_faster::timings::run::without_workspace_if_picked;
 use cargo_faster::{
     cache, checkcost, deps, graph, machine, profile, setup, testrun, tests, timings,
 };
@@ -83,7 +84,7 @@ enum Command {
         command,
         footer(
             concat!(
-                "With --run: times `cargo nextest run --workspace --no-run --timings`, then runs the tests with NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 and `--message-format libtest-json-plus`, and reports build vs run time, the slowest tests and binaries, and how busy the test threads were.",
+                "With --run: times `cargo nextest run --workspace --no-run --timings` (without --workspace when the arguments pick the packages: --workspace, --all, -p), then runs the tests with NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 and `--message-format libtest-json-plus`, and reports build vs run time, the slowest tests and binaries, and how busy the test threads were.",
                 "\n",
                 global_help!()
             )
@@ -113,7 +114,7 @@ enum Command {
         command,
         footer(
             concat!(
-                "--run times `cargo check --workspace --timings`; --cmd picks the build: build (`cargo build`), clippy, or test (`cargo nextest run --no-run`, or `cargo test --no-run` without nextest). Extra cargo arguments go after `--`. --edit CRATE measures what an edit to CRATE costs: it runs the build once to bring the tree up to date, appends a probe function to CRATE's lib.rs (a new public one; with --body, a private one whose body changes), times the build, and restores the file. Cargo always gets --workspace, never -p.",
+                "--run times `cargo check --workspace --timings`; --cmd picks the build: build (`cargo build`), clippy, or test (`cargo nextest run --no-run`, or `cargo test --no-run` without nextest). Extra cargo arguments go after `--`. --edit CRATE measures what an edit to CRATE costs: it runs the build once to bring the tree up to date, appends a probe function to CRATE's lib.rs (a new public one; with --body, a private one whose body changes), times the build, and restores the file. Cargo gets --workspace, never -p, unless the arguments after `--` already pick the packages (--workspace, --all, -p).",
                 "\n",
                 global_help!()
             )
@@ -149,7 +150,7 @@ enum Command {
         command,
         footer(
             concat!(
-                "Uses RUSTC_BOOTSTRAP=1 so a stable rustc accepts -Zself-profile. `-p` picks the package and --lib/--bin/--test/--example/--bench the target; the rustc command is captured from `cargo check --workspace -vv` with the matching filter (--lib, --bin NAME, ...; with --tests also --profile test), which first checks the selected targets in every member and what they depend on. Cargo always gets --workspace, never -p, so caches keyed on the package set (kache) stay warm. Target flags in CARGO_ARGS (-- --tests) replace the filter; the lib's --test build is then profiled when they include --tests.",
+                "Uses RUSTC_BOOTSTRAP=1 so a stable rustc accepts -Zself-profile. `-p` picks the package and --lib/--bin/--test/--example/--bench the target; the rustc command is captured from `cargo check --workspace -vv` with the matching filter (--lib, --bin NAME, ...; with --tests also --profile test), which first checks the selected targets in every member and what they depend on. Cargo always gets --workspace, never -p, so caches keyed on the package set (kache) stay warm, unless CARGO_ARGS pick the packages (--workspace, -p). Target flags in CARGO_ARGS (-- --tests) replace the filter; the lib's --test build is then profiled when they include --tests.",
                 "\n",
                 global_help!()
             )
@@ -656,7 +657,7 @@ fn timings_run(
 ) -> Result<(PathBuf, Vec<Fact>, Failed, Option<bool>), Error> {
     use timings::run::{Edit, Probe, edit_target, probe_text};
     let nextest = tests::Inputs::gather(ctx).nextest_installed;
-    let args = r.build.args(nextest);
+    let args = r.build.args(nextest, &r.cargo_args);
     let cargo = cargo_bin(&ctx.env);
     let mut shown = args.clone();
     shown.push("--timings");
@@ -788,7 +789,10 @@ fn fresh_report(ctx: &Context, since: SystemTime) -> Option<PathBuf> {
 /// `--no-run` build (so it only lists); empty if listing fails.
 fn list_binaries(ctx: &Context, nice: i32, args: &[String]) -> Result<Vec<testrun::Listed>, Error> {
     let listed = build(ctx, nice, cargo_bin(&ctx.env))
-        .args(["nextest", "list", "--workspace", "--message-format", "json"])
+        .args(without_workspace_if_picked(
+            vec!["nextest", "list", "--workspace", "--message-format", "json"],
+            args,
+        ))
         .args(testrun::build_args(args))
         .current_dir(ctx.root())
         .output()?;
@@ -834,7 +838,10 @@ fn tests_sections(
     let build_start = SystemTime::now();
     let started = Instant::now();
     let built = build(ctx, nice, cargo_bin(&ctx.env))
-        .args(["nextest", "run", "--workspace", "--no-run", "--timings"])
+        .args(without_workspace_if_picked(
+            vec!["nextest", "run", "--workspace", "--no-run", "--timings"],
+            args,
+        ))
         .args(testrun::build_args(args))
         .current_dir(ctx.root())
         .output()?;
@@ -846,7 +853,10 @@ fn tests_sections(
     let started = Instant::now();
     let ran = build(ctx, nice, cargo_bin(&ctx.env))
         .env("NEXTEST_EXPERIMENTAL_LIBTEST_JSON", "1")
-        .args(["nextest", "run", "--workspace"])
+        .args(without_workspace_if_picked(
+            vec!["nextest", "run", "--workspace"],
+            args,
+        ))
         .args(testrun::fail_fast_arg(args))
         .args(["--message-format", "libtest-json-plus"])
         .args(testrun::no_tests_arg(args))
