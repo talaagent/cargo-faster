@@ -181,10 +181,9 @@ pub fn section(crates: &[CrateInfo], only: Option<&str>) -> Section {
         .collect();
     if let Some(c) = shown.first().filter(|_| only.is_some()) {
         s.fact("crate", format!("{} ({} lines)", c.name, c.lines));
-        s.fact(
-            "an edit rebuilds",
-            format!("{} other workspace crates", c.rebuilds.len()),
-        );
+        let n = c.rebuilds.len();
+        let noun = if n == 1 { "crate" } else { "crates" };
+        s.fact("an edit rebuilds", format!("{n} other workspace {noun}"));
         if !c.rebuilds.is_empty() {
             s.details.push(format!(
                 "rebuilt when {} changes\n  {}",

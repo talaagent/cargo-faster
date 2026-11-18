@@ -554,6 +554,18 @@ fn rank(a: &Edge, b: &Edge) -> core::cmp::Ordering {
         .then_with(|| (&a.from, &a.to).cmp(&(&b.from, &b.to)))
 }
 
+/// The first `max` of `items`, then how many more there are.
+fn capped(items: &[String], max: usize) -> String {
+    if items.len() <= max {
+        return items.join(", ");
+    }
+    format!("{} and {} more", items[..max].join(", "), items.len() - max)
+}
+
+/// Re-exports named in a finding's title, and in its "saw".
+const TITLE_ITEMS: usize = 3;
+const SAW_ITEMS: usize = 10;
+
 fn severity(e: &Edge) -> Severity {
     if (e.saved() >= 10 && e.saved() * 2 >= e.before) || e.critical_s.is_some_and(|s| s >= 5.0) {
         Severity::Medium
@@ -615,12 +627,12 @@ pub fn findings(edges: &[Edge], limit: usize) -> Vec<Finding> {
             Finding::new(
                 "reexported-dependency",
                 severity(e),
-                format!("{} re-exports {} from {} for {users} {}", e.from, list.join(", "), e.to, if users == 1 { "crate" } else { "crates" }),
+                format!("{} re-exports {} from {} for {users} {}", e.from, capped(&list, TITLE_ITEMS), e.to, if users == 1 { "crate" } else { "crates" }),
                 "cutting-a-dependency-edge",
             )
             .saw(format!(
                 "{} has `pub use` of {}, used through it by {}. An edit to {} rebuilds {} workspace crates; if those crates depended on {} directly and {} didn't, it would rebuild {}.",
-                e.from, list.join(", "), e.reexport_users.join(", "), e.to, e.before, e.to, e.from, e.after
+                e.from, capped(&list, SAW_ITEMS), e.reexport_users.join(", "), e.to, e.before, e.to, e.from, e.after
             ))
             .why(format!(
                 "A re-export ties every crate that depends on {} to {}, whether or not it uses the re-exported items.",
@@ -665,12 +677,19 @@ pub fn findings(edges: &[Edge], limit: usize) -> Vec<Finding> {
     out
 }
 
-/// A table of edges: every one given, or only those worth cutting.
+/// A table of edges: every one given, in the order given, or only those
+/// worth cutting, most rebuilds saved first (the findings' order).
 #[must_use]
 pub fn detail(edges: &[Edge], all: bool) -> Option<String> {
-    let rows: Vec<Vec<String>> = edges
+    let mut shown: Vec<&Edge> = edges
         .iter()
         .filter(|e| all || e.cheap() || e.unused() || e.reexported())
+        .collect();
+    if !all {
+        shown.sort_by(|a, b| rank(a, b));
+    }
+    let rows: Vec<Vec<String>> = shown
+        .into_iter()
         .map(|e| {
             vec![
                 if e.opaque {
@@ -931,6 +950,49 @@ mod tests {
                 .starts_with("Import from the owning crate directly")
         );
         assert!(f[0].saw.contains("would rebuild 6"));
+
+        // A long re-export list is cut short in the title and the saw.
+        let many: Vec<String> = (0..12).map(|i| format!("m{i}")).collect();
+        let e = Edge {
+            from: "app-config".into(),
+            to: "app-core".into(),
+            items: many.clone(),
+            reexports: many,
+            reexport_users: vec!["app-admin".into()],
+            ..edge(&[], 7215, 17, 6)
+        };
+        let f = findings(&[e], 5);
+        assert_eq!(
+            f[0].title,
+            "app-config re-exports `app_core::m0`, `app_core::m1`, `app_core::m2` and 9 more from app-core for 1 crate"
+        );
+        assert!(
+            f[0].saw
+                .contains("`app_core::m9` and 2 more, used through it"),
+            "{}",
+            f[0].saw
+        );
+    }
+
+    #[test]
+    fn detail_ranks_by_rebuilds_saved() {
+        let unused = Edge {
+            from: "app-admin".into(),
+            to: "app-seal".into(),
+            ..edge(&[], 324, 94, 94)
+        };
+        let cheap = Edge {
+            from: "app-config".into(),
+            to: "app-limits".into(),
+            ..edge(&["KEY"], 11, 83, 28)
+        };
+        let table = detail(&[unused.clone(), cheap.clone()], false).unwrap();
+        let config = table.find("app-config -> app-limits").unwrap();
+        let admin = table.find("app-admin -> app-seal").unwrap();
+        assert!(config < admin, "{table}");
+        // Every edge of one crate keeps the order given.
+        let table = detail(&[unused, cheap], true).unwrap();
+        assert!(table.find("app-admin").unwrap() < table.find("app-config").unwrap());
     }
 
     const META: &str = r#"{
