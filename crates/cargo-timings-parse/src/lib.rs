@@ -30,7 +30,7 @@
 //! let a = analyze(&t);
 //! assert!((a.wall - 6.1).abs() < 1e-9);
 //! let path: Vec<&str> = a.critical_path.iter().map(|s| s.unit.as_str()).collect();
-//! assert_eq!(path, ["core-lib", "app-cli (bin)"]);
+//! assert_eq!(path, ["core-lib", "app-cli (bin app)"]);
 //! # Ok::<(), cargo_timings_parse::ParseError>(())
 //! ```
 //!
