@@ -64,8 +64,9 @@ $ cargo faster check-cost -p app-agent-bin
 | `deps` | Heavy features, test features in normal builds, duplicate versions, proc macros, async-trait |
 | `tests` | nextest, target runners, thread limits, database-backed tests |
 | `rdeps` | What rebuilds when a crate changes, which crates are worth splitting, and dependency edges that use only a few items from a big crate |
+| `check` | Your rules from `cargo-faster.toml`: layering, flagged and duplicate dependencies, and with `--timings` cold-check and edit budgets. Exits 1 when one is broken |
 
-Every command takes `--json`, and `--fail-on high|medium|low` to exit 1 on a finding that severe (for CI). See [Using cargo faster](docs/cargo-faster.md) for details and real output.
+Every command takes `--json`, and `--fail-on high|medium|low` to exit 1 on a finding that severe (for CI). A `cargo-faster.toml` at the workspace root records hot crates, findings accepted by design (with a reason), and the rules `cargo faster check` enforces; see [the configuration file](docs/cargo-faster.md#the-configuration-file). See [Using cargo faster](docs/cargo-faster.md) for details and real output.
 
 ## Platforms
 

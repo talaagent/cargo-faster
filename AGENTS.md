@@ -68,6 +68,13 @@ and the `cargo-faster` binary (`src/main.rs`, the bpaf CLI).
   database-backed tests.
 - `profile.rs`: self-profile findings over a `rustc-self-profile`
   analysis; `checkcost.rs` runs the profile.
+- `config.rs`: `cargo-faster.toml` / `[workspace.metadata.cargo-faster]`
+  (serde, unknown keys rejected) and `[[accept]]` matching; keep
+  `docs/cargo-faster.schema.json` and the reference in
+  `docs/cargo-faster.md` in step (a test compares them).
+- `check.rs`: `cargo faster check`: layering, flagged and duplicate
+  dependencies on a guppy graph (from `cargo metadata --all-features`, so
+  features resolve like cargo), and the measured budgets.
 - `context.rs`: the project context (metadata, config, env) the checks
   read, and the `probe`/`build` helpers every subprocess goes through
   (`bpaf_kit::cmd::Cmd`, so builds echo and honor `--dry-run`).
