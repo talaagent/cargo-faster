@@ -13,7 +13,7 @@ pub mod run;
 pub mod wrapper;
 
 use crate::finding::{Section, table};
-use crate::fmt::{ellipsize, pct, secs};
+use crate::fmt::{capped, ellipsize, pct, secs};
 use alloc::collections::BTreeSet;
 use breakdown::WrapperSummary;
 pub use breakdown::workspace_from_metadata;
@@ -22,7 +22,7 @@ pub use cargo_timings_parse::{
     Timings, Unit, UnitOf, UnitSecs, UnitTime, Waited, Workspace, check_before, newest_report,
     reports,
 };
-pub use findings::{build_failed, findings};
+pub use findings::{build_failed, findings, token_starved};
 use serde_json::Value;
 use wrapper::{Outcome, WrapperRun};
 
@@ -201,14 +201,14 @@ pub fn section(a: &Analysis, source: &str) -> Section {
             "rebuilt",
             if r.first_build.is_some() {
                 format!(
-                    "{} workspace crates: a first build in this target directory",
+                    "{} workspace crates: a first build of them in this target directory, mode and profile",
                     r.crates
                 )
             } else {
                 format!(
                     "{} workspace crates, from {}",
                     r.crates,
-                    ellipsize(&r.roots.join(", "), 60)
+                    capped(&r.roots, 3)
                 )
             },
         );
@@ -303,10 +303,13 @@ fn path_table(s: &mut Section, a: &Analysis) {
     } else {
         &["start", "took", "gap", "waited", "unit"]
     };
-    s.details.push(format!(
-        "critical path (each step waited for the one above it; gap: idle after it was ready)\n{}",
-        table(headers, &rows)
-    ));
+    let title = if findings::token_starved(a) {
+        "critical path (the build was short of job tokens, so units ran in the order tokens came, not as soon as they were ready; gap: idle after it was ready)"
+    } else {
+        "critical path (each step waited for the one above it; gap: idle after it was ready)"
+    };
+    s.details
+        .push(format!("{title}\n{}", table(headers, &rows)));
 }
 
 fn kinds_table(s: &mut Section, a: &Analysis) {
@@ -676,7 +679,8 @@ mod tests {
         assert_eq!(w.hits.0 + w.misses.0, 0);
         assert_eq!(a.path.len(), a.critical_path.len());
         assert!(a.path.iter().all(|p| p.cache == Some(Outcome::Incr)));
-        assert!(a.critical_path.last().unwrap().unit.ends_with("\"bin\""));
+        let last = &a.critical_path.last().unwrap().unit;
+        assert!(last.contains("(bin"), "{last}");
         // The fixture's graph has every crate on app-core only, so the one
         // workspace edge on the path is the first step.
         let edges = path_edges(&a, &ws);
@@ -746,6 +750,43 @@ mod tests {
         }
     }
 
+    /// Independent test targets one after another with jobs=16 (#74): the
+    /// build waited for jobserver tokens, and its shape isn't blamed on a
+    /// critical path or a serial crate.
+    #[test]
+    fn token_starved_build() {
+        let units: Vec<Unit> = (0..5)
+            .map(|i| {
+                lib(
+                    i,
+                    &format!("t{i}"),
+                    " (check-test)",
+                    2.0 * i as f64,
+                    2.0 * if i == 4 { 4.0 } else { 1.0 },
+                    &[],
+                )
+            })
+            .collect();
+        let t = Timings {
+            units,
+            jobs: Some(Jobs { jobs: 16, ncpu: 32 }),
+            ..Timings::default()
+        };
+        let a = analyze(&t);
+        assert!(token_starved(&a));
+        let s = section(&a, "r.html");
+        let got: Vec<&str> = s.findings.iter().map(|f| f.id).collect();
+        assert_eq!(got, ["token-starved"], "{got:?}");
+        assert_eq!(s.findings[0].severity, crate::finding::Severity::High);
+        assert!(s.details.iter().any(|d| d.contains("short of job tokens")));
+        // The same build with jobs=1 had no tokens to spare.
+        let one = Timings {
+            jobs: Some(Jobs { jobs: 1, ncpu: 32 }),
+            ..t
+        };
+        assert!(!token_starved(&analyze(&one)));
+    }
+
     /// A first build in a new target directory (#51): every workspace crate
     /// compiles, "starting from" the workspace's leaves.
     #[test]
@@ -801,7 +842,7 @@ mod tests {
         assert!(
             s.facts
                 .iter()
-                .any(|f| f.value == "14 workspace crates: a first build in this target directory")
+                .any(|f| f.value == "14 workspace crates: a first build of them in this target directory, mode and profile")
         );
         // A workspace crate was fresh: something was edited.
         assert!(ids(&run(&units(true), None)).contains(&"edit-rebuilt-many"));

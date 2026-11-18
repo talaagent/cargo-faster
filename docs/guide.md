@@ -952,6 +952,14 @@ Finally, the build runs on a computer, and that computer may be busier than you 
 
 `cargo faster machine` reports load, memory, swap, and disk, and whether your cache and target directories share a filesystem. When the load is high, it samples `/proc` for half a second on Linux and names the processes using the most CPU (grouped by name, in CPUs), so you can tell another build from a nix build or a test suite.
 
+### Shared jobservers
+
+Cargo, make and other build tools can share a *jobserver*: a pool of tokens, one per job that may run. A process that joins one runs its first job for free and every other job only while it holds a token. Cargo joins the jobserver named by `--jobserver-auth` in `CARGO_MAKEFLAGS`, `MAKEFLAGS` or `MFLAGS`, so a build started from `make`, or on a machine whose environment sets a machine-wide jobserver (`MAKEFLAGS=--jobserver-auth=fifo:/dev/...`), shares tokens with everything else on it. Your `jobs` setting is then only an upper bound.
+
+On a busy shared machine that is the point: it keeps a dozen builds from running 16 jobs each on 32 cores. But it changes what a timing means. When the other builds hold the tokens, cargo runs one unit at a time even when many are ready. The timeline shows units starting one after another, independent ones included, and the critical path looks like one long chain (or one unit) that has nothing to do with your dependency graph.
+
+`cargo faster setup` and `cargo faster machine` report a jobserver in the environment. `cargo faster timings` says a build was short of tokens when it ran well under `jobs` units at a time while units sat ready. To time the build itself, run it without the jobserver at a quiet moment: `env -u MAKEFLAGS -u CARGO_MAKEFLAGS -u MFLAGS cargo faster timings --run`.
+
 ## Case study: a 312 second check
 
 Here's a story from a real workspace: about forty crates of async Rust, implementing a chat bot that talks to Matrix servers using `matrix_sdk`, with `tokio`, `reqwest`, and `sqlx` underneath. It's the case that most of this guide grew out of, and it's a good example of why measuring first matters.

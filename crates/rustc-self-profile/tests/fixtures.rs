@@ -63,7 +63,7 @@ fn analyzes_a_real_check() {
     assert_eq!(o.self_ty, "__A");
     assert_eq!(o.trait_path, "_::_serde::de::SeqAccess<'_>");
     assert_eq!((o.count, o.bodies), (18, 5));
-    assert_eq!(a.trait_solving_by_category[0].name, "types from __A");
+    assert_eq!(a.trait_solving_by_category[0].name, "generic parameters");
     assert_eq!(a.heavy_types.len(), 0);
     assert_eq!(a.async_trait_obligations, 0);
     assert!(a.codegen_secs < 0.001, "a check barely codegens");

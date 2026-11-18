@@ -105,7 +105,7 @@ With no subcommand, `cargo faster` runs every check that's quick and doesn't bui
   [medium] 6 heavy crates are built in more than one version
   [medium] app-agent has 108449 lines of Rust
   [low] cargo is limited to 16 jobs on 32 CPUs
-  [low] Editing app-spool rebuilds 98 of 183 workspace crates
+  [low] Editing app-spool rebuilds 98 other workspace crates (of 183)
   [low] app-admin-proto-orgs is 43509 lines, mostly generated code
   [low] app-admin-proto-personas is 50889 lines, mostly generated code
   [low] app-room-ops uses 2 items from app-config (31k lines)
@@ -147,7 +147,7 @@ $ cargo faster timings --cmd clippy                 # cargo clippy --workspace -
 $ cargo faster timings --cmd test -- --profile ci   # cargo nextest run --workspace --no-run --timings --profile ci
 ```
 
-`--cmd test` times the test build: `cargo nextest run --no-run` when nextest is installed, `cargo test --no-run` otherwise. Every build is `--workspace`, never `-p`, so it resolves features and cache keys the way your usual build does. Clippy runs rustc through `clippy-driver`, so its units don't share artifacts or cache entries with `cargo check`: time the one you wait on.
+`--cmd test` times the test build: `cargo nextest run --no-run` when nextest is installed, `cargo test --no-run` otherwise. Every build is `--workspace`, never `-p`, so it resolves features and cache keys the way your usual build does. If the arguments after `--` already pick the packages (`--workspace`, `--all`, `-p`), cargo faster leaves its own `--workspace` out, so a gate command like `-- --workspace --all-targets` can be pasted as is. Clippy runs rustc through `clippy-driver`, so its units don't share artifacts or cache entries with `cargo check`: time the one you wait on.
 
 ### What an edit to one crate costs
 
@@ -205,6 +205,7 @@ The timings check also finds:
 - `serial-crate`: a unit that runs while little else can, so most of your cores sit idle;
 - `long-codegen`: a unit that spends most of its time in LLVM, which usually means big generic instantiations or a release profile doing more than it needs to;
 - `low-parallelism`: a build that keeps few cores busy overall;
+- `token-starved`: a build that ran well under `jobs` units at a time while units sat ready, so cargo was waiting for tokens from a shared jobserver; the critical path and serial-crate findings are left out, since they'd only show the order tokens came in;
 - `critical-path-dominated`: one unit that is most of the critical path;
 - `slow-build-script`: a build script that holds up the crates waiting for it.
 - `post-metadata-analysis`: check units that spend a long time after writing their metadata, which is analysis such as lints and borrow checking, not codegen (a check has none);
@@ -213,7 +214,7 @@ The timings check also finds:
 - `critical-path-waiting`: steps on the critical path that sat idle after they were ready, or waited for the cache's scheduler;
 - `wrapper-wait`: a lot of time spent waiting for the rustc wrapper's scheduler or for another build compiling the same thing;
 - `edit-rebuilt-many`: an edit that recompiled many workspace crates, and which crates it started from;
-- `first-build`: every workspace crate compiled, starting from the workspace's leaves, as in a first build in a new target directory: there is no edit, so no fan-out to report (`--edit CRATE` measures one);
+- `first-build`: every workspace crate compiled, starting from the workspace's leaves, as in a first build in a new target directory, or the first test or release build after checks (`timings --run` and `tests --run` tell from the fingerprints cargo keeps per mode and profile): there is no edit, so no fan-out to report (`--edit CRATE` measures one);
 - `cheap-to-cut-edge`: a step on the critical path that waited for a workspace crate it uses only a few items from (the same check as `rdeps`, with the seconds that crate took on the path);
 - `unused-dependency`, `reexported-dependency`: a step on the critical path that waited for a workspace crate it doesn't use, or only re-exports to its own dependents;
 - `slow-build`: a slow build that none of the above explains, with what was measured and what to try next;
@@ -386,6 +387,7 @@ It looks at:
 - **the parallel frontend** (`-Zthreads`), and `-C target-cpu=native`;
 - **`RUSTFLAGS`** in the environment, which silently replaces the `rustflags` in your Cargo config, and changes every cache key;
 - **jobs**: `CARGO_BUILD_JOBS` or `build.jobs` limiting parallelism.
+- **jobserver**: `--jobserver-auth` in `CARGO_MAKEFLAGS`, `MAKEFLAGS` or `MFLAGS` (`shared-jobserver`): cargo joins that jobserver, so its free tokens, not `jobs`, decide how many units run.
 
 It reads settings the way cargo does, environment included: rustflags come from `CARGO_ENCODED_RUSTFLAGS`, else `RUSTFLAGS`, else `target.<triple>.rustflags` plus `CARGO_TARGET_<TRIPLE>_RUSTFLAGS`, else `build.rustflags` plus `CARGO_BUILD_RUSTFLAGS`; incremental from `CARGO_INCREMENTAL`, else `build.incremental` (or `CARGO_BUILD_INCREMENTAL`), else the profile. Each line names where its value came from, e.g. `linker  mold (CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS)`.
 
@@ -437,7 +439,7 @@ Before you believe any timing, know what else the machine was doing:
   [medium] The target dir filesystem is 94% full
 ```
 
-It checks load against the number of cores, other `rustc` and `cargo` processes, memory and swap, free disk space, and whether your target directory and your cache are on the same filesystem. If they aren't, a cache hit is a full copy instead of a reflink.
+It checks load against the number of cores, other `rustc` and `cargo` processes, memory and swap, free disk space, and whether your target directory and your cache are on the same filesystem. A `jobserver` fact names a jobserver cargo would share (`--jobserver-auth` in `MAKEFLAGS` or `CARGO_MAKEFLAGS`): its free tokens are then the real job limit. They can't be counted without taking them, so it isn't tried. If they aren't, a cache hit is a full copy instead of a reflink.
 
 On Linux these come from `/proc`, `df -PT`, the mount table and `stat -f`. On macOS they come from `sysctl` (load, memory, swap), `vm_stat` (free memory), `ps` (other builds), and `df -P` plus `mount` (filesystems). The default sccache directory there is `~/Library/Caches/Mozilla.sccache`. Anything it can't read on a platform is listed in an `unavailable` fact and left out, rather than reported as zero, and a busy-machine finding needs a load or process count to go on.
 
@@ -542,7 +544,7 @@ It times `cargo nextest run --workspace --no-run --timings`, runs the tests (`--
 
 Here one hung test, killed by the profile's terminate-after at 600s, is most of the 11-minute run; without it the suite needs about a minute on 8 threads.
 
-Its findings: `test-build-dominates` (the build takes over a minute and more than twice the run), `tests-near-slow-timeout` (tests at half the profile's `slow-timeout` or more), `test-threads-idle` (the threads were busy less than half the run), and `no-tests-ran` (nextest found no tests, and the `tests` fact says `0 tests`). It needs cargo-nextest, on `PATH` or in `~/.cargo/bin`; without it, it stops with `error[no_nextest]` and the install command. Arguments after `--` go to both nextest commands; never pass `-p` there if you use a caching wrapper, as it changes feature resolution and the cache keys.
+Its findings: `test-build-dominates` (the build takes over a minute and more than twice the run; not for a filtered run, which gets a `filtered` fact instead, since the build compiles every test binary whatever the filter), `tests-near-slow-timeout` (tests at half the profile's `slow-timeout` or more), `test-threads-idle` (the threads were busy less than half the run), and `no-tests-ran` (nextest found no tests, and the `tests` fact says `0 tests`). It needs cargo-nextest, on `PATH` or in `~/.cargo/bin`; without it, it stops with `error[no_nextest]` and the install command. Arguments after `--` go to both nextest commands; never pass `-p` there if you use a caching wrapper, as it changes feature resolution and the cache keys.
 
 See [Test suites](guide.md#test-suites) and [Measuring a test run](guide.md#measuring-a-test-run).
 
@@ -560,11 +562,11 @@ $ cargo faster rdeps app-core   # one crate (or -p app-core)
   workspace crates  183
 
   crates whose edits rebuild the most
-  rebuilds  lines  crate
-        98   6417  app-spool
-        95    150  app-ids
-        91   2640  app-hook-wire
-        87  11878  app-core
+  rebuilds others  lines  crate
+               98   6417  app-spool
+               95    150  app-ids
+               91   2640  app-hook-wire
+               87  11878  app-core
         ...
 
   dependency edges that are cheap to cut
@@ -574,7 +576,7 @@ $ cargo faster rdeps app-core   # one crate (or -p app-core)
   [medium] app-agent has 108449 lines of Rust
     saw: app-agent is 108449 lines; its biggest modules are delegates (14378 lines), agent
          (11366 lines), personas (9094 lines), guests.rs (3243 lines).
-  [low] Editing app-spool rebuilds 98 of 183 workspace crates
+  [low] Editing app-spool rebuilds 98 other workspace crates (of 183)
   [low] app-admin-proto-personas is 50889 lines, mostly generated code
   [low] app-room-ops uses 2 items from app-config (31k lines)
     saw: app-room-ops depends on app-config (31107 lines) but uses only

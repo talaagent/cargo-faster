@@ -1,6 +1,9 @@
 //! `cargo faster`: find out why your Rust build is slow and how to make it
 //! faster.
 
+extern crate alloc;
+
+use alloc::collections::BTreeSet;
 use bpaf::Bpaf;
 use bpaf_kit::log::LogArgs;
 use bpaf_kit::{Cli, cmd};
@@ -8,6 +11,7 @@ use cargo_faster::context::{Context, build, cargo_bin};
 use cargo_faster::error::Error;
 use cargo_faster::error::UnknownName;
 use cargo_faster::finding::{Fact, Report, Section, Severity};
+use cargo_faster::timings::run::{FirstBuildHint, without_workspace_if_picked};
 use cargo_faster::{
     cache, checkcost, deps, graph, machine, profile, setup, testrun, tests, timings,
 };
@@ -83,7 +87,7 @@ enum Command {
         command,
         footer(
             concat!(
-                "With --run: times `cargo nextest run --workspace --no-run --timings`, then runs the tests with NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 and `--message-format libtest-json-plus`, and reports build vs run time, the slowest tests and binaries, and how busy the test threads were.",
+                "With --run: times `cargo nextest run --workspace --no-run --timings` (without --workspace when the arguments pick the packages: --workspace, --all, -p), then runs the tests with NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 and `--message-format libtest-json-plus`, and reports build vs run time, the slowest tests and binaries, and how busy the test threads were.",
                 "\n",
                 global_help!()
             )
@@ -113,7 +117,7 @@ enum Command {
         command,
         footer(
             concat!(
-                "--run times `cargo check --workspace --timings`; --cmd picks the build: build (`cargo build`), clippy, or test (`cargo nextest run --no-run`, or `cargo test --no-run` without nextest). Extra cargo arguments go after `--`. --edit CRATE measures what an edit to CRATE costs: it runs the build once to bring the tree up to date, appends a probe function to CRATE's lib.rs (a new public one; with --body, a private one whose body changes), times the build, and restores the file. Cargo always gets --workspace, never -p.",
+                "--run times `cargo check --workspace --timings`; --cmd picks the build: build (`cargo build`), clippy, or test (`cargo nextest run --no-run`, or `cargo test --no-run` without nextest). Extra cargo arguments go after `--`. --edit CRATE measures what an edit to CRATE costs: it runs the build once to bring the tree up to date, appends a probe function to CRATE's lib.rs (a new public one; with --body, a private one whose body changes), times the build, and restores the file. Cargo gets --workspace, never -p, unless the arguments after `--` already pick the packages (--workspace, --all, -p).",
                 "\n",
                 global_help!()
             )
@@ -149,7 +153,7 @@ enum Command {
         command,
         footer(
             concat!(
-                "Uses RUSTC_BOOTSTRAP=1 so a stable rustc accepts -Zself-profile. `-p` picks the package and --lib/--bin/--test/--example/--bench the target; the rustc command is captured from `cargo check --workspace -vv` with the matching filter (--lib, --bin NAME, ...; with --tests also --profile test), which first checks the selected targets in every member and what they depend on. Cargo always gets --workspace, never -p, so caches keyed on the package set (kache) stay warm. Target flags in CARGO_ARGS (-- --tests) replace the filter; the lib's --test build is then profiled when they include --tests.",
+                "Uses RUSTC_BOOTSTRAP=1 so a stable rustc accepts -Zself-profile. `-p` picks the package and --lib/--bin/--test/--example/--bench the target; the rustc command is captured from `cargo check --workspace -vv` with the matching filter (--lib, --bin NAME, ...; with --tests also --profile test), which first checks the selected targets in every member and what they depend on. Cargo always gets --workspace, never -p, so caches keyed on the package set (kache) stay warm, unless CARGO_ARGS pick the packages (--workspace, -p). Target flags in CARGO_ARGS (-- --tests) replace the filter; the lib's --test build is then profiled when they include --tests.",
                 "\n",
                 global_help!()
             )
@@ -366,7 +370,12 @@ fn run(opts: &Opts) -> Result<Report, Error> {
     {
         return Ok(Report {
             workspace: None,
-            sections: vec![timings_file_section(None, file, baseline.as_deref(), None)?],
+            sections: vec![timings_file_section(
+                None,
+                file,
+                baseline.as_deref(),
+                &FirstBuildHint::Unknown,
+            )?],
             skipped: Vec::new(),
         });
     }
@@ -595,7 +604,7 @@ fn timings_section(
             Some(f) => f.to_path_buf(),
             None => timings::newest_report(&ctx.target_dir()).ok_or(Error::NoTimings)?,
         };
-        let mut s = timings_file_section(Some(ctx), &path, baseline, None)?;
+        let mut s = timings_file_section(Some(ctx), &path, baseline, &FirstBuildHint::Unknown)?;
         let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
         if let Some(written) = modified(&path) {
             let age = SystemTime::now()
@@ -623,7 +632,7 @@ fn timings_section(
         return Ok(s);
     };
     let (path, facts, failed, first_build) = timings_run(ctx, r)?;
-    let mut s = timings_file_section(Some(ctx), &path, baseline, first_build)?;
+    let mut s = timings_file_section(Some(ctx), &path, baseline, &first_build)?;
     for (i, f) in facts.into_iter().enumerate() {
         s.facts.insert(i, f);
     }
@@ -648,15 +657,15 @@ type Failed = Option<(i32, String)>;
 
 /// Run the build with `--timings` (after the probe edit, for `--edit`)
 /// and return the report it wrote, with facts saying what was measured,
-/// how the build failed if it did, and whether it was the first build in
-/// its target directory (see [`timings::Extra::first_build`]).
+/// how the build failed if it did, and what it knows about whether it was
+/// a first build (see [`timings::run::FirstBuildHint`]).
 fn timings_run(
     ctx: &Context,
     r: &TimingsRun,
-) -> Result<(PathBuf, Vec<Fact>, Failed, Option<bool>), Error> {
+) -> Result<(PathBuf, Vec<Fact>, Failed, FirstBuildHint), Error> {
     use timings::run::{Edit, Probe, edit_target, probe_text};
     let nextest = tests::Inputs::gather(ctx).nextest_installed;
-    let args = r.build.args(nextest);
+    let args = r.build.args(nextest, &r.cargo_args);
     let cargo = cargo_bin(&ctx.env);
     let mut shown = args.clone();
     shown.push("--timings");
@@ -715,7 +724,7 @@ fn timings_run(
             ),
         });
     }
-    let fingerprints_before = fingerprinted(ctx);
+    let fingerprints_before = fingerprints(ctx);
     let start = SystemTime::now();
     let out = build(ctx, r.nice, &cargo)
         .args(&args)
@@ -750,25 +759,22 @@ fn timings_run(
             .into(),
         });
     };
-    // No fingerprints before and some after: this build made the first
-    // ones. None after either: they live elsewhere (a build-dir), so say
-    // nothing and let the report tell.
     let first_build = if target.is_some() {
-        Some(false)
+        FirstBuildHint::Edit
     } else {
-        (!fingerprints_before && fingerprinted(ctx)).then_some(true)
+        FirstBuildHint::new(&fingerprints_before, &fingerprints(ctx))
     };
     Ok((path, facts, failed, first_build))
 }
 
-/// Whether the target directory has fingerprints for a workspace member.
-fn fingerprinted(ctx: &Context) -> bool {
+/// The target directory's fingerprint directories for workspace members.
+fn fingerprints(ctx: &Context) -> BTreeSet<PathBuf> {
     let members: Vec<&str> = ctx
         .metadata
         .as_ref()
         .map(|m| m.members().map(|p| p.name.as_str()).collect())
         .unwrap_or_default();
-    timings::run::has_fingerprints(&ctx.target_dir(), &members)
+    timings::run::fingerprints(&ctx.target_dir(), &members)
 }
 
 /// The newest report in the target directory, if it was written after
@@ -788,7 +794,10 @@ fn fresh_report(ctx: &Context, since: SystemTime) -> Option<PathBuf> {
 /// `--no-run` build (so it only lists); empty if listing fails.
 fn list_binaries(ctx: &Context, nice: i32, args: &[String]) -> Result<Vec<testrun::Listed>, Error> {
     let listed = build(ctx, nice, cargo_bin(&ctx.env))
-        .args(["nextest", "list", "--workspace", "--message-format", "json"])
+        .args(without_workspace_if_picked(
+            vec!["nextest", "list", "--workspace", "--message-format", "json"],
+            args,
+        ))
         .args(testrun::build_args(args))
         .current_dir(ctx.root())
         .output()?;
@@ -831,14 +840,19 @@ fn tests_sections(
     if !inputs.nextest_installed {
         return Err(Error::NoNextest);
     }
+    let fingerprints_before = fingerprints(ctx);
     let build_start = SystemTime::now();
     let started = Instant::now();
     let built = build(ctx, nice, cargo_bin(&ctx.env))
-        .args(["nextest", "run", "--workspace", "--no-run", "--timings"])
+        .args(without_workspace_if_picked(
+            vec!["nextest", "run", "--workspace", "--no-run", "--timings"],
+            args,
+        ))
         .args(testrun::build_args(args))
         .current_dir(ctx.root())
         .output()?;
     let build_secs = started.elapsed().as_secs_f64();
+    let first_build = FirstBuildHint::new(&fingerprints_before, &fingerprints(ctx));
     if !built.success() {
         return Err(format!("building the tests failed\n{}", built.stderr_lossy().trim()).into());
     }
@@ -846,7 +860,10 @@ fn tests_sections(
     let started = Instant::now();
     let ran = build(ctx, nice, cargo_bin(&ctx.env))
         .env("NEXTEST_EXPERIMENTAL_LIBTEST_JSON", "1")
-        .args(["nextest", "run", "--workspace"])
+        .args(without_workspace_if_picked(
+            vec!["nextest", "run", "--workspace"],
+            args,
+        ))
         .args(testrun::fail_fast_arg(args))
         .args(["--message-format", "libtest-json-plus"])
         .args(testrun::no_tests_arg(args))
@@ -889,6 +906,7 @@ fn tests_sections(
         binaries,
         units: timings.map(|t| t.0).unwrap_or_default(),
         build_fresh,
+        filters: testrun::filters(args),
     };
     inputs.process_cost = testrun::process_cost(&run_inputs);
     report.sections.push(tests::check(ctx, &inputs));
@@ -904,9 +922,11 @@ fn tests_sections(
     match timings_path {
         // The test run section says the build was fresh.
         Some(_) if build_fresh => {}
-        Some(path) => report
-            .sections
-            .push(timings_file_section(Some(ctx), &path, None, None)?),
+        Some(path) => {
+            report
+                .sections
+                .push(timings_file_section(Some(ctx), &path, None, &first_build)?);
+        }
         None => report.skipped.push(Fact {
             key: "timings".into(),
             value: "the test build wrote no cargo-timing.html".into(),
@@ -918,13 +938,14 @@ fn tests_sections(
 /// Read a report; with a workspace, join the cache wrapper's records,
 /// compare with a baseline (given, or the newest earlier check report when
 /// this one is a build) and count the workspace crates it rebuilt.
-/// `first_build` is what the run knows about the target directory (see
-/// [`timings::Extra::first_build`]).
+/// `first_build` is what the run knows about the units it built (see
+/// [`FirstBuildHint::resolve`]). Only a plain build is compared with an
+/// earlier check: a test build's units aren't the check's.
 fn timings_file_section(
     ctx: Option<&Context>,
     path: &Path,
     baseline: Option<&Path>,
-    first_build: Option<bool>,
+    first_build: &FirstBuildHint,
 ) -> Result<Section, Error> {
     let read = |p: &Path| -> Result<timings::Timings, Error> {
         let html =
@@ -934,7 +955,7 @@ fn timings_file_section(
     let t = read(path)?;
     let base = match baseline {
         Some(b) => Some((b.to_path_buf(), read(b)?)),
-        None if !t.is_check() => timings::check_before(path),
+        None if !t.is_check() && !t.ran().any(|u| u.mode == "test") => timings::check_before(path),
         None => None,
     };
     let ws = ctx.and_then(|c| c.metadata.as_ref().map(timings::workspace_from_metadata));
@@ -963,11 +984,23 @@ fn timings_file_section(
         timings::Extra {
             baseline: base.as_ref().map(|(_, b)| b),
             workspace: ws.as_ref(),
-            first_build,
+            first_build: first_build.resolve(
+                t.ran()
+                    .map(|u| u.name.as_str())
+                    .filter(|n| ws.as_ref().is_some_and(|w| w.deps.contains_key(*n))),
+            ),
         },
         &runs,
     );
     let mut s = timings::section(&a, &path.display().to_string());
+    if let Some((var, auth)) = ctx.and_then(Context::jobserver)
+        && let Some(f) = s.findings.iter_mut().find(|f| f.id == "token-starved")
+    {
+        f.saw = format!(
+            "{} This environment sets {var} with --jobserver-auth={auth}: that jobserver is the likely cause.",
+            f.saw
+        );
+    }
     if let Some((p, _)) = &base {
         s.fact("baseline", p.display().to_string());
     }

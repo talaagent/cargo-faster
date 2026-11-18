@@ -4,6 +4,7 @@
 use crate::context::Metadata;
 use crate::error::Error;
 use crate::error::UnknownName;
+use alloc::collections::BTreeSet;
 use core::fmt;
 use core::str::FromStr;
 use std::path::{Path, PathBuf};
@@ -52,17 +53,42 @@ impl fmt::Display for Build {
 
 impl Build {
     /// The cargo arguments, without `--timings` and the user's extra
-    /// arguments. Always `--workspace`, never `-p`.
+    /// arguments `user`. `--workspace`, never `-p`, unless `user` already
+    /// picks the packages (see [`without_workspace_if_picked`]).
     #[must_use]
-    pub fn args(self, nextest: bool) -> Vec<&'static str> {
-        match self {
+    pub fn args(self, nextest: bool, user: &[String]) -> Vec<&'static str> {
+        let base = match self {
             Self::Check => vec!["check", "--workspace"],
             Self::Build => vec!["build", "--workspace"],
             Self::Clippy => vec!["clippy", "--workspace"],
             Self::Test if nextest => vec!["nextest", "run", "--workspace", "--no-run"],
             Self::Test => vec!["test", "--workspace", "--no-run"],
-        }
+        };
+        without_workspace_if_picked(base, user)
     }
+}
+
+/// Whether the user's cargo arguments already pick the packages:
+/// `--workspace`, `--all`, `-p`/`--package`. Arguments after `--` go to
+/// the test binaries and don't count.
+#[must_use]
+pub fn picks_packages(user: &[String]) -> bool {
+    user.iter().take_while(|a| *a != "--").any(|a| {
+        let flag = a.split_once('=').map_or(a.as_str(), |(f, _)| f);
+        matches!(flag, "--workspace" | "--all" | "-p" | "--package")
+            || (a.starts_with("-p") && !a.starts_with("--"))
+    })
+}
+
+/// `base` without its `--workspace` when `user` picks the packages
+/// itself: cargo refuses a repeated `--workspace`, and `-p` asks for
+/// those packages only.
+#[must_use]
+pub fn without_workspace_if_picked<'a>(mut base: Vec<&'a str>, user: &[String]) -> Vec<&'a str> {
+    if picks_packages(user) {
+        base.retain(|a| *a != "--workspace");
+    }
+    base
 }
 
 /// What the probe edit changes.
@@ -154,13 +180,14 @@ pub fn edit_target(m: &Metadata, name: &str) -> Result<EditTarget, Error> {
     })
 }
 
-/// Whether the target directory has a cargo fingerprint for any of
-/// `members` (package names), in any profile (`debug/.fingerprint`) or
-/// target (`x86_64-unknown-linux-gnu/debug/.fingerprint`). A build in a
-/// target directory without one compiles every workspace crate for the
-/// first time.
+/// The cargo fingerprint directories (`<package>-<hash>`) of `members`
+/// (package names) in the target directory, in any profile
+/// (`debug/.fingerprint`) or target
+/// (`x86_64-unknown-linux-gnu/debug/.fingerprint`). Each is one unit: a
+/// package's target in one mode, profile and feature set, so a check, a
+/// test build and a release build of a crate each have their own.
 #[must_use]
-pub fn has_fingerprints(target_dir: &Path, members: &[&str]) -> bool {
+pub fn fingerprints(target_dir: &Path, members: &[&str]) -> BTreeSet<PathBuf> {
     let subdirs = |p: &Path| -> Vec<PathBuf> {
         std::fs::read_dir(p)
             .map(|d| {
@@ -180,16 +207,65 @@ pub fn has_fingerprints(target_dir: &Path, members: &[&str]) -> bool {
                 .map(|p| p.join(".fingerprint")),
         );
     }
-    dirs.iter().any(|d| {
-        std::fs::read_dir(d).is_ok_and(|entries| {
-            entries.flatten().any(|e| {
-                let name = e.file_name();
-                let name = name.to_string_lossy();
-                name.rsplit_once('-')
-                    .is_some_and(|(pkg, _)| members.contains(&pkg))
-            })
-        })
-    })
+    dirs.iter()
+        .flat_map(|d| subdirs(d))
+        .filter(|d| package(d).is_some_and(|pkg| members.contains(&pkg)))
+        .collect()
+}
+
+/// The package of a fingerprint directory, `app-core` for `app-core-9f8e`.
+fn package(dir: &Path) -> Option<&str> {
+    dir.file_name()?
+        .to_str()?
+        .rsplit_once('-')
+        .map(|(pkg, _)| pkg)
+}
+
+/// What a run knows about whether its build was a first build, to decide
+/// once the report says which workspace crates compiled.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum FirstBuildHint {
+    /// Nothing: tell from the report.
+    #[default]
+    Unknown,
+    /// The run made an edit, so it's not a first build.
+    Edit,
+    /// The packages that got a fingerprint directory they didn't have
+    /// before the build: units built for the first time in this mode and
+    /// profile.
+    New(BTreeSet<String>),
+}
+
+impl FirstBuildHint {
+    /// From the fingerprint directories before and after the build.
+    #[must_use]
+    pub fn new(before: &BTreeSet<PathBuf>, after: &BTreeSet<PathBuf>) -> Self {
+        Self::New(
+            after
+                .difference(before)
+                .filter_map(|d| package(d))
+                .map(str::to_owned)
+                .collect(),
+        )
+    }
+
+    /// For [`crate::timings::Extra::first_build`]: `Some(true)` when every
+    /// workspace crate that compiled did so for the first time in this mode
+    /// and profile (a first test build after checks, a first release
+    /// build), `Some(false)` after an edit, otherwise `None`. With no new
+    /// fingerprints at all they live elsewhere (a build-dir), so the report
+    /// tells.
+    #[must_use]
+    pub fn resolve<'a>(&self, compiled: impl IntoIterator<Item = &'a str>) -> Option<bool> {
+        match self {
+            Self::Unknown => None,
+            Self::Edit => Some(false),
+            Self::New(new) => {
+                let mut compiled = compiled.into_iter().peekable();
+                (compiled.peek().is_some() && compiled.all(|c| new.contains(c))).then_some(true)
+            }
+        }
+    }
 }
 
 /// A probe edit in place: the file's original bytes, written back by
@@ -265,16 +341,53 @@ mod tests {
     fn build_args() {
         assert_eq!("build".parse::<Build>(), Ok(Build::Build));
         assert!("bench".parse::<Build>().is_err());
-        assert_eq!(Build::Check.args(true), ["check", "--workspace"]);
-        assert_eq!(Build::Clippy.args(false), ["clippy", "--workspace"]);
+        assert_eq!(Build::Check.args(true, &[]), ["check", "--workspace"]);
+        assert_eq!(Build::Clippy.args(false, &[]), ["clippy", "--workspace"]);
         assert_eq!(
-            Build::Test.args(true),
+            Build::Test.args(true, &[]),
             ["nextest", "run", "--workspace", "--no-run"]
         );
-        assert_eq!(Build::Test.args(false), ["test", "--workspace", "--no-run"]);
+        assert_eq!(
+            Build::Test.args(false, &[]),
+            ["test", "--workspace", "--no-run"]
+        );
         for b in [Build::Check, Build::Build, Build::Clippy, Build::Test] {
-            assert!(!b.args(true).contains(&"-p"));
+            assert!(!b.args(true, &[]).contains(&"-p"));
             assert_eq!(b.to_string().parse::<Build>(), Ok(b));
+        }
+    }
+
+    #[test]
+    fn user_args_that_pick_packages_drop_workspace() {
+        let args = |a: &[&str]| a.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        for picked in [
+            &["--workspace", "--all-targets", "--locked"][..],
+            &["--all"],
+            &["-p", "app"],
+            &["-papp"],
+            &["--package", "app"],
+            &["--package=app"],
+        ] {
+            assert_eq!(
+                Build::Check.args(true, &args(picked)),
+                ["check"],
+                "{picked:?}"
+            );
+        }
+        assert_eq!(
+            Build::Test.args(true, &args(&["--workspace"])),
+            ["nextest", "run", "--no-run"]
+        );
+        for not in [
+            &["--all-targets", "--profile", "gate"][..],
+            &["--all-features"],
+            &["--", "-p"],
+        ] {
+            assert_eq!(
+                Build::Check.args(true, &args(not)),
+                ["check", "--workspace"],
+                "{not:?}"
+            );
         }
     }
 
@@ -328,15 +441,32 @@ mod tests {
     }
 
     #[test]
-    fn fingerprints() {
+    fn first_build_per_mode() {
         let dir = tempfile::tempdir().unwrap();
         let t = dir.path();
-        assert!(!has_fingerprints(t, &["app-core"]));
-        std::fs::create_dir_all(t.join("debug/.fingerprint/serde-0123abcd")).unwrap();
-        assert!(!has_fingerprints(t, &["app-core"]));
-        std::fs::create_dir_all(t.join("x86_64-unknown-linux-gnu/gate/.fingerprint/app-core-9f8e"))
-            .unwrap();
-        assert!(has_fingerprints(t, &["app-core"]));
+        let fp = |d: &str| std::fs::create_dir_all(t.join(d)).unwrap();
+        assert!(fingerprints(t, &["app-core"]).is_empty());
+        fp("debug/.fingerprint/serde-0123abcd");
+        assert!(fingerprints(t, &["app-core"]).is_empty());
+        fp("x86_64-unknown-linux-gnu/gate/.fingerprint/app-core-9f8e");
+        let members = ["app-core", "app"];
+        // A check of both crates.
+        fp("debug/.fingerprint/app-1111");
+        let checked = fingerprints(t, &members);
+        assert_eq!(checked.len(), 2);
+        // Then a first test build: new units for both.
+        fp("debug/.fingerprint/app-2222");
+        fp("debug/.fingerprint/app-core-3333");
+        let hint = FirstBuildHint::new(&checked, &fingerprints(t, &members));
+        assert_eq!(hint.resolve(["app", "app-core"]), Some(true));
+        // A build that also recompiled a crate it had built before.
+        assert_eq!(hint.resolve(["app", "app-core", "other"]), None);
+        assert_eq!(hint.resolve([]), None);
+        // Nothing new: an ordinary rebuild.
+        let same = FirstBuildHint::new(&checked, &checked);
+        assert_eq!(same.resolve(["app"]), None);
+        assert_eq!(FirstBuildHint::Edit.resolve(["app"]), Some(false));
+        assert_eq!(FirstBuildHint::Unknown.resolve(["app"]), None);
     }
 
     #[test]
