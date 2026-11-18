@@ -349,6 +349,12 @@ pub struct Context {
     pub manifest: toml::Table,
     /// `rustc -vV`.
     pub rustc: RustcInfo,
+    /// The raw `cargo metadata` JSON, for a resolved package graph
+    /// (`guppy`).
+    pub metadata_json: String,
+    /// The cargo-faster configuration (`cargo-faster.toml` or
+    /// `[workspace.metadata.cargo-faster]`); empty when there is none.
+    pub faster: crate::config::Config,
 }
 
 impl Context {
@@ -370,7 +376,8 @@ impl Context {
         if !out.success() {
             return Err(Error::NoWorkspace(out.stderr_lossy().trim().to_owned()));
         }
-        let metadata = Metadata::parse(&String::from_utf8_lossy(&out.stdout))?;
+        let metadata_json = String::from_utf8_lossy(&out.stdout).into_owned();
+        let metadata = Metadata::parse(&metadata_json)?;
         let root = metadata.workspace_root.clone();
         let manifest = std::fs::read_to_string(root.join("Cargo.toml"))
             .ok()
@@ -398,6 +405,8 @@ impl Context {
             config,
             manifest,
             rustc,
+            metadata_json,
+            faster: crate::config::Config::default(),
         })
     }
 

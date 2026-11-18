@@ -31,6 +31,10 @@ pub enum Error {
         "no cargo-timing.html in target/cargo-timings; run `cargo build --timings` or `cargo faster timings --run`"
     )]
     NoTimings,
+    /// The `cargo-faster.toml` (or `[workspace.metadata.cargo-faster]`)
+    /// can't be read, or has an unknown key or a bad value.
+    #[error("{0}")]
+    Config(String),
     /// `--dry-run` stopped before a step that needs a real build's output.
     #[error("{0}")]
     DryRun(String),
@@ -53,6 +57,7 @@ impl Error {
             Self::BuildFailed(_) => "build_failed",
             Self::NoWorkspace(_) => "no_workspace",
             Self::NoTimings => "no_timings",
+            Self::Config(_) => "config",
             Self::DryRun(_) => "dry_run",
             Self::Other(_) => "failed",
         }
@@ -68,7 +73,7 @@ impl bpaf_kit::report::Coded for Error {
     /// build being measured failed, else 1.
     fn exit_code(&self) -> u8 {
         match self {
-            Self::Usage(_) => 2,
+            Self::Usage(_) | Self::Config(_) => 2,
             Self::BuildFailed(_) => 3,
             _ => 1,
         }

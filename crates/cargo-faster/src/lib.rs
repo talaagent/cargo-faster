@@ -11,7 +11,9 @@ extern crate alloc;
 
 pub mod asynctrait;
 pub mod cache;
+pub mod check;
 pub mod checkcost;
+pub mod config;
 pub mod context;
 pub mod deps;
 pub mod error;

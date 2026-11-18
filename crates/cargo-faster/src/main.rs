@@ -355,6 +355,7 @@ fn run(opts: &Opts) -> Result<Report, Error> {
             workspace: None,
             sections: vec![profile_section(file, None, &[])?],
             skipped: Vec::new(),
+            accepted: Vec::new(),
         });
     }
     // So does an explicit timings report.
@@ -377,6 +378,7 @@ fn run(opts: &Opts) -> Result<Report, Error> {
                 &FirstBuildHint::Unknown,
             )?],
             skipped: Vec::new(),
+            accepted: Vec::new(),
         });
     }
     let ctx = Context::gather(opts.manifest_path.as_deref())?;
