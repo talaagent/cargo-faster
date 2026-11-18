@@ -1,0 +1,7 @@
+[package]
+name = "util-b"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tala-core = { path = "../../tala-core" }

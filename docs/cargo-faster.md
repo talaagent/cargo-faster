@@ -590,6 +590,126 @@ For the crates that rebuild the most, `rdeps` also reads each direct dependent's
 
 Before you split a crate, though, run `check-cost` on it. The crate in the case study looked too big, and splitting it would not have fixed anything. See [The shape of your workspace](guide.md#the-shape-of-your-workspace).
 
+## `cargo faster check`
+
+`check` enforces the rules in [the configuration file](#the-configuration-file), and exits 1 when one is broken. That makes it the command for CI. Without `--timings` it builds nothing: it runs `cargo metadata --all-features` and resolves the dependency graph the way cargo would, with each crate's default features plus `env.features`, so only the optional dependencies a feature turns on count.
+
+```console
+$ cargo faster check                     # layering, flagged and duplicate dependencies
+$ cargo faster check --timings           # also the time budgets (builds)
+$ cargo faster check --format github     # GitHub Actions annotations
+```
+
+```text
+== check
+  config                                         cargo-faster.toml
+  workspace crates                               5
+  layer rules                                    1
+  duplicate versions (x86_64-unknown-linux-gnu)  1
+
+  crate   versions
+  util-a  1.0.0, 2.0.0
+
+  [high] valet-io depends on tala-core
+    saw: valet-io → util-b → tala-core (layer rule `valet-*` must not depend on `tala-*`)
+    why: a layer that reaches into a crate above it rebuilds whenever that crate changes,
+         and the two can no longer be built, tested or published apart; the rule: valet is
+         published on its own
+    fix: cut the edge `util-b → tala-core`: move what `util-b` uses from `tala-core` down
+         a layer, or invert it behind a trait the upper crate implements. If the edge is
+         intended, narrow the rule or `[[accept]]` it with the reason
+
+  [high] 1 crate built in more than one version, budget 0
+    saw: built twice or more: util-a (1.0.0, 2.0.0)
+
+== summary
+  [high] valet-io depends on tala-core
+  [high] 1 crate built in more than one version, budget 0
+  1 accepted (by design, see `[[accept]]` in the configuration; --json lists them)
+cargo faster: check failed: 2 rules broken
+```
+
+What it checks:
+
+| finding | rule | needs a build |
+|---|---|---|
+| `layer-violation` | a `[[layer]]` crate reaches a crate it must not depend on | no |
+| `flagged-dependency` | a crate in `deps.flag` is in the normal or build graph | no |
+| `duplicates-over-budget` | more crates in two or more versions than `budgets.max_duplicate_versions` | no |
+| `env-cache-mismatch` | `RUSTC_WRAPPER` isn't the cache `env.cache` names | no |
+| `cold-check-over-budget` | a cold `cargo check --workspace` took longer than `budgets.cold_check_secs` | `--timings` |
+| `critical-path-too-long` | the cold check's critical path holds more workspace crates than `budgets.critical_path_max_crates` | `--timings` |
+| `new-critical-crate` | a workspace crate not in `budgets.no_new_critical_crates` is on that path | `--timings` |
+| `edit-rebuild-over-budget` | the build after an edit to a hot crate took longer than `budgets.edit_rebuild_secs` | `--timings` |
+
+Layer rules follow dependencies on every platform: a Windows-only dependency breaks the rule on Linux too. Duplicates and flagged crates are resolved for the host. A layer violation shows the whole chain, so the edge to cut is the last link (`util-b → tala-core`).
+
+`--timings` runs the cold check in `<target-dir>/cargo-faster-cold`, removed before and after, so it shares nothing with your other builds. It then measures an edit to each hot crate that has an edit budget, the same way `timings --edit` does. Budgets only mean something on the machine they were set on. Measure them on the CI runner, and leave about a quarter for noise.
+
+In GitHub Actions:
+
+```yaml
+- run: cargo install cargo-faster --locked
+- run: cargo faster check --format github
+```
+
+`--format github` writes one `::error` (or `::warning`, `::notice`) line per finding, and GitHub shows them on the run's summary page.
+
+## The configuration file
+
+`cargo faster` reads `cargo-faster.toml` at the workspace root, or `[workspace.metadata.cargo-faster]` in the root `Cargo.toml`. Having both is an error. Every key is optional. An unknown key is an error that names the key and where it was, so a typo can't turn a rule off. Crate names in `hot`, `no_new_critical_crates` and per-crate edit budgets must be workspace members. Patterns marked *glob* take `*` and `?`. The JSON schema is [`cargo-faster.schema.json`](cargo-faster.schema.json). With taplo or Even Better TOML, put `#:schema https://raw.githubusercontent.com/talaagent/cargo-faster/main/docs/cargo-faster.schema.json` at the top of the file for completion.
+
+```toml
+# The workspace crates people edit most: `rdeps` lists them first,
+# `timings --hot` measures an edit to each, `edit_rebuild_secs` budgets them.
+hot = ["app-core", "app-server"]
+
+# A finding that is there by design. `id` is required, `crate` and
+# `target` narrow it (all globs), `reason` is required. Accepted findings
+# leave the report but are counted in its summary, and `--json` lists them
+# under "accepted". When a finding names no crate or target of its own,
+# the pattern matches a word in its title or what it saw.
+[[accept]]
+id = "big-crate"
+crate = "app-server"
+reason = "one crate per service; the split is tracked in #412"
+
+[[accept]]
+id = "test-binary-without-tests"
+target = "bench-*"
+reason = "criterion benches, run with cargo bench"
+
+# Crates matching `crates` (globs) must not depend on crates matching
+# `must_not_depend_on` (globs), directly or through anything in between.
+# Normal and build dependencies count, on every platform; `dev = true`
+# also follows the crates' own dev-dependencies.
+[[layer]]
+crates = ["valet-*", "msgport"]
+must_not_depend_on = ["tala-*"]
+reason = "published on their own"
+
+[budgets]
+cold_check_secs = 90             # check --timings: a cold `cargo check --workspace`
+edit_rebuild_secs = 12           # or { app-core = 20, app-server = 8 }
+critical_path_max_crates = 6     # workspace crates on the cold check's critical path
+no_new_critical_crates = ["app-core", "app-server"]   # the only ones allowed there
+max_duplicate_versions = 4       # crates built in 2+ versions, not counting allow_duplicates
+
+[deps]
+flag = ["openssl-sys", "async-std"]   # must not be in the build (globs)
+allow_duplicates = ["windows-*"]      # may be built in several versions (globs)
+
+[env]
+cache = "kache"           # kache, sccache or none: the RUSTC_WRAPPER builds should use
+jobserver = "shared"      # shared or own: builds share job tokens with others on the machine,
+                          # so a token-starved timeline is expected (reported as info)
+profile = "dev"           # --profile for builds cargo faster runs
+features = ["postgres"]   # --features for those builds and for resolving the graph
+nextest_profile = "ci"    # --profile for `tests --run`
+```
+
+`profile` and `features` apply to `timings --run`/`--edit`/`--hot`, `check-cost` and `check --timings`, unless the command line already passes `--profile`/`--release` or `--features`/`--all-features`. A feature is either `name` (any workspace crate with that feature) or `crate/name`.
+
 ## A workflow
 
 Putting it together, here's the order that has worked for us:

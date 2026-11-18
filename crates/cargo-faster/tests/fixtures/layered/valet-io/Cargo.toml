@@ -1,0 +1,11 @@
+[package]
+name = "valet-io"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+util-b = { path = "../vendor/util-b" }
+util-a2 = { package = "util-a", path = "../vendor/util-a-2" }
+
+[target.'cfg(windows)'.dependencies]
+tala-win = { path = "../vendor/tala-win" }

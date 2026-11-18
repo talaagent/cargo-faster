@@ -11,7 +11,9 @@ extern crate alloc;
 
 pub mod asynctrait;
 pub mod cache;
+pub mod check;
 pub mod checkcost;
+pub mod config;
 pub mod context;
 pub mod deps;
 pub mod error;
@@ -72,5 +74,8 @@ pub const GUIDE_ANCHORS: &[&str] = &[
     "the-machine",
     "procedural-macros",
     "generic-code-and-monomorphization",
+    "the-config-file",
+    "layering-rules",
+    "build-budgets",
     "case-study-a-312-second-check",
 ];

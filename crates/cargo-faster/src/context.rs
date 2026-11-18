@@ -349,6 +349,9 @@ pub struct Context {
     pub manifest: toml::Table,
     /// `rustc -vV`.
     pub rustc: RustcInfo,
+    /// The cargo-faster configuration (`cargo-faster.toml` or
+    /// `[workspace.metadata.cargo-faster]`); empty when there is none.
+    pub faster: crate::config::Config,
 }
 
 impl Context {
@@ -398,6 +401,7 @@ impl Context {
             config,
             manifest,
             rustc,
+            faster: crate::config::Config::default(),
         })
     }
 

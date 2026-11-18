@@ -169,6 +169,36 @@ pub fn is_named(krate: &CrateInfo, name: &str) -> bool {
     name == krate.name || name.replace('_', "-") == krate.name
 }
 
+/// Put the configuration's hot crates (the ones edited most) first: a
+/// table of what an edit to each rebuilds, and their findings ahead of the
+/// rest.
+pub fn rank_hot(s: &mut Section, crates: &[CrateInfo], hot: &[String]) {
+    if hot.is_empty() {
+        return;
+    }
+    let is_hot = |n: &str| hot.iter().any(|h| crate::config::glob(h, n));
+    let rows: Vec<Vec<String>> = hot
+        .iter()
+        .filter_map(|h| crates.iter().find(|c| is_named(c, h)))
+        .map(|c| {
+            vec![
+                c.name.clone(),
+                c.rebuilds.len().to_string(),
+                c.lines.to_string(),
+            ]
+        })
+        .collect();
+    s.details.insert(
+        0,
+        format!(
+            "hot crates (`hot` in the configuration)\n{}",
+            table(&["crate", "an edit rebuilds", "lines"], &rows)
+        ),
+    );
+    s.findings
+        .sort_by_key(|f| !f.krate.as_deref().is_some_and(is_hot));
+}
+
 /// The rdeps section, for one crate or the whole workspace.
 #[must_use]
 pub fn section(crates: &[CrateInfo], only: Option<&str>) -> Section {
@@ -236,6 +266,7 @@ pub fn section(crates: &[CrateInfo], only: Option<&str>) -> Section {
             let (m, n) = &c.modules[0];
             f.push(
                 Finding::new("big-generated-crate", Severity::Low, format!("{} is {} lines, mostly generated code", c.name, c.lines), "splitting-a-big-crate")
+                    .krate(&c.name)
                     .saw(format!("{n} of {}'s {} lines are in {m}.", c.name, c.lines))
                     .why("Generated code (protobuf, OpenAPI, bindings) compiles like hand-written code. It rarely changes, so it mostly costs cold builds and the crates that wait on it.")
                     .fix("Keep it in its own crate (it already is), generate only the services and messages you use, and make sure nothing that changes often depends on it unnecessarily. A shared cache makes it nearly free after the first build."),
@@ -249,6 +280,7 @@ pub fn section(crates: &[CrateInfo], only: Option<&str>) -> Section {
                 .collect();
             f.push(
                 Finding::new("big-crate", if c.lines >= 2 * BIG_CRATE_LINES { Severity::Medium } else { Severity::Low }, format!("{} has {} lines of Rust", c.name, c.lines), "splitting-a-big-crate")
+                    .krate(&c.name)
                     .saw(format!("{} is {} lines; its biggest modules are {}.", c.name, c.lines, mods.join(", ")))
                     .why("rustc checks a crate as one unit: an edit anywhere re-runs type checking for the whole crate (incremental helps, but less than you'd hope with async code), and one crate can't use more than a few cores.")
                     .fix(format!("Move self-contained modules into their own crates, starting with ones that don't depend on the rest (often {}). Each split crate builds in parallel and is skipped when you edit elsewhere.", c.modules.first().map_or("the biggest", |m| m.0.as_str()))),
@@ -257,6 +289,7 @@ pub fn section(crates: &[CrateInfo], only: Option<&str>) -> Section {
         if members >= 6 && fanout * 2 >= members && fanout >= 5 && c.lines >= 2_000 {
             f.push(
                 Finding::new("high-fanout", Severity::Low, format!("Editing {} rebuilds {fanout} other workspace crates (of {members})", c.name), "rebuild-fan-out")
+                    .krate(&c.name)
                     .saw(format!("{fanout} workspace crates depend on {} directly or indirectly.", c.name))
                     .why("Every change to a crate near the bottom of the graph rebuilds everything above it, so its churn decides the cost of most edits.")
                     .fix(format!("Keep {} small and stable: move fast-changing code out of it, or split the parts few crates need into their own crate.", c.name)),

@@ -960,6 +960,60 @@ On a busy shared machine that is the point: it keeps a dozen builds from running
 
 `cargo faster setup` and `cargo faster machine` report a jobserver in the environment. `cargo faster timings` says a build was short of tokens when it ran well under `jobs` units at a time while units sat ready. To time the build itself, run it without the jobserver at a quiet moment: `env -u MAKEFLAGS -u CARGO_MAKEFLAGS -u MFLAGS cargo faster timings --run`.
 
+## Keeping a build fast
+
+A build that is fast today gets slow one dependency at a time: a core crate picks up a dependency on a transport crate, a second `syn` version slips in, and a crate everyone edits ends up on the critical path. Nobody decides any of these, and no review catches them, because each one looks small. Write the rules down where a tool can check them, and run the check in CI.
+
+### The config file
+
+`cargo faster` reads `cargo-faster.toml` at the workspace root, or the same keys under `[workspace.metadata.cargo-faster]` in the root `Cargo.toml` (not both). Every key is optional, and an unknown key is an error, so a typo doesn't silently turn a rule off.
+
+```toml
+# cargo-faster.toml
+hot = ["app-core", "app-server"]   # the crates people edit most
+
+[[accept]]                          # a finding that is there by design
+id = "big-crate"
+crate = "app-server"
+reason = "one crate per service; split tracked in #412"
+
+[[layer]]
+crates = "app-core"
+must_not_depend_on = ["app-http", "hyper", "tonic"]
+
+[budgets]
+cold_check_secs = 90
+edit_rebuild_secs = 12
+max_duplicate_versions = 4
+
+[deps]
+flag = ["openssl-sys"]
+allow_duplicates = ["windows-sys"]
+
+[env]
+cache = "kache"
+jobserver = "shared"
+```
+
+`hot` lists the workspace crates you edit most. `cargo faster rdeps` puts them first, and `cargo faster timings --hot` measures an edit to each. An `[[accept]]` entry silences one finding, matched by its `id` and optionally the `crate` and `target` it is about, and it needs a `reason`. Accepted findings still show in the summary as a count, so they aren't forgotten. `[env]` describes how the project builds: the compiler cache it expects, whether builds share a [jobserver](#shared-jobservers), and the `profile`, `features` and `nextest_profile` to measure with. [Using cargo faster](cargo-faster.md#the-configuration-file) lists every key.
+
+### Layering rules
+
+A layer rule says that some crates must not depend on others, directly or through anything in between. Domain crates must not depend on transport crates, and a library you publish must not depend on the application built on it. Each `[[layer]]` names its `crates` and what they `must_not_depend_on`, both as globs (`valet-*`).
+
+`cargo faster check` resolves the graph the way cargo does, with each crate's default features plus the ones in `env.features`, so an optional dependency only counts when a feature turns it on. It follows normal and build dependencies on every platform: a Windows-only dependency still breaks the rule on Linux. Dev-dependencies are skipped unless the rule sets `dev = true`. A violation shows the whole chain (`app-core → util → app-http`), and the fix is usually at its first link: move the code that needs the dependency up a layer, or put it behind a feature the lower crate doesn't enable. See [cutting a dependency edge](#cutting-a-dependency-edge).
+
+### Build budgets
+
+A budget turns "the build feels slower" into a number that fails CI. `cargo faster check --timings` measures:
+
+- `cold_check_secs`: a cold `cargo check --workspace` in a target directory of its own, with no cache hits from earlier builds (a `RUSTC_WRAPPER` cache still applies, as it does in CI).
+- `edit_rebuild_secs`: the build after an edit to each hot crate's public API (what `timings --edit` measures). Give one number for every hot crate, or a table of `crate = seconds`.
+- `critical_path_max_crates` and `no_new_critical_crates`: how many workspace crates [the critical path](#the-critical-path) of the cold check holds, and which ones may be there. A new crate on the path is usually a new dependency edge.
+- `max_duplicate_versions`: how many crates may be built in more than one version (it needs no build).
+
+Set each budget from a measurement on the machine CI runs on, plus about a quarter for noise. A budget that fails one run in ten gets raised until it means nothing. When a budget fails for a good reason, raise it in the same pull request that slows the build down, where a reviewer sees it.
+
 ## Case study: a 312 second check
 
 Here's a story from a real workspace: about forty crates of async Rust, implementing a chat bot that talks to Matrix servers using `matrix_sdk`, with `tokio`, `reqwest`, and `sqlx` underneath. It's the case that most of this guide grew out of, and it's a good example of why measuring first matters.
@@ -1138,5 +1192,6 @@ Everything in this guide can be done by hand with Cargo, `rustc`, and the tools 
 - `cargo faster deps` looks for [heavy features and duplicate versions](#dependencies-and-features), and [test features in normal builds](#keep-test-features-out-of-normal-builds).
 - `cargo faster tests` checks how your [test suite](#test-suites) runs.
 - `cargo faster rdeps` shows [rebuild fan-out](#rebuild-fan-out) and crates worth [splitting](#splitting-a-big-crate).
+- `cargo faster check` checks the rules in [the config file](#the-config-file): [layering rules](#layering-rules), flagged and duplicate dependencies, and with `--timings` the [build budgets](#build-budgets). It exits 1 when one is broken.
 
 See [Using cargo faster](cargo-faster.md) for how to read each one's output, with real examples. If you work with a coding agent, the same workflow is written down as a skill in [`skills/debug-slow-rust-builds`](../skills/debug-slow-rust-builds/SKILL.md).

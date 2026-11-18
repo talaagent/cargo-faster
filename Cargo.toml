@@ -28,6 +28,7 @@ thiserror = "2"
 toml = { version = "1.2", default-features = false, features = ["display", "parse", "serde", "std"] }
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 tempfile = "3"
+guppy = { version = "0.17.26", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -8,14 +8,30 @@ fn run(args: &[&str]) -> (Output, String) {
     run_with("", args)
 }
 
-#[allow(clippy::unwrap_used, reason = "a test helper")]
 fn run_with(lib: &str, args: &[&str]) -> (Output, String) {
+    run_in(lib, "", None, args)
+}
+
+/// Run in a fresh `tiny` crate: `lib` is its src/lib.rs, `manifest_extra`
+/// is appended to its Cargo.toml, and `config` is its cargo-faster.toml.
+#[allow(clippy::unwrap_used, reason = "a test helper")]
+fn run_in(
+    lib: &str,
+    manifest_extra: &str,
+    config: Option<&str>,
+    args: &[&str],
+) -> (Output, String) {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("Cargo.toml"),
-        "[package]\nname = \"tiny\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+        format!(
+            "[package]\nname = \"tiny\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n{manifest_extra}"
+        ),
     )
     .unwrap();
+    if let Some(c) = config {
+        std::fs::write(dir.path().join("cargo-faster.toml"), c).unwrap();
+    }
     std::fs::create_dir(dir.path().join("src")).unwrap();
     std::fs::write(dir.path().join("src/lib.rs"), lib).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_cargo-faster"))
@@ -65,6 +81,7 @@ fn help_says_cargo_faster_and_lists_global_options() {
         "rdeps",
         "timings",
         "check-cost",
+        "check",
     ] {
         let (out, all) = run(&[cmd, "--help"]);
         assert_eq!(out.status.code(), Some(0), "{cmd}: {all}");
@@ -76,6 +93,32 @@ fn help_says_cargo_faster_and_lists_global_options() {
     let (out, all) = run(&["--version"]);
     assert_eq!(out.status.code(), Some(0), "{all}");
     assert!(all.starts_with("cargo-faster "), "{all}");
+}
+
+#[test]
+fn check_reads_the_config_and_fails_on_broken_rules() {
+    // No configuration: nothing to break.
+    let (out, all) = run(&["check"]);
+    assert_eq!(out.status.code(), Some(0), "{all}");
+    assert!(all.contains("config") && all.contains("none"), "{all}");
+    // A typo is an error, not a silently ignored rule.
+    let (out, all) = run_in("", "", Some("[budgets]\ncold_check = 1\n"), &["check"]);
+    assert_eq!(out.status.code(), Some(2), "{all}");
+    assert!(all.contains("error[config]"), "{all}");
+    assert!(all.contains("cold_check"), "{all}");
+    let (out, all) = run_in("", "", Some("hot = [\"tinny\"]\n"), &["check"]);
+    assert_eq!(out.status.code(), Some(2), "{all}");
+    assert!(all.contains("tiny"), "{all}");
+    // A rule that holds, from [workspace.metadata.cargo-faster].
+    let meta = "\n[workspace.metadata.cargo-faster]\nhot = [\"tiny\"]\n\
+                [[workspace.metadata.cargo-faster.layer]]\ncrates = \"tiny\"\n\
+                must_not_depend_on = [\"serde*\"]\n";
+    let (out, all) = run_in("", meta, None, &["check", "--format", "github"]);
+    assert_eq!(out.status.code(), Some(0), "{all}");
+    assert!(!all.contains("::error"), "{all}");
+    let (out, all) = run(&["timings", "--hot"]);
+    assert_eq!(out.status.code(), Some(2), "{all}");
+    assert!(all.contains("lists none"), "{all}");
 }
 
 #[test]

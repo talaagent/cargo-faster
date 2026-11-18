@@ -1,0 +1,4 @@
+[workspace]
+members = ["app-cli", "app-core", "valet-io", "valet-ok", "tala-core"]
+exclude = ["vendor"]
+resolver = "2"

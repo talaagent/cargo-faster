@@ -48,6 +48,13 @@ pub struct Finding {
     pub fix: String,
     /// The guide section that explains it.
     pub guide: String,
+    /// The crate it is about, when it is about one (`[[accept]]` matches
+    /// on it).
+    #[serde(rename = "crate", skip_serializing_if = "Option::is_none")]
+    pub krate: Option<String>,
+    /// The target or unit it is about, when it is about one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
 }
 
 impl Finding {
@@ -67,7 +74,23 @@ impl Finding {
             why: String::new(),
             fix: String::new(),
             guide: format!("{GUIDE_URL}#{anchor}"),
+            krate: None,
+            target: None,
         }
+    }
+
+    /// Set the crate it is about.
+    #[must_use]
+    pub fn krate(mut self, s: impl Into<String>) -> Self {
+        self.krate = Some(s.into());
+        self
+    }
+
+    /// Set the target or unit it is about.
+    #[must_use]
+    pub fn target(mut self, s: impl Into<String>) -> Self {
+        self.target = Some(s.into());
+        self
     }
 
     /// Set what we saw.
@@ -160,6 +183,10 @@ pub struct Report {
     /// Checks that could not run, and why.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<Fact>,
+    /// Findings the configuration's `[[accept]]` entries suppressed: not
+    /// in the sections, the summary, `== next` or `--fail-on`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub accepted: Vec<crate::config::Accepted>,
 }
 
 /// The `--json` document: the report, with the schema and tool versions
@@ -263,13 +290,20 @@ impl Report {
                 let _ = writeln!(out, "  {}", f.title);
             }
         }
-        if self.sections.len() > 1 {
+        if self.sections.len() > 1 || !self.accepted.is_empty() {
             let _ = writeln!(out, "\n{}", paint("1", "== summary"));
             if actionable == 0 {
                 let _ = writeln!(out, "  no findings worth acting on");
             }
             for f in all.iter().filter(|f| f.severity > Severity::Info) {
                 let _ = writeln!(out, "  [{}] {}", f.severity.name(), f.title);
+            }
+            if !self.accepted.is_empty() {
+                let _ = writeln!(
+                    out,
+                    "  {} accepted (by design, see `[[accept]]` in the configuration; --json lists them)",
+                    self.accepted.len()
+                );
             }
             if let Some(next) = self.next_command() {
                 let _ = writeln!(out, "\n{}", paint("1", "== next"));
@@ -354,6 +388,7 @@ mod tests {
             workspace: None,
             sections: vec![a, b],
             skipped: vec![],
+            accepted: vec![],
         };
         assert_eq!(
             r.next_command().as_deref(),
@@ -385,6 +420,7 @@ mod tests {
             workspace: Some("/w".into()),
             sections: vec![s],
             skipped: vec![],
+            accepted: vec![],
         };
         let json = r.to_json();
         assert!(json.starts_with("{\n  \"schema_version\": 1,\n  \"cargo_faster_version\": \""));
@@ -419,6 +455,7 @@ mod tests {
             workspace: None,
             sections: vec![m, d],
             skipped: vec![],
+            accepted: vec![],
         };
         assert_eq!(r.findings().len(), 1);
         assert_eq!(r.conditions().len(), 1);
@@ -455,6 +492,7 @@ mod tests {
             workspace: Some("/w".into()),
             sections: vec![s],
             skipped: vec![],
+            accepted: vec![],
         };
         let text = r.render_text(false);
         assert!(text.find("High thing").unwrap() < text.find("Low thing").unwrap());
