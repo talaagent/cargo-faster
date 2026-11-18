@@ -3,6 +3,10 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
     flake-parts = {
       url = "github:hercules-ci/flake-parts";
       inputs.nixpkgs-lib.follows = "nixpkgs";
@@ -20,13 +24,25 @@
 
       perSystem =
         {
-          pkgs,
+          system,
           lib,
           self',
           ...
         }:
+        let
+          pkgs = import inputs.nixpkgs {
+            inherit system;
+            overlays = [ (import inputs.rust-overlay) ];
+          };
+          rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+          rustPlatform = pkgs.makeRustPlatform {
+            cargo = rustToolchain;
+            rustc = rustToolchain;
+          };
+        in
         {
-          packages.cargo-faster = pkgs.rustPlatform.buildRustPackage {
+          _module.args.pkgs = pkgs;
+          packages.cargo-faster = rustPlatform.buildRustPackage {
             pname = "cargo-faster";
             version = (lib.importTOML ./Cargo.toml).workspace.package.version;
             src = lib.fileset.toSource {
@@ -55,17 +71,13 @@
 
           devShells.default = pkgs.mkShell {
             packages = [
-              pkgs.cargo
-              pkgs.rustc
-              pkgs.clippy
-              pkgs.rustfmt
-              pkgs.rust-analyzer
+              rustToolchain
               pkgs.cargo-nextest
               pkgs.cargo-deny
               # summarize, crox and flamegraph for self-profiles.
               pkgs.measureme
             ];
-            RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
+            RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
           };
 
           formatter = pkgs.nixfmt;
