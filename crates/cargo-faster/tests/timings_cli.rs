@@ -56,3 +56,43 @@ fn timings_edit_dry_run() {
     );
     assert!(!root.join("target").exists(), "a dry run built something");
 }
+
+/// `-- --workspace` (copied from a gate command) isn't passed twice.
+#[test]
+fn timings_run_workspace_after_dashes_dry_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"tiny_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::create_dir(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), "pub fn x() {}\n").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_cargo-faster"))
+        .args([
+            "faster",
+            "--dry-run",
+            "timings",
+            "--run",
+            "--nice",
+            "0",
+            "--",
+            "--workspace",
+            "--all-targets",
+        ])
+        .current_dir(root)
+        .env("CARGO_TARGET_DIR", root.join("target"))
+        .output()
+        .unwrap();
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        all.contains("cargo check --timings --workspace --all-targets"),
+        "{all}"
+    );
+    assert_eq!(all.matches("--workspace").count(), 1, "{all}");
+}
